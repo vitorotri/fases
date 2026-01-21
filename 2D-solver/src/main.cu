@@ -1,0 +1,679 @@
+#include <iostream>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
+#include <ctime>
+#include <cstring>
+#include "functions.cuh"
+//#include <cuda_runtime.h>
+
+int main(int argc, char *argv[]){
+	float t_max, dt, h, f_max; // max time, time-step, grid spacing, max frequency
+	float *p0, *u0, *v0, *p1, *u1, *v1, *p2, *u2, *v2; // host arrays
+	float *d_p0, *d_u0, *d_v0, *d_p1, *d_u1, *d_v1, *d_p2, *d_u2, *d_v2, *c_rl, *dd; // device arrays
+	float rho, c, Temp; // density, speed of sound, temperature
+	float Lx, Ly; // domain dimensions
+    int Nx, Ny, n; // number of points in x, y, time step
+    
+    // timing
+    clock_t tic, toc;
+    double elapsed_time;
+    
+    // domain variables
+    t_max = 0.02f; // max time [s]
+    f_max = 1000.0f; // [Hz]
+    h = 0.005f; // uniform grid spacing [m]
+    n = 0; // initial time-step
+    
+    // ---------------------- load OBJ/PLY/XYZ/etc file and create scene ---------------------
+    
+    system("rm output/pressure.bin output/oid.bin output/S.bin output/header.txt");
+    
+    if (argc < 2) {
+        printf("Usage: %s <filename>\n", argv[0]);
+        return 1;
+    }
+    char *path = argv[1];
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        perror("Error opening file");
+        return -1;
+    }
+    int file_opt = 0; // o for OBJ, 1 for VOX/PLY (for now)
+    float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
+    float *d_S = NULL;
+    float tol = 3.0f*h; // tolerance
+
+    float *R = NULL; // surfaces reflection coefficient
+    float *d_R = NULL;
+    float *T = NULL; // barrier transmission coefficient
+    float *d_T = NULL;
+    float *th = NULL; // barrier thickness
+    float *d_th = NULL;
+    uint8_t *oid = NULL; // for surface attribution
+    uint8_t* d_oid = NULL;
+    
+    // process OBJ
+   	if (ends_with_dotobj(path)){
+    	//const char *path = "TST2.obj";  // your 2D OBJ like in the prompt
+    	Scene2D sc;
+    	if(!parse_obj2d(path, &sc)) return 1;
+    	build_sdf(&sc, h, &Nx, &Ny, &Lx, &Ly, &S);
+
+		
+		FILE *file_S = fopen("output/S.bin", "wb");  // Open file for writing in binary mode
+    	if (file_S) {
+        	fwrite(S, sizeof(float), Nx*Ny, file_S); // Write array to file
+        	fclose(file_S);
+    	}
+		/*
+		// sanity test for S
+		for (int i = 0; i < Nx*Ny; i++){
+			if (isnan(S[i])) {
+            	printf("[!] WARNING: S[%d] is NaN\n", i);
+            }
+		}
+		*/
+		/*
+		// circle TST (invert signed distance field if using single circle polyline?)
+		for (int i = 0; i < Nx*Ny; i++){	
+			S[i] *= -1.0f;
+		}
+		*/
+		if(!build_oid_dense_cpu(sc, S, Nx, Ny, h, tol, &oid)){
+    		fprintf(stderr,"Failed to build OID map\n");
+    		return 1;
+		}
+		/*
+		// sanity test for oid
+		for (int i = 0; i < Nx*Ny; i++){
+            printf("oid[%d] = %u\n", i, oid[i]);
+		}
+		*/
+		FILE *file_oid = fopen("output/oid.bin", "wb");  // Open file for writing in binary mode
+    	if (file_oid) {
+        	fwrite(oid, sizeof(uint8_t), Nx*Ny, file_oid); // Write array to file
+        	fclose(file_oid);
+    	}
+		
+		// copy oid[] to device
+		cudaMalloc(&d_oid, (size_t)Nx*Ny*sizeof(uint8_t));
+		cudaMemcpy(d_oid, oid, (size_t)Nx*Ny, cudaMemcpyHostToDevice);
+    	
+		// get nObjects from scene
+    	int nObjects = scene_object_count(sc); // with boundary
+		std::vector<std::string> names;
+		scene_object_names(sc, names);
+		
+		// allocate array of reflection coefficients per material/obj
+		R = new float[nObjects-1]; // exclude boundary
+		
+		// allocate array of transmission coefficients per material/obj
+		T = new float[nObjects-1]; // exclude boundary
+		
+		// allocate array of thickness per barrier
+		th = new float[nObjects-1]; // exclude boundary
+    	
+    	printf("\n[OK] Scene processing\n");
+    	printf("\nDomain info:\n\nLx = %.6f m Ly = %.6f m\nNx = %d Ny = %d\n", Lx, Ly, Nx, Ny);
+    	
+    	int counter_obj = 1;
+    	float R_val, T_val, th_val;
+    	int obj_typ;
+    	while(counter_obj < nObjects){
+    		printf("\nAttribute object's type for %s\n", names[counter_obj].c_str());
+    		printf("\n(1) Regular obstacle\n(2) Barrier\n(3) Medium interface\n\n");
+    		scanf("%d", &obj_typ);
+    		switch(obj_typ){
+    			case 1:
+    				printf("\nEnter with the R value for the obstacle %s\n\n", names[counter_obj].c_str());
+    				scanf("%f", &R_val);
+    				R[counter_obj] = R_val;
+    				T[counter_obj] = 0.0f;
+    				th[counter_obj] = 0.0f;
+    				break;
+    			case 2:
+    				printf("\nEnter with the R value for object %s\n\n", names[counter_obj].c_str());
+    				scanf("%f", &R_val);
+    				R[counter_obj] = R_val;
+    				printf("\nEnter with the T value for the object %s\n\n", names[counter_obj].c_str());
+    				scanf("%f", &T_val);
+    				T[counter_obj] = T_val;
+    				check_energy_coeffs(R_val,T_val); // warning
+    				printf("\nEnter the thickness value for the object %s\n\n", names[counter_obj].c_str());
+    				scanf("%f", &th_val);
+    				th[counter_obj] = th_val;
+    				break;
+    			case 3:
+    				//
+    				break;
+    		}
+    		counter_obj += 1;
+    	}
+    	
+     	// allocate on device and then copy, signed distance field, Reflection, Transmission, barrier thickness
+    	cudaMalloc(&d_S, (size_t)Nx*Ny*sizeof(float));
+    	cudaMemcpy(d_S, S, (size_t)Nx*Ny*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_R, nObjects*sizeof(float));
+		cudaMemcpy(d_R, R, nObjects*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_T, nObjects*sizeof(float));
+		cudaMemcpy(d_T, T, nObjects*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_th, nObjects*sizeof(float));
+		cudaMemcpy(d_th, th, nObjects*sizeof(float), cudaMemcpyHostToDevice);
+
+    	scene_free(&sc);
+    }
+    // process PLY/VOX test
+    else {
+    	return -1;
+    }
+    
+    // free device temp arrays for obj_id
+	//cudaFree(d_faces); cudaFree(d_obj_id); cudaFree(d_Nb);
+    
+    // ---------------------------------------------------------------------------------------
+    
+    int N = Nx*Ny;
+
+    // --------------- environmental values --------------------------
+	
+	// should to to config later
+	
+	float R_spec = 287.05; // specific gas constant for air [J] [kg]^-1 [K]^-1
+	float gamma = 1.4; // specific heat ratio for air
+	
+	rho = 1.225; // average sea level density for air [kg/m3]. For dry air, proportional to p0/R_spec*T
+	Temp = 288.15; // temperature [K]
+	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
+	// c = sqrt(K/rho) in case of liquids
+    
+    printf("\nc = %f m/s\n",c);
+    
+    // ---------------------------------------------------------------------
+
+    // Allocate remaining host memory and initilize to 0.0f
+    p0 = new float[N](); // pressure deviations from p0
+    u0 = new float[N](); // x component of particle velocity 
+    v0 = new float[N](); // y component of particle velocity 
+
+	float C_CFL = 0.3; // Courant number: pick values < 0.5 (not equal to)
+	dt = C_CFL*h/c; // Courant-Friedrichs-Lewy condition
+	printf("\ndt = %f\n", dt);
+	
+	// Check if Nyquist-Shannon Theorem is satisfied
+	float fs = 1/dt; // sampling frequency
+	if (!(fs >= 2*f_max)){
+		printf("[!] Sampling frequency = %f, too low, aborting...\n\n",fs);
+		return -1;
+	}
+	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_max)
+	float lambda = c/f_max;
+	printf("lambda = %f\n",lambda);
+	if (lambda / h < 15.0f){
+		printf("[!] Resolution too low, aborting...\n\n");
+		return -1;
+	}
+	
+	int Nt = (int) (t_max/dt) + 1; // number of iterations
+	
+	printf("\nNt = %d\n\n",Nt);
+
+    // Allocate device memory
+    if (cudaMalloc(&d_p0, N*sizeof(float)) != cudaSuccess
+		|| cudaMalloc(&d_u0, N*sizeof(float)) != cudaSuccess
+		|| cudaMalloc(&d_v0, N*sizeof(float)) != cudaSuccess){
+    	printf("[!] CUDA error allocating device memory\n");
+    	return -1;
+	}
+	
+	// ----- Fields initialization (sources and receiver) -----
+	
+	int opt;
+	printf("\nChoose pulse type:\n\n 1) Delta\n 2) Gaussian\n 3) Top-hat\n\n");
+	scanf("%d",&opt);
+	
+	// for Lx = 4.07, Ly = 12.03 [m]
+	int src_x = (int)(0.5f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
+	int rec_x0 = (int)(0.75f*Nx); int rec_y0 = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
+	
+	float amp = 100.0f; // amplitude
+	if (opt == 1){
+		// Delta pulse
+		p0[flat(src_x, src_y, Nx)] = amp; // [Pa]
+		//p0[flat((int)(0.75f*Nx), src_y, Nx)] = amp; // 2nd source
+		/*
+		// Directional source
+		p0[flat(src_x+1, src_y+1, Nx)] = amp; // without pressure scheme seems not TVD
+		u0[flat(src_x+1, src_y, Nx)] = 0.04;
+		v0[flat(src_x, src_y+1, Nx)] = 0.04;
+		*/
+		// Delta distribution
+		//delta(p0, 1.0/2.0, src_x, src_y, Nx, Ny, 390.0);
+		
+		/*
+		// Plane wave
+		int src_x_0 = (int)(0.03*Nx);
+		int src_x_1 = (int)(0.08*Nx);
+		
+		//for (int j = (int)(0.05*Ny); j < Ny-(int)(0.05*Ny); j++){ // depends on resolution
+		for (int j = 3; j < Ny-3; j++){
+			for (int i = src_x_0; i <= src_x_1; i++){
+				u0[flat(i,j,Nx)] = amp;
+				p0[flat(i,j,Nx)] = amp;
+			}
+		}
+		*/
+		
+	}
+	else if (opt == 2){
+		// Gaussian profile
+		//amp = 1.0; // 125
+		
+ 		float sigma = 1.5; // 2
+		float r2;
+		for (int i = 0; i < Nx; i++){
+			for (int j = 0; j < Ny; j++){
+            	r2 = (i - src_x)*(i - src_x) + (j - src_y)*(j - src_y);
+				p0[flat(i,j,Nx)] = amp*exp(-r2 / (2*sigma*sigma));
+			}
+		}
+		
+		
+	}
+	else {
+		// Top-hat
+		int ratio = 200;
+		int ii, jj;
+		for (int i = 0; i < Nx; i++){
+			for (int j = 0; j < Ny; j++){
+				ii = i - src_x;
+				jj = j - src_y;
+				if (sqrt(ii*ii + jj*jj) <= max(Nx,Ny)/ratio){
+					p0[flat(i,j,Nx)] = 150.0;
+				}
+			}
+		}
+	}
+	
+	// ----- End Field initialization -----
+	
+	// Kernel launch parameters
+	dim3 TP(8,8); // multiples of 32, max is 1024 (TP.x * TP.y <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
+	dim3 BP((Nx + TP.x - 1)/TP.x,(Ny + TP.y - 1)/TP.y); // BLOCKS Per Grid
+	
+	// Copy data to device
+	// Can do outside main loop since it is a one step system with in-place update
+    if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
+    	printf("[!] CUDA error allocating device memory\n");
+    	return -1;
+    }
+	
+	// ------------------ kernel options --------------------
+	
+	int kern;
+	float dm;
+	printf("\nChoose an option for time integration:\n\n 1) Godunov + Euler\n 2) WENO3 + SSP-RK3\n\n");
+	scanf("%d", &kern);
+	
+	float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well, depite below machine precision for float, so results may be wrong even with convergence!!!
+	
+	p1 = new float[N](); // sound pressure
+    u1 = new float[N](); // x component of particle velocity 
+    v1 = new float[N](); // y component of particle velocity
+	
+	cudaMalloc(&d_p1, N*sizeof(float));
+	cudaMalloc(&d_u1, N*sizeof(float));
+	cudaMalloc(&d_v1, N*sizeof(float));
+		
+	cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_v1, v1, N*sizeof(float), cudaMemcpyHostToDevice);
+	
+	dm = 6*N*sizeof(float);
+	
+	if (kern == 2){
+		// auxiliar memory arrays (for SSP-RK2)
+		
+    	p2 = new float[N](); // sound pressure
+    	u2 = new float[N](); // x component of particle velocity 
+    	v2 = new float[N](); // y component of particle velocity
+		
+    	cudaMalloc(&d_p2, N*sizeof(float));
+		cudaMalloc(&d_u2, N*sizeof(float));
+		cudaMalloc(&d_v2, N*sizeof(float));
+		
+		cudaMemcpy(d_p2, p2, N*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMemcpy(d_u2, u2, N*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMemcpy(d_v2, v2, N*sizeof(float), cudaMemcpyHostToDevice);
+			
+		cudaMallocManaged(&c_rl, 6*sizeof(float)); // coefficients
+		cudaMallocManaged(&dd, 2*sizeof(float)); // array
+			
+		c_rl[flat(0,0,6)] = 1.5; c_rl[flat(0,1,6)] = -0.5;
+		c_rl[flat(1,0,6)] = 0.5; c_rl[flat(1,1,6)] = 0.5;
+		c_rl[flat(2,0,6)] = -0.5; c_rl[flat(2,1,6)] = 1.5;
+			
+		dd[0] = 2.0/3.0; dd[1] = 1.0/3.0;
+		
+		dm = (6*N + 6 + 2)*sizeof(float);
+
+	}
+	
+	// ------------------------------------------------------
+	
+	cudaError_t err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("[!] CUDA error: %s\n", cudaGetErrorString(err));
+	}
+	printf("\n[OK] Memory to allocate in device is %f GB\n", dm/(1000000000));
+	
+	//printf("float is %zu", sizeof(float));
+	int anim_step = (int)(0.008*Nt);
+	int frames = Nt/anim_step; // make denominator smaller for more frames
+	printf("\n[OK] anim_step = %d\n\n",anim_step);
+	float anim_s = (float)frames*N*sizeof(float); // animation size in bytess
+	
+	if ((anim_s/1000000000.0) > 5.2){
+		printf("\n[!] Memory to animate is %f, larger than 5.2 GB, exiting...\n\n\n",anim_s/1000000000.0);
+		return -1;
+	}
+	
+	// Can handle much more memory if save animation in chuncks and assemble together:
+	// e.g., the last sound pressure field is the initial field for the next instant in time.
+	printf("\n[OK] Memory to animate is %f GB\nProceed?\n\n 1) Yes\n 2) No\n\n", anim_s/(1000000000));
+	scanf("%d", &opt);
+	if (opt != 1) return -1;
+	
+	int lim_ID = 0; // limiter_ID
+	if (kern != 2){
+		printf("\nType a limiter option then press ENTER:\n\n 0) no slope\n 1) central\n 2) minmod\n 3) superbee\n 4) MC\n 5) van Leer\n 6) van Albada\n\n");
+		scanf("%d", &lim_ID);
+	}
+	
+	float TV_p_, TV_u_, TV_v_, TV_0, TV_1;
+	
+	// compute initial TVs
+	
+	TV_p_ = TV(p0, Nx, Ny, h);
+	TV_u_ = TV(u0, Nx, Ny, h);
+	TV_v_ = TV(v0, Nx, Ny, h);
+	
+	TV_0 = TV_p_ + TV_u_ + TV_v_;
+	
+	printf("\n[OK] Will now start %d iterations. Proceed?\n\n1) Yes\n2) No\n\n", Nt);
+	scanf("%d", &opt);
+	if (opt != 1) return -1;
+	
+	// open BIN file for writing pressure at single receiver
+	FILE *fptr = fopen("output/pressure.bin", "ab");
+	if (fptr == NULL) {
+    	printf("[!] Error opening pressure.bin file!\n");
+    	exit(1);
+	}
+	
+	//Nt = 100; // for testing
+	
+	// -------- oscillating source (take proper per if kern == 2) --------
+	/*
+	float *p_osc;
+	float freq_osc = 950.0;
+	p[flat(src_x, src_y, Nx)] = 0.0;
+	p_osc = (float*)malloc(Nt*sizeof(float)); // timely sound pressure
+	for (int nn = 0; nn < Nt; nn++){
+		//p_osc[nn] = 10000.0*exp(-0.5*freq_osc*n*dt)*sin(2*M_PI*freq_osc*nn*dt); // cos(omega*t), omega = 2*pi*f
+		p_osc[nn] = 10000.0*sin(2*M_PI*freq_osc*nn*dt); // cos(omega*t), omega = 2*pi*f
+	}
+	*/
+	// -------- end oscillating source --------
+	
+	int pbin_size = 0; // for plotting animation correctly
+	
+	/*
+	 *
+	 *
+	 * MAIN LOOP START
+	 *
+	 *
+	 */
+	
+	printf("\n[OK] Simulation start\n\n");
+	tic = clock();
+
+	if (kern == 1){ // Godunov + Euler
+		if (file_opt == 0){ // OBJ
+			while(n < Nt){
+			// Launch Euler kernel
+			
+			kernel_Euler<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S);
+			
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th);
+			
+			// exchange arrays
+			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+			cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+			cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+			
+			cudaDeviceSynchronize();
+			
+			print_progress(n, Nt, 50);
+	
+			// Copy result back to host
+			cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+			
+			// write to file
+			if (n % anim_step == 0){
+				fwrite(p1, sizeof(float), N, fptr);
+        		fflush(fptr);  // Ensure data is written to disk
+        		pbin_size += 1;
+        	}
+			
+			n += 1; // update time-step
+		}
+	
+		// Copy final results back to host (for computing TVs) ---------> comment if using serial code
+		
+		cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(u1, d_u1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(v1, d_v1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		
+		TV_p_ = TV(p1, Nx, Ny, h);
+		TV_u_ = TV(u1, Nx, Ny, h);
+		TV_v_ = TV(v1, Nx, Ny, h);
+		
+		TV_1 = TV_p_ + TV_u_ + TV_v_;
+		printf("\n\nTV_0 = %f\n", TV_0);
+		printf("\nTV_1 = %f\n", TV_1);
+		
+		is_TVD(TV_0, TV_1);
+	
+    	// Free memory
+    	delete[] p0, delete[] u0, delete[] v0;
+    	delete[] p1, delete[] u1, delete[] v1;
+    	cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1);
+    	cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2);
+    	
+    	}
+    }
+    else { // WENO3
+    	if (file_opt == 0){ // OBJ
+			while(n < Nt){
+				/*
+				// counter pressure for directive source
+				// be mindfull as this can work like a local obstacle, so reflections may arise
+				if (n < 10){
+					p0[flat(src_x-3, src_y-3, Nx)] = 0.0;
+					p0[flat(src_x-2, src_y-2, Nx)] = 0.0;
+					p0[flat(src_x-1, src_y-1, Nx)] = 0.0; 
+					
+					p0[flat(src_x-1, src_y, Nx)] = 0.0;
+					p0[flat(src_x, src_y-1, Nx)] = 0.0;
+					p0[flat(src_x-2, src_y, Nx)] = 0.0;
+					p0[flat(src_x, src_y-2, Nx)] = 0.0;
+					p0[flat(src_x-3, src_y, Nx)] = 0.0;
+					p0[flat(src_x, src_y-3, Nx)] = 0.0;
+					
+					cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
+				}
+				*/
+				
+				// Launch WENO3 kernel + SSP-RK2
+				
+				// (0)
+				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S);	
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th);
+				
+				// (1)
+				kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);	
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_T, d_th);
+				
+				// (2)
+				kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_T, d_th);
+
+				// exchange arrays
+				cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+				cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+				cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+				
+				// sync
+				cudaDeviceSynchronize();
+				
+				print_progress(n, Nt, 50);
+		
+				// Copy result back to host
+				cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+				
+				// write to file
+				if (n % anim_step == 0){
+					fwrite(p1, sizeof(float), N, fptr);
+        			fflush(fptr);  // Ensure data is written to disk
+        			pbin_size += 1;
+        		}
+
+				n += 1; // update time-step
+			}
+		}
+		else if (file_opt == 1){ // VOX / PLY
+			while(n < Nt){
+				/*
+				// counter pressure for directive source
+				// be mindfull as this can work like a local obstacle, so reflections may arise
+				if (n < 10){
+					p[flat(src_x-3, src_y-3, Nx)] = 0.0;
+					p[flat(src_x-2, src_y-2, Nx)] = 0.0;
+					p[flat(src_x-1, src_y-1, Nx)] = 0.0; 
+					
+					p[flat(src_x-1, src_y, Nx)] = 0.0;
+					p[flat(src_x, src_y-1, Nx)] = 0.0;
+					p[flat(src_x-2, src_y, Nx)] = 0.0;
+					p[flat(src_x, src_y-2, Nx)] = 0.0;
+					p[flat(src_x-3, src_y, Nx)] = 0.0;
+					p[flat(src_x, src_y-3, Nx)] = 0.0;
+					
+					cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
+				}
+				*/
+				
+				// Launch WENO3 kernel + SSP-RK2
+				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S);
+				
+				kernel_apply_BC_vox<<<BP, TP>>>(d_u1, d_S, Nx, Ny, -1.0f);
+				kernel_apply_BC_vox<<<BP, TP>>>(d_v1, d_S, Nx, Ny, -1.0f);
+				kernel_apply_BC_vox<<<BP, TP>>>(d_p1, d_S, Nx, Ny, 1.0f);
+				
+				kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);
+				
+				kernel_apply_BC_vox<<<BP, TP>>>(d_u2, d_S, Nx, Ny, -1.0f);
+				kernel_apply_BC_vox<<<BP, TP>>>(d_v2, d_S, Nx, Ny, -1.0f);
+				kernel_apply_BC_vox<<<BP, TP>>>(d_p2, d_S, Nx, Ny, 1.0f);
+				
+				kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);
+				
+				kernel_apply_BC_vox<<<BP, TP>>>(d_u1, d_S, Nx, Ny, -1.0f);
+				kernel_apply_BC_vox<<<BP, TP>>>(d_v1, d_S, Nx, Ny, -1.0f);
+				kernel_apply_BC_vox<<<BP, TP>>>(d_p1, d_S, Nx, Ny, 1.0f);
+				
+				// exchange arrays
+				cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+				cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+				cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+				
+				cudaDeviceSynchronize();
+				
+				print_progress(n, Nt, 50);
+		
+				// Copy result back to host
+				cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+				
+				// write to file
+				if (n % anim_step == 0){
+					fwrite(p1, sizeof(float), N, fptr);
+        			fflush(fptr);  // Ensure data is written to disk
+        			pbin_size += 1;
+        		}
+        		
+				n += 1; // update time-step
+			}
+		}
+		
+		// Copy final results back to host (for computing TVs)
+		cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(u1, d_u1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(v1, d_v1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		
+		TV_p_ = TV(p1, Nx, Ny, h);
+		TV_u_ = TV(u1, Nx, Ny, h);
+		TV_v_ = TV(v1, Nx, Ny, h);
+		
+		TV_1 = TV_p_ + TV_u_ + TV_v_;
+		printf("\n\nTV_0 = %f\n", TV_0);
+		printf("\nTV_1 = %f\n", TV_1);
+		
+		is_TVD(TV_0, TV_1);
+	
+    	// Free host memory
+    	delete[] p0, delete[] u0, delete[] v0;
+    	delete[] p1, delete[] u1, delete[] v1;
+    	delete[] p2, delete[] u2, delete[] v2;
+    	
+    	// Free device memory
+    	cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0);
+    	cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1);
+    	cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2);
+    	cudaFree(c_rl); cudaFree(dd);
+    	
+    }
+    
+    toc = clock();
+    
+    elapsed_time = ((double)(toc - tic)/60.0)/CLOCKS_PER_SEC; // in minutes
+    printf("\n[OK] Simulation time: %f min \n\n", elapsed_time); 
+    
+    FILE *header; // file for data output
+	header = fopen("output/header.txt", "w");
+	if (header != NULL){
+    	fprintf(header, "%d %d %d %f %f %d %d %f %s %f %d\n", Nx, Ny, Nt, Lx, Ly, pbin_size, anim_step, dt, argv[1], h, (int)(tol/h));
+    	fclose(header);
+    }
+    
+    printf("\n[OK] Printed header.txt for plot.py\n");
+    
+    fclose(fptr);
+    fclose(fp);
+    
+    delete[] S;
+    delete[] oid;
+    delete[] R;
+    
+    cudaFree(d_S);
+    cudaFree(d_oid);
+    cudaFree(d_R);
+    
+    printf("\n[OK] Freed arrays\n");  
+    
+    printf("\n[OK] Finished.\n\n"); 
+    
+    return 0;
+}

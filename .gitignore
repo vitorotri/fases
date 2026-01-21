@@ -1,0 +1,19 @@
+# Build
+build/
+
+# Runtime scratch
+tmp/
+output/
+
+# Media outputs
+*.mp4
+*.avi
+
+# CUDA artifacts
+*.ptx
+*.cubin
+*.fatbin
+
+# Big arrays
+
+*.bin
