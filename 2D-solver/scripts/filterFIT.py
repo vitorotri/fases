@@ -4,10 +4,18 @@ from scipy.optimize import least_squares
 from scipy.signal import hilbert
 
 # ----------------------------
-# Input: octave-band centers and |R| (0..1)
+# Input: octave-band centers, |R| (0..1) and cuttof frequency
 # ----------------------------
 f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
 Rmag_oct = np.array([0.95, 0.90, 0.80, 0.65, 0.50, 0.45, 0.55, 0.70], dtype=float)
+f_cutoff = 1200.0 # Hz
+
+# ----------------------------
+# Effective cutoff masking
+# ----------------------------
+mask = f_oct <= f_cutoff
+f_oct = f_oct[mask]
+Rmag_oct = Rmag_oct[mask]
 
 # ----------------------------
 # Model order (keep small to start!)
@@ -83,10 +91,10 @@ x0 = np.hstack([Rinf0, A0, zeta0, B0, C0, alpha0, beta0])
 
 # Bounds: stability/causality + |Rinf|<=1
 eps = 1e-6
-lb = np.hstack([-1.0, -np.inf*np.ones(K), eps*np.ones(K),
+lb = np.hstack([-1.0, -np.inf*np.ones(K), eps*np.ones(K), # zeta_k ≥ eps
                 -np.inf*np.ones(L), -np.inf*np.ones(L), eps*np.ones(L), eps*np.ones(L)])
 ub = np.hstack([ 1.0,  np.inf*np.ones(K), np.inf*np.ones(K),
-                 np.inf*np.ones(L),  np.inf*np.ones(L), np.inf*np.ones(L), np.inf*np.ones(L)])
+                 np.inf*np.ones(L),  np.inf*np.ones(L), np.inf*np.ones(L), np.inf*np.ones(L)]) # alpha_l ≥ eps, beta_l ≥ eps
 
 # Passivity grid (coarse but useful)
 f_pass = np.logspace(np.log10(f_fit.min()), np.log10(f_fit.max()), 450)
@@ -132,7 +140,7 @@ plt.ylim(0, 1.05); plt.grid(True, which="both")
 plt.xlabel("Frequency [Hz]"); plt.ylabel("|R|"); plt.legend()
 
 plt.figure()
-plt.semilogx(f_pass, np.abs(R_model(w_pass, Rinf, A, zeta, B, C, alpha, beta)),c='g')
+plt.semilogx(f_pass, np.abs(R_model(w_pass, Rinf, A, zeta, B, C, alpha, beta)),color='lime')
 plt.axhline(1.0, linewidth=1, c='k')
 plt.ylim(0, 1.2); plt.grid(True, which="both")
 plt.xlabel("Frequency [Hz]"); plt.ylabel("|R_fit| (passivity check)")
