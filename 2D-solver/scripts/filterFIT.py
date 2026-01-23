@@ -20,7 +20,7 @@ Rmag_oct = Rmag_oct[mask]
 # ----------------------------
 # Model order (keep small to start!)
 # ----------------------------
-K = 2  # real poles
+K = 3  # real poles
 L = 2  # complex pairs
 
 # ----------------------------
@@ -108,7 +108,7 @@ res1 = least_squares(
     args=(K, L, w_fit, R_target, None, 0.0),
     method="trf",
     max_nfev=800, ftol=1e-7, xtol=1e-7, gtol=1e-7,
-    verbose=2
+    verbose=0
 )
 
 # ----------------------------
@@ -119,17 +119,24 @@ res2 = least_squares(
     args=(K, L, w_fit, R_target, w_pass, 30.0),
     method="trf",
     max_nfev=1200, ftol=1e-7, xtol=1e-7, gtol=1e-7,
-    verbose=2
+    verbose=0
 )
 
 Rinf, A, zeta, B, C, alpha, beta = unpack(res2.x, K, L)
 
-print("\n=== Parameters ===")
-print(f"R_inf = {Rinf:.8g}")
+#print(f"R_inf = {Rinf:.8g}")
+print("# R_inf K L")
+print(Rinf, K, L)
+# do not mistake those k's with 3rd dimension indexes in 3D scheme
+print("# A_k zeta_k")
 for k in range(K):
-    print(f"A{k+1}={A[k]:.8g}, zeta{k+1}={zeta[k]:.8g}")
+    #print(f"A{k+1}={A[k]:.8g}, zeta{k+1}={zeta[k]:.8g}")
+    print(A[k], zeta[k])
+print("# B_l C_l alpha_l beta_l")
 for l in range(L):
-    print(f"B{l+1}={B[l]:.8g}, C{l+1}={C[l]:.8g}, alpha{l+1}={alpha[l]:.8g}, beta{l+1}={beta[l]:.8g}")
+    #print(f"B{l+1}={B[l]:.8g}, C{l+1}={C[l]:.8g}, alpha{l+1}={alpha[l]:.8g}, beta{l+1}={beta[l]:.8g}")
+    # do no mistake those alphas and betas with WENO coefficients
+    print(B[l], C[l], alpha[l], beta[l])
 
 # Plots
 R_hat = R_model(w_fit, Rinf, A, zeta, B, C, alpha, beta)
