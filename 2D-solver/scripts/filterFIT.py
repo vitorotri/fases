@@ -2,13 +2,27 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 from scipy.signal import hilbert
+import os
 
 # ----------------------------
-# Input: octave-band centers, |R| (0..1) and cuttof frequency
+# Input: octave-band centers, |R| (0..1) from file and cuttof frequency
 # ----------------------------
 f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
-Rmag_oct = np.array([0.95, 0.90, 0.80, 0.65, 0.50, 0.45, 0.55, 0.70], dtype=float)
-f_cutoff = 1200.0 # Hz
+
+script_dir = os.path.dirname(os.path.abspath(__file__))  # scripts/
+data_path = os.path.join(script_dir, "..", "data", "mat", "Material1.mat")
+Rmag_oct = np.loadtxt(data_path)
+
+f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent)
+f_tol = 200 # tolerance fequency [Hz] Should be the same for each material (simulation-dependent)
+
+f_cutoff += f_tol
+
+# ----------------------------
+# Model order (keep small to start!)
+# ----------------------------
+K = 3  # real poles
+L = 2  # complex pairs
 
 # ----------------------------
 # Effective cutoff masking
@@ -16,12 +30,6 @@ f_cutoff = 1200.0 # Hz
 mask = f_oct <= f_cutoff
 f_oct = f_oct[mask]
 Rmag_oct = Rmag_oct[mask]
-
-# ----------------------------
-# Model order (keep small to start!)
-# ----------------------------
-K = 3  # real poles
-L = 2  # complex pairs
 
 # ----------------------------
 # Minimum-phase complex target from |R| only
