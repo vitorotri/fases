@@ -182,9 +182,10 @@ int main(int argc, char *argv[]){
         matABC* fits = nullptr;
         int n_mat = 0; // theoretically should be the same as n_objetcs by the logic being used in the DXFs
 
-        load_all_mats_from_dir("./data", names, fits, n_mat);
+		// fit files must have the same name as the layers in the OBJ/DXF file (but different extension)
+        load_all_mats_from_dir("./input/fit", names, fits, n_mat);
 
-        printf("Loaded %d .mat files\n", n);
+        printf("Loaded %d .fit files\n", n);
         for (int i = 0; i < n_mat; ++i) {
             printf("[%d] %s: R1=%g K=%d L=%d\n",
                    i, names[i].c_str(), fits[i].R1, fits[i].K, fits[i].L);
