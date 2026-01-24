@@ -107,7 +107,7 @@ static void load_all_mats_from_dir(
     int count = 0;
     for (const auto& e : fs::directory_iterator(dir)) {
         if (!e.is_regular_file()) continue;
-        if (e.path().extension() == ".mat") ++count;
+        if (e.path().extension() == ".fit") ++count;
     }
     if (count == 0) return;
 
@@ -121,7 +121,7 @@ static void load_all_mats_from_dir(
     try {
         for (const auto& e : fs::directory_iterator(dir)) {
             if (!e.is_regular_file()) continue;
-            if (e.path().extension() != ".mat") continue;
+            if (e.path().extension() != ".fit") continue;
 
             const std::string path = e.path().string();
             outNames[i] = e.path().filename().string();   // or store full path if you prefer
