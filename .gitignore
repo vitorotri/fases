@@ -17,3 +17,6 @@ output/
 # Big arrays
 
 *.bin
+
+# Backup from data files
+*.~*
