@@ -4,7 +4,10 @@
 #include <cmath>
 #include <ctime>
 #include <cstring>
+#include <string>
+#include <filesystem>
 #include "functions.cuh"
+#include "../include/filterABC.h"
 //#include <cuda_runtime.h>
 
 int main(int argc, char *argv[]){
@@ -20,7 +23,7 @@ int main(int argc, char *argv[]){
     double elapsed_time;
     
     // domain variables
-    t_max = 0.02f; // max time [s]
+    t_max = 0.02f; // max time [s], define in terms of domain size and how many times it crosses it
     f_max = 1000.0f; // [Hz]
     h = 0.005f; // uniform grid spacing [m]
     n = 0; // initial time-step
@@ -101,9 +104,9 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(d_oid, oid, (size_t)Nx*Ny, cudaMemcpyHostToDevice);
     	
 		// get nObjects from scene
-    	int nObjects = scene_object_count(sc); // with boundary
+    	int nObjects = scene_layer_count(sc); // with boundary
 		std::vector<std::string> names;
-		scene_object_names(sc, names);
+		scene_layer_names(sc, names);
 		
 		// allocate array of reflection coefficients per material/obj
 		R = new float[nObjects-1]; // exclude boundary
@@ -117,7 +120,7 @@ int main(int argc, char *argv[]){
     	printf("\n[OK] Scene processing\n");
     	printf("\nDomain info:\n\nLx = %.6f m Ly = %.6f m\nNx = %d Ny = %d\n", Lx, Ly, Nx, Ny);
     	
-    	int counter_obj = 1;
+    	int counter_obj = 1; // 0 is boundary
     	float R_val, T_val, th_val;
     	int obj_typ;
     	while(counter_obj < nObjects){
@@ -170,6 +173,34 @@ int main(int argc, char *argv[]){
     
     // free device temp arrays for obj_id
 	//cudaFree(d_faces); cudaFree(d_obj_id); cudaFree(d_Nb);
+    
+    // ------------------- LOAD single filter coefficiets for material (TST) -----------------
+    
+    
+    
+		std::string* names = nullptr;
+        matABC* fits = nullptr;
+        int n_mat = 0; // theoretically should be the same as n_objetcs by the logic being used in the DXFs
+
+        load_all_mats_from_dir("./data", names, fits, n_mat);
+
+        printf("Loaded %d .mat files\n", n);
+        for (int i = 0; i < n_mat; ++i) {
+            printf("[%d] %s: R1=%g K=%d L=%d\n",
+                   i, names[i].c_str(), fits[i].R1, fits[i].K, fits[i].L);
+        }
+
+        // ... use fits[i] ...
+
+        // Cleanup
+        for (int i = 0; i < n_mat; ++i) free_fit(fits[i]);
+        delete[] fits;
+        delete[] names;
+
+    
+    
+    
+    
     
     // ---------------------------------------------------------------------------------------
     
@@ -277,7 +308,6 @@ int main(int argc, char *argv[]){
 				p0[flat(i,j,Nx)] = amp*exp(-r2 / (2*sigma*sigma));
 			}
 		}
-		
 		
 	}
 	else {
