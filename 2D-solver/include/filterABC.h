@@ -2,10 +2,12 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <filesystem>
+#include <cstdio>
 #include <cstdlib>   // std::malloc, std::free
 #include <cstddef>   // std::size_t
 
-struct FitSoA_C {
+struct matABC {
     float R1;
     int K; // real poles
     int L; // complex pairs
@@ -16,15 +18,15 @@ struct FitSoA_C {
 };
 
 // Call this when done (or on error after partial alloc)
-static void free_fit(FitSoA_C& fit) {
+static void free_fit(matABC& fit) {
     std::free(fit.A);     std::free(fit.zeta);
     std::free(fit.B);     std::free(fit.C);
     std::free(fit.alpha); std::free(fit.beta);
     fit = {}; // zero everything
 }
 
-static FitSoA_C alloc_fit(int K, int L) {
-    FitSoA_C fit{};
+static matABC alloc_fit(int K, int L) {
+    matABC fit{};
     fit.K = K; fit.L = L;
 
     fit.A     = (float*)std::malloc((std::size_t)K * sizeof(float));
@@ -42,7 +44,7 @@ static FitSoA_C alloc_fit(int K, int L) {
 }
 
 // Tiny reader: numbers only; whole-line comments start with '#'
-FitSoA_C load_fit_c_like(const std::string& path) {
+matABC load_fit_c_like(const std::string& path) {
     std::ifstream in(path);
     if (!in) throw std::runtime_error("Cannot open " + path);
 
@@ -69,7 +71,7 @@ FitSoA_C load_fit_c_like(const std::string& path) {
         throw std::runtime_error("Wrong number of values (expected " + std::to_string(need) +
                                  ", got " + std::to_string(x.size()) + ")");
 
-    FitSoA_C fit = alloc_fit(K, L);
+    matABC fit = alloc_fit(K, L);
     fit.R1 = R1;
 
     std::size_t i = 3;
@@ -78,4 +80,66 @@ FitSoA_C load_fit_c_like(const std::string& path) {
         fit.B[l] = x[i++]; fit.C[l] = x[i++]; fit.alpha[l] = x[i++]; fit.beta[l] = x[i++];
     }
     return fit;
+}
+
+namespace fs = std::filesystem;
+
+// You already have these:
+matABC load_fit_c_like(const std::string& path);
+void free_fit(matABC& fit);
+
+// Returns number of loaded materials in outCount.
+// Allocates:
+//   outNames: array of std::string  (file names)
+//   outFits : array of matABC     (loaded coeffs)
+// Caller must delete[] outNames, delete[] outFits, and free_fit() each fit.
+static void load_all_mats_from_dir(
+    const std::string& dir,
+    std::string*& outNames,
+    matABC*& outFits,
+    int& outCount
+) {
+    outNames = nullptr;
+    outFits  = nullptr;
+    outCount = 0;
+
+    // Pass 1: count
+    int count = 0;
+    for (const auto& e : fs::directory_iterator(dir)) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().extension() == ".mat") ++count;
+    }
+    if (count == 0) return;
+
+    // Allocate C-style arrays
+    outNames = new std::string[count];     // ok
+    outFits  = new matABC[count]();      // () value-inits -> pointers become null
+    outCount = count;
+
+    // Pass 2: load
+    int i = 0;
+    try {
+        for (const auto& e : fs::directory_iterator(dir)) {
+            if (!e.is_regular_file()) continue;
+            if (e.path().extension() != ".mat") continue;
+
+            const std::string path = e.path().string();
+            outNames[i] = e.path().filename().string();   // or store full path if you prefer
+            outFits[i]  = load_fit_c_like(path);          // copies pointers (fine)
+            ++i;
+        }
+    } catch (...) {
+        // Clean up partially loaded
+        for (int j = 0; j < i; ++j) free_fit(outFits[j]);
+        delete[] outFits;
+        delete[] outNames;
+        outFits = nullptr;
+        outNames = nullptr;
+        outCount = 0;
+        throw;
+    }
+
+    // If directory changed between passes, i might be < count.
+    // Keep it strict/simple: shrink logically.
+    outCount = i;
 }
