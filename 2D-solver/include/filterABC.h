@@ -6,6 +6,16 @@
 #include <cstdio>
 #include <cstdlib>   // std::malloc, std::free
 #include <cstddef>   // std::size_t
+#include <cuda_runtime.h>
+
+#define CUDA_CHECK(call) do {                                 \
+    cudaError_t err = (call);                                 \
+    if (err != cudaSuccess) {                                 \
+        std::fprintf(stderr, "CUDA error %s:%d: %s\n",         \
+            __FILE__, __LINE__, cudaGetErrorString(err));     \
+        std::exit(1);                                         \
+    }                                                         \
+} while(0)
 
 struct matABC {
     float R1;
@@ -142,4 +152,66 @@ static void load_all_mats_from_dir(
     // If directory changed between passes, i might be < count.
     // Keep it strict/simple: shrink logically.
     outCount = i;
+}
+
+static matABC* upload_fits_to_gpu(const matABC* fits, int n_mat) {
+    // Host mirror that will contain DEVICE pointers
+    matABC* h_dev = new matABC[n_mat](); // value-init -> pointers become nullptr
+
+    for (int i = 0; i < n_mat; ++i) {
+        h_dev[i].R1 = fits[i].R1;
+        h_dev[i].K  = fits[i].K;
+        h_dev[i].L  = fits[i].L;
+
+        const int K = fits[i].K;
+        const int L = fits[i].L;
+
+        // K arrays: A, zeta
+        if (K > 0) {
+            CUDA_CHECK(cudaMalloc(&h_dev[i].A,    (size_t)K * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&h_dev[i].zeta, (size_t)K * sizeof(float)));
+
+            CUDA_CHECK(cudaMemcpy(h_dev[i].A,    fits[i].A,    (size_t)K * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(h_dev[i].zeta, fits[i].zeta, (size_t)K * sizeof(float), cudaMemcpyHostToDevice));
+        }
+
+        // L arrays: B, C, alpha, beta
+        if (L > 0) {
+            CUDA_CHECK(cudaMalloc(&h_dev[i].B,     (size_t)L * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&h_dev[i].C,     (size_t)L * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&h_dev[i].alpha, (size_t)L * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&h_dev[i].beta,  (size_t)L * sizeof(float)));
+
+            CUDA_CHECK(cudaMemcpy(h_dev[i].B,     fits[i].B,     (size_t)L * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(h_dev[i].C,     fits[i].C,     (size_t)L * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(h_dev[i].alpha, fits[i].alpha, (size_t)L * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(h_dev[i].beta,  fits[i].beta,  (size_t)L * sizeof(float), cudaMemcpyHostToDevice));
+        }
+    }
+
+    // Now copy the struct array (with device pointers inside) to device
+    matABC* d_fits = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_fits, (size_t)n_mat * sizeof(matABC)));
+    CUDA_CHECK(cudaMemcpy(d_fits, h_dev, (size_t)n_mat * sizeof(matABC), cudaMemcpyHostToDevice));
+
+    delete[] h_dev;
+    return d_fits;
+}
+
+static void free_fits_on_gpu(matABC* d_fits, int n_mat) {
+    // Copy back to recover the device pointers
+    matABC* h_dev = new matABC[n_mat];
+    CUDA_CHECK(cudaMemcpy(h_dev, d_fits, (size_t)n_mat * sizeof(matABC), cudaMemcpyDeviceToHost));
+
+    for (int i = 0; i < n_mat; ++i) {
+        CUDA_CHECK(cudaFree(h_dev[i].A));
+        CUDA_CHECK(cudaFree(h_dev[i].zeta));
+        CUDA_CHECK(cudaFree(h_dev[i].B));
+        CUDA_CHECK(cudaFree(h_dev[i].C));
+        CUDA_CHECK(cudaFree(h_dev[i].alpha));
+        CUDA_CHECK(cudaFree(h_dev[i].beta));
+    }
+
+    delete[] h_dev;
+    CUDA_CHECK(cudaFree(d_fits));
 }
