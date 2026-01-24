@@ -42,7 +42,8 @@ int main(int argc, char *argv[]){
         perror("Error opening file");
         return -1;
     }
-    int file_opt = 0; // o for OBJ, 1 for VOX/PLY (for now)
+    int nObjects = 0; // number of obejcts in the scene (initialization)
+    int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
     float tol = 3.0f*h; // tolerance
@@ -56,7 +57,8 @@ int main(int argc, char *argv[]){
     uint8_t *oid = NULL; // for surface attribution
     uint8_t* d_oid = NULL;
     
-    // process OBJ
+    // -------------------------------------- process OBJ scene ------------------------------------
+    
    	if (ends_with_dotobj(path)){
     	//const char *path = "TST2.obj";  // your 2D OBJ like in the prompt
     	Scene2D sc;
@@ -75,12 +77,6 @@ int main(int argc, char *argv[]){
 			if (isnan(S[i])) {
             	printf("[!] WARNING: S[%d] is NaN\n", i);
             }
-		}
-		*/
-		/*
-		// circle TST (invert signed distance field if using single circle polyline?)
-		for (int i = 0; i < Nx*Ny; i++){	
-			S[i] *= -1.0f;
 		}
 		*/
 		if(!build_oid_dense_cpu(sc, S, Nx, Ny, h, tol, &oid)){
@@ -104,7 +100,7 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(d_oid, oid, (size_t)Nx*Ny, cudaMemcpyHostToDevice);
     	
 		// get nObjects from scene
-    	int nObjects = scene_layer_count(sc); // with boundary
+    	nObjects = scene_layer_count(sc); // with boundary
 		std::vector<std::string> names;
 		scene_layer_names(sc, names);
 		
@@ -171,41 +167,61 @@ int main(int argc, char *argv[]){
     	return -1;
     }
     
-    // free device temp arrays for obj_id
-	//cudaFree(d_faces); cudaFree(d_obj_id); cudaFree(d_Nb);
+    FILE *pre_header; // file for data output (sdf_plot.py TST)
+	pre_header = fopen("output/pre_header.txt", "w");
+	if (pre_header != NULL){
+    	fprintf(pre_header, "%d %d %f %d\n", Nx, Ny, h, (int)(tol/h));
+    	fclose(pre_header);
+    }
     
-    // ------------------- LOAD single filter coefficiets for material (TST) -----------------
+    // --------------------------------------------------------------------------------------------------
+    
+    // ----------------------- LOAD filter coefficiets for materials ------------------------------------
     
     
     
-		std::string* names = nullptr;
-        matABC* fits = nullptr;
-        int n_mat = 0; // theoretically should be the same as n_objetcs by the logic being used in the DXFs
+    
+    
+	std::string* names = nullptr;
+    matABC *fits = nullptr;
+    int n_mat = 0; // theoretically has to be the same as n_objetcs by the logic being used in the DXFs
 
-		// fit files must have the same name as the layers in the OBJ/DXF file (but different extension)
-        load_all_mats_from_dir("./input/fit", names, fits, n_mat);
+	// fit files must have the same name as the layers in the OBJ/DXF file (but different extension)
+    load_all_mats_from_dir("./input/fit", names, fits, n_mat);
 
-        printf("Loaded %d .fit files\n", n);
-        for (int i = 0; i < n_mat; ++i) {
-            printf("[%d] %s: R1=%g K=%d L=%d\n",
-                   i, names[i].c_str(), fits[i].R1, fits[i].K, fits[i].L);
-        }
+    printf("Loaded %d .fit files\n", n);
+    for (int i = 0; i < n_mat; ++i) {
+        printf("[%d] %s: R1=%g K=%d L=%d\n",
+               i, names[i].c_str(), fits[i].R1, fits[i].K, fits[i].L);
+    }
 
-        // ... use fits[i] ...
+	// sanity test
+    if (n_mat != nObjects){
+    	printf("\n\n[!] Distinct number of materials and layers (check DXF/OBJ and input/fit)\nWill now stop...\n\n");
+    	return -1;
+    }
 
-        // Cleanup
-        for (int i = 0; i < n_mat; ++i) free_fit(fits[i]);
-        delete[] fits;
-        delete[] names;
+    // allocates and transfers to GPU
+    matABC *d_fits = upload_fits_to_gpu(fits, n_mat);
 
+    // Cleanup CPU side arrays
+    for (int i = 0; i < n_mat; ++i) free_fit(fits[i]);
+    delete[] fits;
+    delete[] names;
     
     
     
     
     
-    // ---------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------------------------------
     
-    int N = Nx*Ny;
+    // -------------------------- Define arrays on device side for ADE computation ---------------------
+    
+    
+    
+    // -------------------------------------------------------------------------------------------------
+    
+    int N = Nx*Ny; // number of grid cells
 
     // --------------- environmental values --------------------------
 	
@@ -258,14 +274,14 @@ int main(int argc, char *argv[]){
     	return -1;
 	}
 	
-	// ----- Fields initialization (sources and receiver) -----
+	// --------------------------- Fields initialization (sources and receiver) ----------------------
 	
 	int opt;
 	printf("\nChoose pulse type:\n\n 1) Delta\n 2) Gaussian\n 3) Top-hat\n\n");
 	scanf("%d",&opt);
 	
 	// for Lx = 4.07, Ly = 12.03 [m]
-	int src_x = (int)(0.5f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
+	int src_x = (int)(0.25f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
 	int rec_x0 = (int)(0.75f*Nx); int rec_y0 = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
 	
 	float amp = 100.0f; // amplitude
@@ -326,7 +342,7 @@ int main(int argc, char *argv[]){
 		}
 	}
 	
-	// ----- End Field initialization -----
+	// -------------------------------------------------------------------------------------
 	
 	// Kernel launch parameters
 	dim3 TP(8,8); // multiples of 32, max is 1024 (TP.x * TP.y <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
@@ -341,7 +357,7 @@ int main(int argc, char *argv[]){
     	return -1;
     }
 	
-	// ------------------ kernel options --------------------
+	// ---------------------------------- kernel options --------------------------------
 	
 	int kern;
 	float dm;
@@ -392,7 +408,7 @@ int main(int argc, char *argv[]){
 
 	}
 	
-	// ------------------------------------------------------
+	// ---------------------------------------------------------------------------------------
 	
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -676,6 +692,8 @@ int main(int argc, char *argv[]){
     	cudaFree(c_rl); cudaFree(dd);
     	
     }
+    
+    free_fits_on_gpu(d_fits, n_mat);
     
     toc = clock();
     
