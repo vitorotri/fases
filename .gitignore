@@ -19,4 +19,4 @@ output/
 *.bin
 
 # Backup from data files
-*.~*
+*~
