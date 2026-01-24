@@ -10,7 +10,7 @@ import os
 f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # scripts/
-data_path = os.path.join(script_dir, "..", "data", "mat", "Material1.mat")
+data_path = os.path.join(script_dir, "..", "input", "mat", "Material1.mat")
 Rmag_oct = np.loadtxt(data_path)
 
 f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent)
