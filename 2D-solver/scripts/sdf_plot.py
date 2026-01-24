@@ -4,20 +4,20 @@ import matplotlib.pyplot as plt
 # --------------------
 # Load data
 # --------------------
-with open('header.txt', 'r') as file:
+with open('../output/pre_header.txt', 'r') as file:
     header_line = file.readline().strip()
     values = header_line.split(' ')
 
-Nx, Ny, h, tol = int(values[0]), int(values[1]), float(values[9]), int(values[10])
+Nx, Ny, h, tol = int(values[0]), int(values[1]), float(values[2]), int(values[3])
 
-S = np.fromfile('S.bin', dtype=np.float32).reshape(Ny, Nx)
-oid = np.fromfile('oid.bin', dtype=np.uint8).reshape(Ny, Nx)
+S = np.fromfile('../output/S.bin', dtype=np.float32).reshape(Ny, Nx)
+oid = np.fromfile('../output/oid.bin', dtype=np.uint8).reshape(Ny, Nx)
 
 x = np.arange(Nx) * h
 y = np.arange(Ny) * h
 
 # --------------------
-# Compute normals from S (mimic C code with clamped neighbors)
+# Compute normals from S (mimic C code with clamped nwweighbors)
 # --------------------
 # pad with edge values so that im1/ip1, jm1/jp1 are clamped at borders
 Spad = np.pad(S, pad_width=1, mode='edge')  # shape (Ny+2, Nx+2)
@@ -44,6 +44,11 @@ ny[valid] = gy[valid] / gn[valid]
 near_obstacle = (oid != 0xFF)             # obstacle cells
 narrow_band   = (np.abs(S) < h) & (np.abs(S) > 0.0)
 mask = near_obstacle & narrow_band & valid
+
+# Print oid stats in narrow band near obstacles
+near_obstacle = (oid != 0xFF)
+narrow_band = (np.abs(S) < h) & (np.abs(S) > 0.0)
+mask = near_obstacle & narrow_band
 
 X, Y = np.meshgrid(x, y)  # shape (Ny, Nx), consistent with S
 
@@ -77,57 +82,36 @@ plt.tight_layout()
 # --------------------
 # Plot oid
 # --------------------
-tol_m = tol * h   # if your tol is in "cells"; if it is already in meters, just tol_m = tol
-band_mask = (S >= 0.0) & (np.abs(S) <= tol_m) # since parser do it on fluid side only
+# --------------------
+# Plot oid with better colormap and transparency
+# --------------------
+tol_m = tol * h
+band_mask = (S >= 0.0) & (np.abs(S) <= tol_m)
 
-# Overlay the band cells as a transparent layer
-plt.figure(figsize=(6, 5))
-im = plt.pcolormesh(X, Y, oid, shading='nearest', cmap='Blues')
-plt.colorbar(im, label="oid values")
+plt.figure(figsize=(8, 6))
 
-# Band overlay: alpha = 0.3 so you see oid below
-plt.pcolormesh(X, Y, band_mask, shading='nearest', alpha=0.5, cmap='Reds')
+# Mask out 255 to make background clean
+oid_display = np.where(oid == 255, np.nan, oid)
+im = plt.pcolormesh(X, Y, oid_display, shading='nearest', cmap='viridis', 
+                    vmin=0, vmax=10, alpha=0.9)
+plt.colorbar(im, label="oid values (255 transparent)")
+
+# Red band overlay only where oid != 255
+band_display = band_mask & (oid != 255)
+plt.pcolormesh(X, Y, band_display.astype(float), shading='nearest', 
+               alpha=0.4, cmap='Reds')
+
+# Add text labels for oid values
+for i in range(Ny):
+    for j in range(Nx):
+        if mask[i,j] and oid[i,j] != 255:
+            plt.text(X[i,j], Y[i,j], f'{oid[i,j]}', 
+                    ha='center', va='center', fontsize=8, color='white',
+                    bbox=dict(boxstyle='round,pad=0.1', facecolor='black', alpha=0.7))
 
 plt.gca().set_aspect('equal', adjustable='box')
 plt.xlabel("x [m]")
 plt.ylabel("y [m]")
-plt.title(f"oid with ±{tol} cells tolerance band")
+plt.title(f"oid objects with numeric labels & ±{tol} cells band")
 plt.tight_layout()
 plt.show()
-
-# --------------------
-# Plot normals as quiver near obstacles
-# --------------------
-plt.figure(figsize=(6, 5))
-plt.title("Normals near obstacles")
-plt.xlabel("x [m]")
-plt.ylabel("y [m]")
-
-# background: S field with zero level
-im = plt.imshow(
-    S,
-    extent=[x[0], x[-1], y[0], y[-1]],
-    origin='lower',
-    cmap='seismic',
-    vmin=-h,
-    vmax=h
-)
-plt.colorbar(im, label="S (m)")
-
-cs = plt.contour(x, y, S, levels=[0.0], colors='k', linewidths=1.0)
-plt.clabel(cs, fmt='S=0', colors='k')
-
-# quiver of normals only where mask is True
-plt.quiver(
-    X[mask],
-    Y[mask],
-    nx[mask],
-    ny[mask],
-    color='k',
-    scale=30.0,   # adjust scale for arrow length as needed
-    width=0.003
-)
-
-plt.tight_layout()
-plt.show()
-
