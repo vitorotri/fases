@@ -373,7 +373,7 @@ __host__ void delta(float *p, float a, int pos_x, int pos_y, int Nx, int Ny, flo
 // hybrid BC
 // S should be integer, but to avoid wrong conversions, using floats
 // alpha should be an array when proper point-clouds are imported, representing, maybe, the absorption coeff
-// for pressure, alpha is different
+// for pressure, alpha is different (distinctit from WENO alphas!)
 // since workd for PNG, single R, no oid[] was processed
 __global__ void kernel_apply_BC_vox(float *q, float *S, int Nx, int Ny, float R){
     int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
@@ -560,9 +560,14 @@ __host__ bool check_energy_coeffs(float R, float T){
 	}
 	return 0;
 }
-
+/*
+__device__ float ADE_solver(matABC *fits, float w_in, float dt, uint8_t oid){
+	fits[oid].phi = w_in - fits[oid].zeta * fits[oid].phi
+	fits[i].R_inf, fits[i].K
+}
+*/
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, float *R, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *T, float *th){
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, float *R, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *T, float *th){//, matABC *fits){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2; // bicubic interp limits to + 3 instead of +2
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -574,7 +579,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	
     	// only act on immersed cells (fluid-side band from your OID map), provided
     	// those values are only on positive s, which is the case here
-		const uint8_t oid_ = oid[Cij];
+		const uint8_t oid_ = oid[Cij]; // object's material ID
 		if (oid_ == 0xFF) return;
 		
 		// gradients from S[] for detecting normals   
@@ -603,11 +608,11 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float uD = bicubic_interp(u_old, Nx, Dx, Dy, h);
     	float vD = bicubic_interp(v_old, Nx, Dx, Dy, h);
 
-		float R_obj = R[oid_];
+		//float R_obj = R[oid_];
     	
-    	// -------- barrier approach ---------
+    	// -------- barrier approach (inside domain, transmission) ---------
     	
-    	 // NEW: per-object thickness and transmission
+    	// NEW: per-object thickness and transmission
         float th_obj = th[oid_]; // 0 for walls, >0 for partitions
         float T_obj  = T[oid_]; // 0 for walls, >0 for partitions
 
@@ -618,7 +623,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         const float Z0  = rho * c;
         //float  Zb       = R_to_Zb(R_obj, Z0);
 
-        // incoming characteristic from LOCAL side (toward obstacle)
+        // incoming characteristic from fluid LOCAL side (towards obstacle)
         const float w_in_local = pD - Z0 * un;
 
         // ---------- other side sample (always computed) ----------
@@ -651,7 +656,8 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         //
         // For walls: T_obj = 0  ⇒ w_out_local = R_obj * w_in_local (your original).
         //
-        const float w_out_local = R_obj * w_in_local + T_obj * w_in_opp;
+        //const float w_out_local = R_obj * w_in_local + T_obj * w_in_opp;
+        const float w_out_local = ADE_solve(fits, w_in_local, dt, oid_); // only reflection for now
 
         // boundary state on THIS side (same as before when T_obj = 0)
         const float p_b  = 0.5f * (w_in_local + w_out_local);
@@ -759,11 +765,11 @@ __global__ void kernel_Euler(int Nx, int Ny, float *p0, float *u0, float *v0, fl
 		u1[Cij] += dt*((-F_uP + F_uM)/h);
 		v1[Cij] += dt*((-G_vP + G_vM)/h);
 		p1[Cij] += dt*((-F_pP + F_pM - G_pP + G_pM)/h);
-		
+		/*
 		sPML(u1, i, j, Nx, Ny, h);
 		sPML(v1, i, j, Nx, Ny, h);
 		sPML(p1, i, j, Nx, Ny, h);
-		
+		*/
 	}
 }
 
@@ -967,11 +973,11 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		v1[Cij] = v0[Cij] + dt*((-G_vP + G_vM)/h);
 		p1[Cij] = p0[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h);
 
-		
+		/*
 		sPML(u1, i, j, Nx, Ny, h);
 		sPML(v1, i, j, Nx, Ny, h);
 		sPML(p1, i, j, Nx, Ny, h);
-		
+		*/
 	}
 }
 
@@ -1030,11 +1036,11 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		v2[Cij] = 0.75f*v0[Cij] + 0.25f*(v1[Cij] + dt*((-G_vP + G_vM)/h));
 		p2[Cij] = 0.75f*p0[Cij] + 0.25f*(p1[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h));
 
-		
+		/*
 		sPML(u2, i, j, Nx, Ny, h);
 		sPML(v2, i, j, Nx, Ny, h);
 		sPML(p2, i, j, Nx, Ny, h);
-		
+		*/
 	}
 }
 
@@ -1094,11 +1100,11 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		v1[Cij] = (v0[Cij] + 2.0f*(v2[Cij] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		p1[Cij] = (p0[Cij] + 2.0f*(p2[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h)))/3.0f;
 
-		
+		/*
 		sPML(u1, i, j, Nx, Ny, h);
 		sPML(v1, i, j, Nx, Ny, h);
 		sPML(p1, i, j, Nx, Ny, h);
-		
+		*/
 	}
 }
 
