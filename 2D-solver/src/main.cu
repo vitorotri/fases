@@ -191,8 +191,8 @@ int main(int argc, char *argv[]){
 
     printf("Loaded %d .fit files\n", n);
     for (int i = 0; i < n_mat; ++i) {
-        printf("[%d] %s: R1=%g K=%d L=%d\n",
-               i, names[i].c_str(), fits[i].R1, fits[i].K, fits[i].L);
+        printf("[%d] %s: R_inf=%g K=%d L=%d A[0]=%g\n",
+               i, names[i].c_str(), fits[i].R_inf, fits[i].K, fits[i].L, fits[i].A[0]);
     }
 
 	// sanity test
@@ -201,21 +201,15 @@ int main(int argc, char *argv[]){
     	return -1;
     }
 
-    // allocates and transfers to GPU
-    matABC *d_fits = upload_fits_to_gpu(fits, n_mat);
+    // allocates and transfers to single GPU (device)
+    matABC *d_fits = upload_fits_to_gpu(fits, n_mat); //array for fit coeeficients of the materials for R
+    	// for T, create brand new array, easier to work
 
     // Cleanup CPU side arrays
     for (int i = 0; i < n_mat; ++i) free_fit(fits[i]);
     delete[] fits;
     delete[] names;
     
-    
-    
-    
-    
-    // -------------------------------------------------------------------------------------------------
-    
-    // -------------------------- Define arrays on device side for ADE computation ---------------------
     
     
     
