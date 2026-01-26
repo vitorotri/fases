@@ -7,7 +7,6 @@
 #include <string>
 #include <filesystem>
 #include "functions.cuh"
-#include "../include/filterABC.h"
 //#include <cuda_runtime.h>
 
 int main(int argc, char *argv[]){
@@ -42,7 +41,7 @@ int main(int argc, char *argv[]){
         perror("Error opening file");
         return -1;
     }
-    int nObjects = 0; // number of obejcts in the scene (initialization)
+    int nObj = 0; // number of obejcts in the scene (initialization)
     int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
@@ -58,6 +57,8 @@ int main(int argc, char *argv[]){
     uint8_t* d_oid = NULL;
     
     // -------------------------------------- process OBJ scene ------------------------------------
+    
+    std::vector<std::string> names; // global naming
     
    	if (ends_with_dotobj(path)){
     	//const char *path = "TST2.obj";  // your 2D OBJ like in the prompt
@@ -99,66 +100,67 @@ int main(int argc, char *argv[]){
 		cudaMalloc(&d_oid, (size_t)Nx*Ny*sizeof(uint8_t));
 		cudaMemcpy(d_oid, oid, (size_t)Nx*Ny, cudaMemcpyHostToDevice);
     	
-		// get nObjects from scene
-    	nObjects = scene_layer_count(sc); // with boundary
-		std::vector<std::string> names;
+		// get nObj from scene
+    	nObj = scene_layer_count(sc); // number of layers/materials with boundary
+		//std::vector<std::string> names;
 		scene_layer_names(sc, names);
+		std::sort(names.begin() + 1, names.end()); // ordering?
 		
 		// allocate array of reflection coefficients per material/obj
-		R = new float[nObjects-1]; // exclude boundary
+		R = new float[nObj-1]; // exclude boundary
 		
 		// allocate array of transmission coefficients per material/obj
-		T = new float[nObjects-1]; // exclude boundary
+		T = new float[nObj-1]; // exclude boundary
 		
 		// allocate array of thickness per barrier
-		th = new float[nObjects-1]; // exclude boundary
+		th = new float[nObj-1]; // exclude boundary
     	
     	printf("\n[OK] Scene processing\n");
     	printf("\nDomain info:\n\nLx = %.6f m Ly = %.6f m\nNx = %d Ny = %d\n", Lx, Ly, Nx, Ny);
     	
-    	int counter_obj = 1; // 0 is boundary
+    	int counter_mat = 1; // 0 is boundary
     	float R_val, T_val, th_val;
     	int obj_typ;
-    	while(counter_obj < nObjects){
-    		printf("\nAttribute object's type for %s\n", names[counter_obj].c_str());
+    	while(counter_mat < nObj){
+    		printf("\nAttribute object's type for %s\n", names[counter_mat].c_str());
     		printf("\n(1) Regular obstacle\n(2) Barrier\n(3) Medium interface\n\n");
     		scanf("%d", &obj_typ);
     		switch(obj_typ){
     			case 1:
-    				printf("\nEnter with the R value for the obstacle %s\n\n", names[counter_obj].c_str());
+    				printf("\nEnter with the R value for the obstacle %s\n\n", names[counter_mat].c_str());
     				scanf("%f", &R_val);
-    				R[counter_obj] = R_val;
-    				T[counter_obj] = 0.0f;
-    				th[counter_obj] = 0.0f;
+    				R[counter_mat] = R_val;
+    				T[counter_mat] = 0.0f;
+    				th[counter_mat] = 0.0f;
     				break;
     			case 2:
-    				printf("\nEnter with the R value for object %s\n\n", names[counter_obj].c_str());
+    				printf("\nEnter with the R value for object %s\n\n", names[counter_mat].c_str());
     				scanf("%f", &R_val);
-    				R[counter_obj] = R_val;
-    				printf("\nEnter with the T value for the object %s\n\n", names[counter_obj].c_str());
+    				R[counter_mat] = R_val;
+    				printf("\nEnter with the T value for the object %s\n\n", names[counter_mat].c_str());
     				scanf("%f", &T_val);
-    				T[counter_obj] = T_val;
+    				T[counter_mat] = T_val;
     				check_energy_coeffs(R_val,T_val); // warning
-    				printf("\nEnter the thickness value for the object %s\n\n", names[counter_obj].c_str());
+    				printf("\nEnter the thickness value for the object %s\n\n", names[counter_mat].c_str());
     				scanf("%f", &th_val);
-    				th[counter_obj] = th_val;
+    				th[counter_mat] = th_val;
     				break;
     			case 3:
     				//
     				break;
     		}
-    		counter_obj += 1;
+    		counter_mat += 1;
     	}
     	
      	// allocate on device and then copy, signed distance field, Reflection, Transmission, barrier thickness
     	cudaMalloc(&d_S, (size_t)Nx*Ny*sizeof(float));
     	cudaMemcpy(d_S, S, (size_t)Nx*Ny*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMalloc(&d_R, nObjects*sizeof(float));
-		cudaMemcpy(d_R, R, nObjects*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMalloc(&d_T, nObjects*sizeof(float));
-		cudaMemcpy(d_T, T, nObjects*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMalloc(&d_th, nObjects*sizeof(float));
-		cudaMemcpy(d_th, th, nObjects*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_R, nObj*sizeof(float));
+		cudaMemcpy(d_R, R, nObj*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_T, nObj*sizeof(float));
+		cudaMemcpy(d_T, T, nObj*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_th, nObj*sizeof(float));
+		cudaMemcpy(d_th, th, nObj*sizeof(float), cudaMemcpyHostToDevice);
 
     	scene_free(&sc);
     }
@@ -176,46 +178,58 @@ int main(int argc, char *argv[]){
     
     // --------------------------------------------------------------------------------------------------
     
-    // ----------------------- LOAD filter coefficiets for materials ------------------------------------
-    
-    
-    
-    
-    
-	std::string* names = nullptr;
-    matABC *fits = nullptr;
-    int n_mat = 0; // theoretically has to be the same as n_objetcs by the logic being used in the DXFs
-
-	// fit files must have the same name as the layers in the OBJ/DXF file (but different extension)
-    load_all_mats_from_dir("./input/fit", names, fits, n_mat);
-
-    printf("Loaded %d .fit files\n", n);
-    for (int i = 0; i < n_mat; ++i) {
-        printf("[%d] %s: R_inf=%g K=%d L=%d A[0]=%g\n",
-               i, names[i].c_str(), fits[i].R_inf, fits[i].K, fits[i].L, fits[i].A[0]);
-    }
-
-	// sanity test
-    if (n_mat != nObjects){
-    	printf("\n\n[!] Distinct number of materials and layers (check DXF/OBJ and input/fit)\nWill now stop...\n\n");
-    	return -1;
-    }
-
-    // allocates and transfers to single GPU (device)
-    matABC *d_fits = upload_fits_to_gpu(fits, n_mat); //array for fit coeeficients of the materials for R
-    	// for T, create brand new array, easier to work
-
-    // Cleanup CPU side arrays
-    for (int i = 0; i < n_mat; ++i) free_fit(fits[i]);
-    delete[] fits;
-    delete[] names;
-    
-    
-    
-    
-    // -------------------------------------------------------------------------------------------------
-    
     int N = Nx*Ny; // number of grid cells
+    
+    // ----------------------- LOAD filter coefficiets for materials ------------------------------------
+        
+    
+    
+
+    
+    // host arrays for material
+    
+    float *R_inf;
+    float *Ak, *zeta;
+    float *Bl, *Cl, *alpha, *beta;
+    
+    int nMat = nObj - 1; // exclude boundary
+    
+    R_inf = new float[nMat];
+    
+    int K_m = 3; // read from file later
+    int L_m = 2; // read from file later
+    
+	Ak 		= new float[K_m * nMat];
+	zeta 	= new float[K_m * nMat];
+	
+	Bl 		= new float[L_m * nMat];
+    Cl 		= new float[L_m * nMat];
+    alpha 	= new float[L_m * nMat];
+    beta 	= new float[L_m * nMat];
+    
+    for (size_t i = 0; i < names.size(); ++i){
+  		std::cout << i << " -> " << names[i] << "\n";
+  	}
+
+    
+    for (int m = 0; m < nMat; ++m) {
+    	std::string filename = "input/fit/" + names[m+1] + ".fit"; // names[0] = Boundary
+    	std::cout << "Reading: " << filename << "\n";
+	
+    	read_fit_file(filename, m, K_m, L_m, R_inf, Ak, zeta, Bl, Cl, alpha, beta, nMat);
+	
+    	std::printf("R_inf[%d] = %.15f\n", m, (double)R_inf[m]);
+    	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
+                	m, (double)Ak[flat(0, m, K_m)],
+                	m, (double)zeta[flat(0, m, K_m)]);
+    	std::printf("Ak(1,%d)  = %.15f   zeta(1,%d) = %.15f\n\n",
+                	m, (double)Ak[flat(1, m, K_m)],
+                	m, (double)zeta[flat(1, m, K_m)]);
+	}
+
+
+
+
 
     // --------------- environmental values --------------------------
 	
@@ -687,7 +701,7 @@ int main(int argc, char *argv[]){
     	
     }
     
-    free_fits_on_gpu(d_fits, n_mat);
+    //free_fits_on_gpu(d_fits, n_mat);
     
     toc = clock();
     
