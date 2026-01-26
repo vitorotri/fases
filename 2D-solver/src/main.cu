@@ -104,7 +104,7 @@ int main(int argc, char *argv[]){
     	nObj = scene_layer_count(sc); // number of layers/materials with boundary
 		//std::vector<std::string> names;
 		scene_layer_names(sc, names);
-		std::sort(names.begin() + 1, names.end()); // ordering?
+		std::sort(names.begin() + 1, names.end()); // ordering
 		
 		// allocate array of reflection coefficients per material/obj
 		R = new float[nObj-1]; // exclude boundary
