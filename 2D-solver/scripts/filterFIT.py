@@ -10,7 +10,7 @@ import os
 f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # scripts/
-data_path = os.path.join(script_dir, "..", "input", "mat", "Material1.mat")
+data_path = os.path.join(script_dir, "..", "input", "mat", "Material0.mat")
 Rmag_oct = np.loadtxt(data_path)
 
 f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent)
@@ -133,8 +133,8 @@ res2 = least_squares(
 Rinf, A, zeta, B, C, alpha, beta = unpack(res2.x, K, L)
 
 #print(f"R_inf = {Rinf:.8g}")
-print("# R_inf K L")
-print(Rinf, K, L)
+print("# R_inf")
+print(Rinf)
 # do not mistake those k's with 3rd dimension indexes in 3D scheme
 print("# A_k zeta_k")
 for k in range(K):
