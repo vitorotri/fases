@@ -561,54 +561,10 @@ __host__ bool check_energy_coeffs(float R, float T){
 	}
 	return 0;
 }
-/*
-// implicit solver for the ADE (Auxiliary Differential Equations)
-__device__ float ADE_solver(matABC *fits, float w_in, float dt, uint8_t oid){
-	float sum_A = 0.0f;
-	float sum_BC = 0.0f;
-	float g, d, D, r1, r2;
-	for (int k = 0; k < fits[oid].K; k++){
-		// compute phi[k]
-		// sum_A += A[k] * phi[k]
-		fits[oid].phi[k] = (fits[oid].phi[k] + dt * w_in) / (1.0f + fits[oid].zeta[k] * dt);
-		sum_A += fits[oid].A[k] * fits[oid].phi[k];
-	}
-	for (int l = 0; l < fits[oid].L; l++){
-		// compute psi_1[l] and psi_2[l]
-		// sum_BC += B[l] * psi_1[l] + C[l] * psi_2[l]
-		g = 1.0f + fits[oid].alpha[l] * dt;
-		d = fits[oid].beta[l] * dt;
-		D = g*g + d*d;
-		r1 = fits[oid].psi_1[l] + dt * w_in;
-		r2 = fits[oid].psi_2[l];
-		
-		fits[oid].psi_1[l] = (g*r1 - d*r2)/D;
-		fits[oid].psi_2[l] = (d*r1 + g*r2)/D;
-		
-		sum_BC += fits[oid].B[l] * fits[oid].psi_1[l] + fits[oid].C[l] * fits[oid].psi_2[l];
-	}
-	return fits[oid].R_inf * w_in + sum_A + sum_BC;
-}
-*/
 
+// implicit solver for the ADE (Auxiliary Differential Equations)
 __device__ float ADE_solver(
-    int b,			// compact state index (NOT Cij)
-    uint8_t oid,
-    float w_in,
-    float dt,
-    const float *A,
-    const float *zeta,
-    const float *B,
-    const float *C,
-    const float *alpha,
-    const float *beta,
-    const float *R_inf,
-    float *phi,
-    float *psi_1,
-    float *psi_2,
-    int K,
-    int L
-){
+    int b, uint8_t oid, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, float *phi, float *psi_1, float *psi_2, int K, int L){
     float sum_A  = 0.0f;
     float sum_BC = 0.0f;
 
@@ -687,7 +643,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float uD = bicubic_interp(u_old, Nx, Dx, Dy, h);
     	float vD = bicubic_interp(v_old, Nx, Dx, Dy, h);
 
-		float R_obj = R[oid_];
+		//float R_obj = R[oid_];
     	
     	// --------------- barrier approach (inside domain, transmission) -------------------
     	
@@ -702,25 +658,27 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         const float Z0  = rho * c;
         //float  Zb       = R_to_Zb(R_obj, Z0);
 
-        // ------------------- incoming characteristic from fluid LOCAL side (towards obstacle)-------
-        const float w_in_local = pD - Z0 * un;
+		// ------------------ non-implicit ------------------------------------------------------------
+        // ------------------- incoming characteristic from fluid LOCAL side (towards obstacle) -------
+        //const float w_in_local = pD - Z0 * un; 
         
         // ------------------ implicit computation of w_in_local (for ADE) ----------------------------
-        /*
-        float pD_now = bicubic_interp(p, Nx, Dx, Dy, h);
-    	float uD_now = bicubic_interp(u, Nx, Dx, Dy, h);
-    	float vD_now = bicubic_interp(v, Nx, Dx, Dy, h);
-    	
-    	const float un_now =  uD_now*nx + vD_now*ny;
-        const float ut_now = -uD_now*ny + vD_now*nx;
         
-        const float w_in_local = pD_now - Z0 * un_now;
-		*/
+        // values computed at n+1, with values of current arrays (in-place assumption)
+        float pD_nu = bicubic_interp(p, Nx, Dx, Dy, h);
+    	float uD_nu = bicubic_interp(u, Nx, Dx, Dy, h);
+    	float vD_nu = bicubic_interp(v, Nx, Dx, Dy, h);
+    	
+    	const float un_nu =  uD_nu*nx + vD_nu*ny;
+        const float ut_nu = -uD_nu*ny + vD_nu*nx;
+        
+        const float w_in_local = pD_nu - Z0 * un_nu;
+		
         // ---------- other side sample (always computed) ----------
         // For partitions: sample across thickness + offset into opposite fluid.
         // For walls: th_obj == 0, T_obj == 0 ⇒ this term is harmless and
         // its contribution is killed by T_obj.
-        float Ex = Wx - (th_obj + l) * nx;   // cross partition and into opposite fluid
+        float Ex = Wx - (th_obj + l) * nx;	// cross partition and into opposite fluid
         float Ey = Wy - (th_obj + l) * ny;
         // interpolation safety clamping for outer boundaries limits
         Ex = fminf(fmaxf(Ex, 2.0f*h), (Nx-3)*h);
@@ -747,9 +705,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         //
         //
         
-        const float w_out_local = R_obj * w_in_local + T_obj * w_in_opp;
-        /*
+        //const float w_out_local = R_obj * w_in_local + T_obj * w_in_opp;
+        
         // considering only reflection for now
+        // if using transmission, also implement implicit computation of w_in_opp similar to w_in_local
         const float w_out_local = ADE_solver(
     		b, oid_, w_in_local, dt,
     		Ak, zeta,
@@ -758,7 +717,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     		phi, psi_1, psi_2,
     		K_m, L_m
 		);
-		*/
+		
         // boundary state on THIS side (same as before when T_obj = 0)
         const float p_b  = 0.5f * (w_in_local + w_out_local);
         const float un_b = (w_out_local - w_in_local) / (2.0f * Z0);
@@ -775,7 +734,6 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	v[Cij] = (1.0f - chi) * v[Cij] + chi * v_b;
     	p[Cij] = (1.0f - chi) * p[Cij] + chi * p_b;
     	
-    	// MAYBE it is necessary to compute all as before, and THEN do the implicit computation with n+1 vals?
     	
     	    
     }
@@ -792,7 +750,7 @@ __host__ __device__ void sPML(float *q, int i, int j, int Nx, int Ny, float h){
     float half   = (float)max_idx;
 
 	// ramps in [0,1] (to exclude a side, multiply by 0.0f)
-	float rx = fmaxf(0.0f, fminf((i - (Nx - half)) / half, 1.0f)); // right boundary ramp
+	float rx = 0.0f;//fmaxf(0.0f, fminf((i - (Nx - half)) / half, 1.0f)); // right boundary ramp
 	float lx = fmaxf(0.0f, fminf((half - i) / half, 1.0f)); // left boundary ramp
 	float ly = fmaxf(0.0f, fminf((half - j) / half, 1.0f)); // lower boundary ramp
 	float uy = fmaxf(0.0f, fminf((j - (Ny - half)) / half, 1.0f)); // upper boundary ramp)
@@ -1075,11 +1033,11 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		v1[Cij] = v0[Cij] + dt*((-G_vP + G_vM)/h);
 		p1[Cij] = p0[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h);
 
-		/*
+		
 		sPML(u1, i, j, Nx, Ny, h);
 		sPML(v1, i, j, Nx, Ny, h);
 		sPML(p1, i, j, Nx, Ny, h);
-		*/
+		
 	}
 }
 
@@ -1138,11 +1096,11 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		v2[Cij] = 0.75f*v0[Cij] + 0.25f*(v1[Cij] + dt*((-G_vP + G_vM)/h));
 		p2[Cij] = 0.75f*p0[Cij] + 0.25f*(p1[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h));
 
-		/*
+		
 		sPML(u2, i, j, Nx, Ny, h);
 		sPML(v2, i, j, Nx, Ny, h);
 		sPML(p2, i, j, Nx, Ny, h);
-		*/
+		
 	}
 }
 
@@ -1202,11 +1160,11 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		v1[Cij] = (v0[Cij] + 2.0f*(v2[Cij] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		p1[Cij] = (p0[Cij] + 2.0f*(p2[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h)))/3.0f;
 
-		/*
+		
 		sPML(u1, i, j, Nx, Ny, h);
 		sPML(v1, i, j, Nx, Ny, h);
 		sPML(p1, i, j, Nx, Ny, h);
-		*/
+		
 	}
 }
 

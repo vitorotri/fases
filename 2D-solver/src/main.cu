@@ -218,6 +218,7 @@ int main(int argc, char *argv[]){
 	
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta, nMat);
 	
+		// simple print test
     	std::printf("Rinf[%d] = %.15f\n", m, (double)Rinf[m]);
     	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
                 	m, (double)Ak[flat(0, m, K_m)],
@@ -346,7 +347,7 @@ int main(int argc, char *argv[]){
 	scanf("%d",&opt);
 	
 	// for Lx = 4.07, Ly = 12.03 [m]
-	int src_x = (int)(0.25f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
+	int src_x = (int)(0.5f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
 	int rec_x0 = (int)(0.75f*Nx); int rec_y0 = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
 	
 	float amp = 100.0f; // amplitude
@@ -560,7 +561,7 @@ int main(int argc, char *argv[]){
 			
 			kernel_Euler<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S);
 			
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, Rinf, Ak, zeta, Bl, Cl, alpha, beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 			
 			// exchange arrays
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
@@ -634,15 +635,15 @@ int main(int argc, char *argv[]){
 				
 				// (0)
 				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, Rinf, Ak, zeta, Bl, Cl, alpha, beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 				
 				// (1)
 				kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_T, d_th, Rinf, Ak, zeta, Bl, Cl, alpha, beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 				
 				// (2)
 				kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_T, d_th, Rinf, Ak, zeta, Bl, Cl, alpha, beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 
 				// exchange arrays
 				cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
