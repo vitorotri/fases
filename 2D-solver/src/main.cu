@@ -186,15 +186,15 @@ int main(int argc, char *argv[]){
     
 
     
-    // host arrays for material
+    // ----- host arrays for materials -----
     
-    float *R_inf;
+    float *Rinf;
     float *Ak, *zeta;
     float *Bl, *Cl, *alpha, *beta;
     
     int nMat = nObj - 1; // exclude boundary
     
-    R_inf = new float[nMat];
+    Rinf = new float[nMat];
     
     int K_m = 3; // read from file later
     int L_m = 2; // read from file later
@@ -216,9 +216,9 @@ int main(int argc, char *argv[]){
     	std::string filename = "input/fit/" + names[m+1] + ".fit"; // names[0] = Boundary
     	std::cout << "Reading: " << filename << "\n";
 	
-    	read_fit_file(filename, m, K_m, L_m, R_inf, Ak, zeta, Bl, Cl, alpha, beta, nMat);
+    	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta, nMat);
 	
-    	std::printf("R_inf[%d] = %.15f\n", m, (double)R_inf[m]);
+    	std::printf("Rinf[%d] = %.15f\n", m, (double)Rinf[m]);
     	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
                 	m, (double)Ak[flat(0, m, K_m)],
                 	m, (double)zeta[flat(0, m, K_m)]);
@@ -227,11 +227,68 @@ int main(int argc, char *argv[]){
                 	m, (double)zeta[flat(1, m, K_m)]);
 	}
 
+	// ----- device arrays for materials -----
+
+	float *d_Rinf;
+    float *d_Ak, *d_zeta;
+    float *d_Bl, *d_Cl, *d_alpha, *d_beta;
+    
+    cudaMalloc(&d_Rinf, nMat * sizeof(float));
+	cudaMemcpy(d_Rinf, Rinf, nMat * sizeof(float), cudaMemcpyHostToDevice);
+	
+	cudaMalloc(&d_Ak, K_m * nMat * sizeof(float));
+	cudaMemcpy(d_Ak, Ak, K_m * nMat * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMalloc(&d_zeta, K_m * nMat * sizeof(float));
+	cudaMemcpy(d_zeta, zeta, K_m * nMat * sizeof(float), cudaMemcpyHostToDevice);
+	
+	cudaMalloc(&d_Bl, L_m * nMat * sizeof(float));
+	cudaMemcpy(d_Bl, Bl, L_m * nMat * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMalloc(&d_Cl, L_m * nMat * sizeof(float));
+	cudaMemcpy(d_Cl, Cl, L_m * nMat * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMalloc(&d_alpha, L_m * nMat * sizeof(float));
+	cudaMemcpy(d_alpha, alpha, L_m * nMat * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMalloc(&d_beta, L_m * nMat * sizeof(float));
+	cudaMemcpy(d_beta, beta, L_m * nMat * sizeof(float), cudaMemcpyHostToDevice);
+	
+	// ----- free host arrays -----
+	
+	delete[] Rinf;
+	delete[] Ak;
+	delete[] zeta;
+	delete[] Bl;
+	delete[] Cl;
+	delete[] alpha;
+	delete[] beta;
+	
+	// ----- boundary map for phi and psi -----
+	
+	// host
+	int *h_bmap = (int*)malloc(N * sizeof(int)); // similar to oid, but with many int's
+	int nBC = build_boundary_map(oid, Nx, Ny, h_bmap);
+	
+	// device
+	int *d_bmap;
+	cudaMalloc(&d_bmap, N * sizeof(int));
+	cudaMemcpy(d_bmap, h_bmap, N * sizeof(int), cudaMemcpyHostToDevice);
+	
+	// ----- allocate and initialize phi and psi (device side only) -----
+	
+	float *phi, *psi_1, *psi_2;
+	
+	cudaMalloc(&phi,   nBC * K_m * sizeof(float));
+	cudaMalloc(&psi_1, nBC * L_m * sizeof(float));
+	cudaMalloc(&psi_2, nBC * L_m * sizeof(float));
+	
+	cudaMemset(phi,   0, nBC * K_m * sizeof(float));
+	cudaMemset(psi_1, 0, nBC * L_m * sizeof(float));
+	cudaMemset(psi_2, 0, nBC * L_m * sizeof(float));
 
 
 
 
-    // --------------- environmental values --------------------------
+
+
+    // ------------------------------------- atmospheric values ------------------------------------------------
 	
 	// should to to config later
 	
@@ -245,7 +302,7 @@ int main(int argc, char *argv[]){
     
     printf("\nc = %f m/s\n",c);
     
-    // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------------------------------------------
 
     // Allocate remaining host memory and initilize to 0.0f
     p0 = new float[N](); // pressure deviations from p0
@@ -503,7 +560,7 @@ int main(int argc, char *argv[]){
 			
 			kernel_Euler<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S);
 			
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, Rinf, Ak, zeta, Bl, Cl, alpha, beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 			
 			// exchange arrays
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
@@ -577,15 +634,15 @@ int main(int argc, char *argv[]){
 				
 				// (0)
 				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, Rinf, Ak, zeta, Bl, Cl, alpha, beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 				
 				// (1)
 				kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_T, d_th);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_T, d_th, Rinf, Ak, zeta, Bl, Cl, alpha, beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 				
 				// (2)
 				kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_T, d_th);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_T, d_th, Rinf, Ak, zeta, Bl, Cl, alpha, beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 
 				// exchange arrays
 				cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
@@ -701,8 +758,6 @@ int main(int argc, char *argv[]){
     	
     }
     
-    //free_fits_on_gpu(d_fits, n_mat);
-    
     toc = clock();
     
     elapsed_time = ((double)(toc - tic)/60.0)/CLOCKS_PER_SEC; // in minutes
@@ -717,6 +772,12 @@ int main(int argc, char *argv[]){
     
     printf("\n[OK] Printed header.txt for plot.py\n");
     
+    // ----- free arrays -----
+    
+    cudaFree(d_Rinf);
+    cudaFree(d_Ak); cudaFree(d_zeta);
+    cudaFree(d_Bl); cudaFree(d_Cl); cudaFree(d_alpha); cudaFree(d_beta);
+    
     fclose(fptr);
     fclose(fp);
     
@@ -729,6 +790,8 @@ int main(int argc, char *argv[]){
     cudaFree(d_R);
     
     printf("\n[OK] Freed arrays\n");  
+    
+    // -----------------------
     
     printf("\n[OK] Finished.\n\n"); 
     

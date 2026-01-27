@@ -2,13 +2,14 @@
 #include <cstring>
 //#include <stdbool.h>
 #include "../include/parsing.h"
+#include "../include/filterABC.h"
 
 // flattening function
-
+/*
 __host__ __device__ int flat(int i, int j, int Nx){
     return (j*Nx) + i;
 }
-
+*/
 __host__ __device__ float no_slope(float *u, int i, int j, int Nx){
 	return 0.0;
 }
@@ -561,13 +562,88 @@ __host__ bool check_energy_coeffs(float R, float T){
 	return 0;
 }
 /*
+// implicit solver for the ADE (Auxiliary Differential Equations)
 __device__ float ADE_solver(matABC *fits, float w_in, float dt, uint8_t oid){
-	fits[oid].phi = w_in - fits[oid].zeta * fits[oid].phi
-	fits[i].R_inf, fits[i].K
+	float sum_A = 0.0f;
+	float sum_BC = 0.0f;
+	float g, d, D, r1, r2;
+	for (int k = 0; k < fits[oid].K; k++){
+		// compute phi[k]
+		// sum_A += A[k] * phi[k]
+		fits[oid].phi[k] = (fits[oid].phi[k] + dt * w_in) / (1.0f + fits[oid].zeta[k] * dt);
+		sum_A += fits[oid].A[k] * fits[oid].phi[k];
+	}
+	for (int l = 0; l < fits[oid].L; l++){
+		// compute psi_1[l] and psi_2[l]
+		// sum_BC += B[l] * psi_1[l] + C[l] * psi_2[l]
+		g = 1.0f + fits[oid].alpha[l] * dt;
+		d = fits[oid].beta[l] * dt;
+		D = g*g + d*d;
+		r1 = fits[oid].psi_1[l] + dt * w_in;
+		r2 = fits[oid].psi_2[l];
+		
+		fits[oid].psi_1[l] = (g*r1 - d*r2)/D;
+		fits[oid].psi_2[l] = (d*r1 + g*r2)/D;
+		
+		sum_BC += fits[oid].B[l] * fits[oid].psi_1[l] + fits[oid].C[l] * fits[oid].psi_2[l];
+	}
+	return fits[oid].R_inf * w_in + sum_A + sum_BC;
 }
 */
+
+__device__ float ADE_solver(
+    int b,			// compact state index (NOT Cij)
+    uint8_t oid,
+    float w_in,
+    float dt,
+    const float *A,
+    const float *zeta,
+    const float *B,
+    const float *C,
+    const float *alpha,
+    const float *beta,
+    const float *R_inf,
+    float *phi,
+    float *psi_1,
+    float *psi_2,
+    int K,
+    int L
+){
+    float sum_A  = 0.0f;
+    float sum_BC = 0.0f;
+
+    for (int k = 0; k < K; k++) {
+        int m = oid*K + k;   // material coeff idx
+        int s = b*K   + k;   // compact state idx
+
+        phi[s] = (phi[s] + dt*w_in) / (1.0f + zeta[m]*dt);
+        sum_A += A[m] * phi[s];
+    }
+
+    for (int l = 0; l < L; l++) {
+        int m = oid*L + l;
+        int s = b*L   + l;
+
+        float g = 1.0f + alpha[m]*dt;
+        float d = beta[m]*dt;
+        float D = g*g + d*d;
+
+        float r1 = psi_1[s] + dt*w_in;
+        float r2 = psi_2[s];
+
+        psi_1[s] = (g*r1 - d*r2)/D;
+        psi_2[s] = (d*r1 + g*r2)/D;
+
+        sum_BC += B[m]*psi_1[s] + C[m]*psi_2[s];
+    }
+
+    return R_inf[oid]*w_in + sum_A + sum_BC;
+}
+
+
+
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, float *R, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *T, float *th){//, matABC *fits){
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, float *R, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *T, float *th, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float *phi, float *psi_1, float *psi_2){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2; // bicubic interp limits to + 3 instead of +2
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -581,6 +657,9 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	// those values are only on positive s, which is the case here
 		const uint8_t oid_ = oid[Cij]; // object's material ID
 		if (oid_ == 0xFF) return;
+		
+		int b = bmap[Cij];
+		//if (b < 0) return; // safety; should match oid test
 		
 		// gradients from S[] for detecting normals   
     	float gx = (S[flat(i+1,j,Nx)] - S[flat(i-1,j,Nx)]) * (0.5f / h);
@@ -608,9 +687,9 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float uD = bicubic_interp(u_old, Nx, Dx, Dy, h);
     	float vD = bicubic_interp(v_old, Nx, Dx, Dy, h);
 
-		//float R_obj = R[oid_];
+		float R_obj = R[oid_];
     	
-    	// -------- barrier approach (inside domain, transmission) ---------
+    	// --------------- barrier approach (inside domain, transmission) -------------------
     	
     	// NEW: per-object thickness and transmission
         float th_obj = th[oid_]; // 0 for walls, >0 for partitions
@@ -623,9 +702,20 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         const float Z0  = rho * c;
         //float  Zb       = R_to_Zb(R_obj, Z0);
 
-        // incoming characteristic from fluid LOCAL side (towards obstacle)
+        // ------------------- incoming characteristic from fluid LOCAL side (towards obstacle)-------
         const float w_in_local = pD - Z0 * un;
-
+        
+        // ------------------ implicit computation of w_in_local (for ADE) ----------------------------
+        /*
+        float pD_now = bicubic_interp(p, Nx, Dx, Dy, h);
+    	float uD_now = bicubic_interp(u, Nx, Dx, Dy, h);
+    	float vD_now = bicubic_interp(v, Nx, Dx, Dy, h);
+    	
+    	const float un_now =  uD_now*nx + vD_now*ny;
+        const float ut_now = -uD_now*ny + vD_now*nx;
+        
+        const float w_in_local = pD_now - Z0 * un_now;
+		*/
         // ---------- other side sample (always computed) ----------
         // For partitions: sample across thickness + offset into opposite fluid.
         // For walls: th_obj == 0, T_obj == 0 ⇒ this term is harmless and
@@ -635,7 +725,6 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         // interpolation safety clamping for outer boundaries limits
         Ex = fminf(fmaxf(Ex, 2.0f*h), (Nx-3)*h);
 		Ey = fminf(fmaxf(Ey, 2.0f*h), (Ny-3)*h);
-
 
         float pE = bilinear_interp(p_old, Nx, Ex, Ey, h);
         float uE = bilinear_interp(u_old, Nx, Ex, Ey, h);
@@ -654,11 +743,22 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         // Generalized 1-port view for THIS side:
         //   w_out_local = R_obj * w_in_local + T_obj * w_in_opp
         //
-        // For walls: T_obj = 0  ⇒ w_out_local = R_obj * w_in_local (your original).
+        // For walls: T_obj = 0  ⇒ w_out_local = R_obj * w_in_local.
         //
-        //const float w_out_local = R_obj * w_in_local + T_obj * w_in_opp;
-        const float w_out_local = ADE_solve(fits, w_in_local, dt, oid_); // only reflection for now
-
+        //
+        
+        const float w_out_local = R_obj * w_in_local + T_obj * w_in_opp;
+        /*
+        // considering only reflection for now
+        const float w_out_local = ADE_solver(
+    		b, oid_, w_in_local, dt,
+    		Ak, zeta,
+    		Bl, Cl, alpha, beta,
+    		Rinf,
+    		phi, psi_1, psi_2,
+    		K_m, L_m
+		);
+		*/
         // boundary state on THIS side (same as before when T_obj = 0)
         const float p_b  = 0.5f * (w_in_local + w_out_local);
         const float un_b = (w_out_local - w_in_local) / (2.0f * Z0);
@@ -674,6 +774,8 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 		u[Cij] = (1.0f - chi) * u[Cij] + chi * u_b;
     	v[Cij] = (1.0f - chi) * v[Cij] + chi * v_b;
     	p[Cij] = (1.0f - chi) * p[Cij] + chi * p_b;
+    	
+    	// MAYBE it is necessary to compute all as before, and THEN do the implicit computation with n+1 vals?
     	
     	    
     }
