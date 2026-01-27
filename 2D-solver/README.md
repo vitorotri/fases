@@ -20,4 +20,4 @@ Solver for enclosed and open spaces.
 # python3 scripts/plot.py
 ```
 
-Video animation will be at output directory.
+Video animation will be in the output directory.
