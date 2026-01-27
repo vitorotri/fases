@@ -545,7 +545,7 @@ __device__ float peskin_chi(float s){
 
 // correctly considers cases where s < h, so it does not sum itself with old U[Cij] values
 __device__ inline float chi_layered(float s, float h, float W){
-	// not considering cases where s < 0.0, provided sdf kernel computes only where oid_s are s > 0.0
+	// not considering cases where s < 0.0, provided sdf kernel computes only where o_IDs are s > 0.0
     if (s >= W)	return 0.0f;
 	if (s <= h)	return 1.0f;
     float r = (s - h) / (W - h);
@@ -563,22 +563,21 @@ __host__ bool check_energy_coeffs(float R, float T){
 }
 
 // implicit solver for the ADE (Auxiliary Differential Equations)
-__device__ float ADE_solver(
-    int b, uint8_t oid, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, float *phi, float *psi_1, float *psi_2, int K, int L){
+__device__ float ADE_solver(int b_ID, uint8_t o_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, float *phi, float *psi_1, float *psi_2, int K, int L){
     float sum_A  = 0.0f;
     float sum_BC = 0.0f;
 
     for (int k = 0; k < K; k++) {
-        int m = oid*K + k;   // material coeff idx
-        int s = b*K   + k;   // compact state idx
+        int m = o_ID*K + k;   // flattened material coeff idx
+        int s = b_ID*K + k;   // flattened compact state idx
 
         phi[s] = (phi[s] + dt*w_in) / (1.0f + zeta[m]*dt);
         sum_A += A[m] * phi[s];
     }
 
     for (int l = 0; l < L; l++) {
-        int m = oid*L + l;
-        int s = b*L   + l;
+        int m = o_ID*L + l;
+        int s = b_ID*L + l;
 
         float g = 1.0f + alpha[m]*dt;
         float d = beta[m]*dt;
@@ -593,7 +592,7 @@ __device__ float ADE_solver(
         sum_BC += B[m]*psi_1[s] + C[m]*psi_2[s];
     }
 
-    return R_inf[oid]*w_in + sum_A + sum_BC;
+    return R_inf[o_ID]*w_in + sum_A + sum_BC;
 }
 
 
@@ -611,10 +610,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	
     	// only act on immersed cells (fluid-side band from your OID map), provided
     	// those values are only on positive s, which is the case here
-		const uint8_t oid_ = oid[Cij]; // object's material ID
-		if (oid_ == 0xFF) return;
+		const uint8_t o_ID = oid[Cij]; // object's material ID
+		if (o_ID == 0xFF) return;
 		
-		int b = bmap[Cij];
+		int b_ID = bmap[Cij];
 		//if (b < 0) return; // safety; should match oid test
 		
 		// gradients from S[] for detecting normals   
@@ -643,13 +642,13 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float uD = bicubic_interp(u_old, Nx, Dx, Dy, h);
     	float vD = bicubic_interp(v_old, Nx, Dx, Dy, h);
 
-		//float R_obj = R[oid_];
+		//float R_obj = R[o_ID];
     	
     	// --------------- barrier approach (inside domain, transmission) -------------------
     	
     	// NEW: per-object thickness and transmission
-        float th_obj = th[oid_]; // 0 for walls, >0 for partitions
-        float T_obj  = T[oid_]; // 0 for walls, >0 for partitions
+        float th_obj = th[o_ID]; // 0 for walls, >0 for partitions
+        float T_obj  = T[o_ID]; // 0 for walls, >0 for partitions
 
         // --- local side normal/tangential ---
         const float un =  uD*nx + vD*ny;
@@ -710,7 +709,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         // considering only reflection for now
         // if using transmission, also implement implicit computation of w_in_opp similar to w_in_local
         const float w_out_local = ADE_solver(
-    		b, oid_, w_in_local, dt,
+    		b_ID, o_ID, w_in_local, dt,
     		Ak, zeta,
     		Bl, Cl, alpha, beta,
     		Rinf,
