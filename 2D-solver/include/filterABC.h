@@ -75,21 +75,18 @@ void read_fit_file(
     }
 }
 
-// build bmap and return nBC
+// build bmap and return nB
 // re-implement on GPU if slow
-int build_boundary_map(
-    const uint8_t *h_oid, int Nx, int Ny,
-    int *h_bmap
-){
-    int nCells = Nx * Ny;
-    int nBC = 0;
-    for (int c = 0; c < nCells; c++) {
-        if (h_oid[c] != 0xFF) {
-            h_bmap[c] = nBC++;
+int build_boundary_map(uint8_t *oid, int N, int *bmap){
+    int nB = 0; // number of boundary cells
+    // bmap has size N
+    for (int c = 0; c < N; c++) {
+        if (oid[c] != 0xFF || o_ID != 0){
+            bmap[c] = nB++;
         } else {
-            h_bmap[c] = -1;
+            bmap[c] = -1;
         }
     }
     printf("\n[OK] Built boundary map\n");
-    return nBC;
+    return nB;
 }

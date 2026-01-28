@@ -196,8 +196,19 @@ int main(int argc, char *argv[]){
     
     Rinf = new float[nMat];
     
-    int K_m = 3; // read from file later
-    int L_m = 2; // read from file later
+    // read K_m and L_m from file
+    
+    int K_m, L_m;
+    
+    std::ifstream polesf("config/poles.txt");
+    if (!polesf) {
+        std::cerr << "\n[!] Could not open config/poles.txt\n";
+        return -1;
+    }
+    polesf >> K_m >> L_m;
+    polesf.close();
+    
+    printf("\n[!] IMPLEMENT READ K AND L FROM FILE HERE!\n\n");
     
 	Ak 		= new float[K_m * nMat];
 	zeta 	= new float[K_m * nMat];
@@ -219,13 +230,13 @@ int main(int argc, char *argv[]){
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta, nMat);
 	
 		// simple print test
-    	std::printf("Rinf[%d] = %.15f\n", m, (double)Rinf[m]);
+    	std::printf("Rinf[%d] = %.15f\n", m, (float)Rinf[m]);
     	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
-                	m, (double)Ak[flat(0, m, K_m)],
-                	m, (double)zeta[flat(0, m, K_m)]);
+                	m, (float)Ak[flat(0, m, K_m)],
+                	m, (float)zeta[flat(0, m, K_m)]);
     	std::printf("Ak(1,%d)  = %.15f   zeta(1,%d) = %.15f\n\n",
-                	m, (double)Ak[flat(1, m, K_m)],
-                	m, (double)zeta[flat(1, m, K_m)]);
+                	m, (float)Ak[flat(1, m, K_m)],
+                	m, (float)zeta[flat(1, m, K_m)]);
 	}
 
 	// ----- device arrays for materials -----
@@ -265,7 +276,7 @@ int main(int argc, char *argv[]){
 	
 	// host
 	int *h_bmap = (int*)malloc(N * sizeof(int)); // similar to oid, but with many int's
-	int nBC = build_boundary_map(oid, Nx, Ny, h_bmap);
+	int nB = build_boundary_map(oid, N, h_bmap);
 	
 	// device
 	int *d_bmap;
@@ -276,14 +287,13 @@ int main(int argc, char *argv[]){
 	
 	float *phi, *psi_1, *psi_2;
 	
-	cudaMalloc(&phi,   nBC * K_m * sizeof(float));
-	cudaMalloc(&psi_1, nBC * L_m * sizeof(float));
-	cudaMalloc(&psi_2, nBC * L_m * sizeof(float));
+	cudaMalloc(&phi,   nB * K_m * sizeof(float));
+	cudaMalloc(&psi_1, nB * L_m * sizeof(float));
+	cudaMalloc(&psi_2, nB * L_m * sizeof(float));
 	
-	cudaMemset(phi,   0, nBC * K_m * sizeof(float));
-	cudaMemset(psi_1, 0, nBC * L_m * sizeof(float));
-	cudaMemset(psi_2, 0, nBC * L_m * sizeof(float));
-
+	cudaMemset(phi,   0, nB * K_m * sizeof(float));
+	cudaMemset(psi_1, 0, nB * L_m * sizeof(float));
+	cudaMemset(psi_2, 0, nB * L_m * sizeof(float));
 
 
 
@@ -631,7 +641,7 @@ int main(int argc, char *argv[]){
 				}
 				*/
 				
-				// Launch WENO3 kernel + SSP-RK2
+				// Launch WENO3 kernel + SSP-RK3
 				
 				// (0)
 				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S);	
