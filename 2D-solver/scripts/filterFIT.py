@@ -21,8 +21,12 @@ f_cutoff += f_tol
 # ----------------------------
 # Model order (keep small to start!)
 # ----------------------------
-K = 3  # real poles
-L = 2  # complex pairs
+K = 1  # real poles
+L = 0  # complex pairs
+
+# Path to config/poles.txt from scripts/
+poles_path = os.path.join(script_dir, "..", "config", "poles.txt")
+np.savetxt(poles_path, np.array([[K, L]]), fmt="%d")
 
 # ----------------------------
 # Effective cutoff masking

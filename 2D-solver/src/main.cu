@@ -90,6 +90,7 @@ int main(int argc, char *argv[]){
             printf("oid[%d] = %u\n", i, oid[i]);
 		}
 		*/
+		// oid[] have values ranging from 1...nObj, with 255 in the other cells
 		FILE *file_oid = fopen("output/oid.bin", "wb");  // Open file for writing in binary mode
     	if (file_oid) {
         	fwrite(oid, sizeof(uint8_t), Nx*Ny, file_oid); // Write array to file
@@ -118,7 +119,7 @@ int main(int argc, char *argv[]){
     	printf("\n[OK] Scene processing\n");
     	printf("\nDomain info:\n\nLx = %.6f m Ly = %.6f m\nNx = %d Ny = %d\n", Lx, Ly, Nx, Ny);
     	
-    	int counter_mat = 1; // 0 is boundary
+    	int counter_mat = 1; // 0 is boundary in "names"
     	float R_val, T_val, th_val;
     	int obj_typ;
     	while(counter_mat < nObj){
@@ -208,15 +209,13 @@ int main(int argc, char *argv[]){
     polesf >> K_m >> L_m;
     polesf.close();
     
-    printf("\n[!] IMPLEMENT READ K AND L FROM FILE HERE!\n\n");
-    
 	Ak 		= new float[K_m * nMat];
 	zeta 	= new float[K_m * nMat];
 	
 	Bl 		= new float[L_m * nMat];
     Cl 		= new float[L_m * nMat];
     alpha 	= new float[L_m * nMat];
-    beta 	= new float[L_m * nMat];
+    beta 	= new float[L_m * nMat]; 
     
     for (size_t i = 0; i < names.size(); ++i){
   		std::cout << i << " -> " << names[i] << "\n";

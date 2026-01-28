@@ -610,11 +610,12 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	
     	// only act on immersed cells (fluid-side band from your OID map), provided
     	// those values are only on positive s, which is the case here
+    	// oid[] ranges from 1 to nMat, 255 elsewhere
 		const uint8_t o_ID = oid[Cij]; // object's material ID
-		if (o_ID == 0xFF || o_ID == 0) return;
+		if (o_ID == 0xFF) return;
 		
 		int b_ID = bmap[Cij];
-		if (b_ID < 0) return; // safety; should match oid test
+		//if (b_ID < 0) return; // safety; should match oid test
 		
 		// gradients from S[] for detecting normals   
     	float gx = (S[flat(i+1,j,Nx)] - S[flat(i-1,j,Nx)]) * (0.5f / h);

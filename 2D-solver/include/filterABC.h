@@ -44,7 +44,7 @@ void read_fit_file(
     float* Cl,
     float* alpha,
     float* beta,
-    int nMat            // number of materials (boundary excluded)
+    int nMat            // number of materials (boundary layer name excluded)
 ) {
     std::ifstream in(filename);
     if (!in.is_open()) {
@@ -81,7 +81,7 @@ int build_boundary_map(uint8_t *oid, int N, int *bmap){
     int nB = 0; // number of boundary cells
     // bmap has size N
     for (int c = 0; c < N; c++) {
-        if (oid[c] != 0xFF || o_ID != 0){
+        if (oid[c] != 0xFF){
             bmap[c] = nB++;
         } else {
             bmap[c] = -1;
