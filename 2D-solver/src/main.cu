@@ -285,6 +285,8 @@ int main(int argc, char *argv[]){
 	// ----- allocate and initialize phi and psi (device side only) -----
 	
 	float *phi, *psi_1, *psi_2;
+	float *phi_old, *psi_1_old, *psi_2_old;
+	float *phi_nu, *psi_1_nu, *psi_2_nu;
 	
 	cudaMalloc(&phi,   nB * K_m * sizeof(float));
 	cudaMalloc(&psi_1, nB * L_m * sizeof(float));
@@ -293,6 +295,22 @@ int main(int argc, char *argv[]){
 	cudaMemset(phi,   0, nB * K_m * sizeof(float));
 	cudaMemset(psi_1, 0, nB * L_m * sizeof(float));
 	cudaMemset(psi_2, 0, nB * L_m * sizeof(float));
+	
+	cudaMalloc(&phi_old,   nB * K_m * sizeof(float));
+	cudaMalloc(&psi_1_old, nB * L_m * sizeof(float));
+	cudaMalloc(&psi_2_old, nB * L_m * sizeof(float));
+	
+	cudaMemset(phi_old,   0, nB * K_m * sizeof(float));
+	cudaMemset(psi_1_old, 0, nB * L_m * sizeof(float));
+	cudaMemset(psi_2_old, 0, nB * L_m * sizeof(float));
+	
+	cudaMalloc(&phi_nu,   nB * K_m * sizeof(float));
+	cudaMalloc(&psi_1_nu, nB * L_m * sizeof(float));
+	cudaMalloc(&psi_2_nu, nB * L_m * sizeof(float));
+	
+	cudaMemset(phi_nu,   0, nB * K_m * sizeof(float));
+	cudaMemset(psi_1_nu, 0, nB * L_m * sizeof(float));
+	cudaMemset(psi_2_nu, 0, nB * L_m * sizeof(float));
 
 
 
@@ -570,7 +588,7 @@ int main(int argc, char *argv[]){
 			
 			kernel_Euler<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S);
 			
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+			//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 			
 			// exchange arrays
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
@@ -644,20 +662,25 @@ int main(int argc, char *argv[]){
 				
 				// (0)
 				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as left (can be passed twice as function arguments)
 				
 				// (1)
 				kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 				
 				// (2)
 				kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 
-				// exchange arrays
+				// exchange state arrays
 				cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 				cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 				cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+				
+				// exchange ADE state arrays
+				cudaMemcpy(phi_old, phi, nB * K_m * sizeof(float), cudaMemcpyDeviceToDevice);
+				cudaMemcpy(psi_1_old, psi_1, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
+				cudaMemcpy(psi_2_old, psi_2, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
 				
 				// sync
 				cudaDeviceSynchronize();
@@ -787,6 +810,10 @@ int main(int argc, char *argv[]){
     cudaFree(d_Rinf);
     cudaFree(d_Ak); cudaFree(d_zeta);
     cudaFree(d_Bl); cudaFree(d_Cl); cudaFree(d_alpha); cudaFree(d_beta);
+    
+    cudaFree(phi); cudaFree(psi_1); cudaFree(psi_2);
+    cudaFree(phi_old); cudaFree(psi_1_old); cudaFree(psi_2_old);
+    cudaFree(phi_nu); cudaFree(psi_1_nu); cudaFree(psi_2_nu);
     
     fclose(fptr);
     fclose(fp);
