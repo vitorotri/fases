@@ -562,27 +562,31 @@ __host__ bool check_energy_coeffs(float R, float T){
 	return 0;
 }
 
+
 // implicit solver for the ADE (Auxiliary Differential Equations)
 // implicitness come from the analytical solving of the equations, still need SSP-RK3 if main solver uses that
-__device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float d_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+// substituted in the SSP stages is the implicit Euler method at the place of the standard U[n] + dt*L(U[n]),
+// so the 'right' value is this operator, 'middle' is the U[n] at stages (2) and (n+1), and 'left' the receiving
+// arrays 
+__device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
     float sum_A  = 0.0f;
     float sum_BC = 0.0f;
 
-    for (int k = 0; k < K; k++) {
+    for (int k = 0; k < K; k++){
         int m = m_ID*K + k;	// flattened material coeff idx
         int s = b_ID*K + k; // flattened compact state idx
 
-		// ---------------------------------------------------
+		// -------------------------------------------------
 
-		float phi_op = (phi_right[s] + dt*w_in) / (1.0f + zeta[m]*dt);
+		float phi_BE = (phi_right[s] + dt*w_in) / (1.0f + zeta[m]*dt); // backwards (implicit) Euler solver
 		
-		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*phi_right[s] + c_SSP*dt*phi_op;
-		phi_left[s] /= d_SSP;
+		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*phi_BE;
+		phi_left[s] /= c_SSP;
 		sum_A += A[m] * phi_left[s];
 
     }
 
-    for (int l = 0; l < L; l++) {
+    for (int l = 0; l < L; l++){
         int m = m_ID*L + l;	// flattened material coeff idx
         int s = b_ID*L + l;	// flattened compact state idx
 
@@ -593,13 +597,13 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
         float r1 = psi_1_right[s] + dt*w_in;
         float r2 = psi_2_right[s];
         
-        float psi_1_op = (g*r1 - d*r2)/D;
-        float psi_2_op = (d*r1 + g*r2)/D;
+        float psi_1_BE = (g*r1 - d*r2)/D; // backwards (implicit) Euler solver
+        float psi_2_BE = (d*r1 + g*r2)/D; // backwards (implicit) Euler solver
 
-		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*psi_1_right[s] + c_SSP*dt*psi_1_op;
-		psi_1_left[s] /= d_SSP;
-		psi_2_left[s] = a_SSP*psi_2_middle[s] + b_SSP*psi_2_right[s] + c_SSP*dt*psi_2_op;
-		psi_2_left[s] /= d_SSP;
+		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*psi_1_BE;
+		psi_1_left[s] /= c_SSP;
+		psi_2_left[s] = a_SSP*psi_2_middle[s] + b_SSP*psi_2_BE;
+		psi_2_left[s] /= c_SSP;
 
         sum_BC += B[m]*psi_1_left[s] + C[m]*psi_2_left[s];
     }
@@ -608,9 +612,8 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 
 
-
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, float *R, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *T, float *th, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float d_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, float *R, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *T, float *th, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2; // bicubic interp limits to + 3 instead of +2
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -667,24 +670,11 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         const float un =  uD*nx + vD*ny;
         const float ut = -uD*ny + vD*nx;
 
-        const float Z0  = rho * c;
-        //float  Zb       = R_to_Zb(R_obj, Z0);
+        const float Z0 = rho * c;
+        //float Zb = R_to_Zb(R_obj, Z0);
 
-		// ------------------ non-implicit ------------------------------------------------------------
         // ------------------- incoming characteristic from fluid LOCAL side (towards obstacle) -------
-        //const float w_in_local = pD - Z0 * un; 
-        
-        // ------------------ implicit computation of w_in_local (for ADE) ----------------------------
-        
-        // values computed at n+1, with values of current arrays (in-place assumption)
-        float pD_nu = bicubic_interp(p, Nx, Dx, Dy, h);
-    	float uD_nu = bicubic_interp(u, Nx, Dx, Dy, h);
-    	float vD_nu = bicubic_interp(v, Nx, Dx, Dy, h);
-    	
-    	const float un_nu =  uD_nu*nx + vD_nu*ny;
-        const float ut_nu = -uD_nu*ny + vD_nu*nx;
-        
-        const float w_in_local = pD_nu - Z0 * un_nu;
+        const float w_in_local = pD - Z0 * un;
 		
         // ---------- other side sample (always computed) ----------
         // For partitions: sample across thickness + offset into opposite fluid.
@@ -730,7 +720,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     		Bl, Cl, alpha, beta,
     		Rinf,
     		K_m, L_m,
-    		a_SSP, b_SSP, c_SSP, d_SSP,
+    		a_SSP, b_SSP, c_SSP,
     		phi_left, phi_middle, phi_right,
     		psi_1_left, psi_1_middle, psi_1_right,
     		psi_2_left, psi_2_middle, psi_2_right
