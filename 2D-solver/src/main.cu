@@ -23,7 +23,7 @@ int main(int argc, char *argv[]){
     
     // domain variables
     t_max = 0.02f; // max time [s], define in terms of domain size and how many times it crosses it
-    f_max = 1000.0f; // [Hz]
+    f_max = 1000.0f; // [Hz] (cutoff frequency)
     h = 0.005f; // uniform grid spacing [m]
     n = 0; // initial time-step
     
@@ -181,11 +181,9 @@ int main(int argc, char *argv[]){
     
     int N = Nx*Ny; // number of grid cells
     
+    
+    
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
-        
-    
-    
-
     
     // ----- host arrays for materials -----
     
@@ -314,8 +312,6 @@ int main(int argc, char *argv[]){
 
 
 
-
-
     // ------------------------------------- atmospheric values ------------------------------------------------
 	
 	// should to to config later
@@ -375,7 +371,7 @@ int main(int argc, char *argv[]){
 	
 	// for Lx = 4.07, Ly = 12.03 [m]
 	int src_x = (int)(0.5f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
-	int rec_x0 = (int)(0.75f*Nx); int rec_y0 = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
+	int rec_x = (int)(0.75f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
 	
 	float amp = 100.0f; // amplitude
 	if (opt == 1){
@@ -546,9 +542,16 @@ int main(int argc, char *argv[]){
 	scanf("%d", &opt);
 	if (opt != 1) return -1;
 	
-	// open BIN file for writing pressure at single receiver
+	// open BIN file for writing pressure field
 	FILE *fptr = fopen("output/pressure.bin", "ab");
 	if (fptr == NULL) {
+    	printf("[!] Error opening pressure.bin file!\n");
+    	exit(1);
+	}
+	
+	// open BIN file for writing pressure at single receiver
+	FILE *f_rec = fopen("output/IR.bin", "ab");
+	if (f_rec == NULL) {
     	printf("[!] Error opening pressure.bin file!\n");
     	exit(1);
 	}
@@ -690,13 +693,17 @@ int main(int argc, char *argv[]){
 				// Copy result back to host
 				cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
 				
-				// write to file
+				// write to file for animation (full pressure of size Nx * Nx * pbin)
 				if (n % anim_step == 0){
 					fwrite(p1, sizeof(float), N, fptr);
         			fflush(fptr);  // Ensure data is written to disk
         			pbin_size += 1;
         		}
-
+        		
+        		// write to file for single receiver
+				fwrite(&p1[flat(rec_x, rec_y, Nx)], sizeof(float), 1, f_rec);
+        		fflush(f_rec);  // Ensure data is written to disk
+        		
 				n += 1; // update time-step
 			}
 		}
@@ -752,7 +759,7 @@ int main(int argc, char *argv[]){
 				// Copy result back to host
 				cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
 				
-				// write to file
+				// write to file for animation (full pressure of size Nx * Nx * pbin)
 				if (n % anim_step == 0){
 					fwrite(p1, sizeof(float), N, fptr);
         			fflush(fptr);  // Ensure data is written to disk
@@ -795,6 +802,9 @@ int main(int argc, char *argv[]){
     
     elapsed_time = ((double)(toc - tic)/60.0)/CLOCKS_PER_SEC; // in minutes
     printf("\n[OK] Simulation time: %f min \n\n", elapsed_time); 
+    
+    fclose(f_rec);
+    printf("[OK] Wrote to file for single receiver\n\n");
     
     FILE *header; // file for data output
 	header = fopen("output/header.txt", "w");
