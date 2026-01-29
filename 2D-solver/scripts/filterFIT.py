@@ -9,20 +9,21 @@ import os
 # ----------------------------
 f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
 
+read_file = "Material0.mat"
+
 script_dir = os.path.dirname(os.path.abspath(__file__))  # scripts/
-data_path = os.path.join(script_dir, "..", "input", "mat", "Material0.mat")
+data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
 Rmag_oct = np.loadtxt(data_path)
 
-f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent)
+f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent), should read from input file
 f_tol = 200 # tolerance fequency [Hz] Should be the same for each material (simulation-dependent)
-
 f_cutoff += f_tol
 
 # ----------------------------
 # Model order (keep small to start!)
 # ----------------------------
-K = 1  # real poles
-L = 0  # complex pairs
+K = 3  # real poles
+L = 1  # complex pairs
 
 # Path to config/poles.txt from scripts/
 poles_path = os.path.join(script_dir, "..", "config", "poles.txt")
@@ -136,6 +137,13 @@ res2 = least_squares(
 
 Rinf, A, zeta, B, C, alpha, beta = unpack(res2.x, K, L)
 
+# save to file
+
+save_file = read_file[:-4] + ".fit"
+coefs_path = os.path.join(script_dir, "..", "input", "fit", save_file)
+np.savetxt(poles_path, np.array([[K, L]]), fmt="%d")
+
+'''
 #print(f"R_inf = {Rinf:.8g}")
 print("# R_inf")
 print(Rinf)
@@ -149,6 +157,19 @@ for l in range(L):
     #print(f"B{l+1}={B[l]:.8g}, C{l+1}={C[l]:.8g}, alpha{l+1}={alpha[l]:.8g}, beta{l+1}={beta[l]:.8g}")
     # do no mistake those alphas and betas with WENO coefficients
     print(B[l], C[l], alpha[l], beta[l])
+'''
+  
+with open(coefs_path, 'w') as f:
+    f.write("# R_inf\n")
+    f.write(f"{Rinf}\n")  # Matches print(Rinf)
+    
+    f.write("# A_k zeta_k\n")
+    for k in range(K):
+        f.write(f"{A[k]} {zeta[k]}\n")  # Space-separated, one per line
+        
+    f.write("# B_l C_l alpha_l beta_l\n")
+    for l in range(L):
+        f.write(f"{B[l]} {C[l]} {alpha[l]} {beta[l]}\n")  # 4 values per line
 
 # Plots
 R_hat = R_model(w_fit, Rinf, A, zeta, B, C, alpha, beta)
