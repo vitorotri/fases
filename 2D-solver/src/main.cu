@@ -10,7 +10,7 @@
 //#include <cuda_runtime.h>
 
 int main(int argc, char *argv[]){
-	float t_max, dt, h, f_max; // max time, time-step, grid spacing, max frequency
+	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
 	float *p0, *u0, *v0, *p1, *u1, *v1, *p2, *u2, *v2; // host arrays
 	float *d_p0, *d_u0, *d_v0, *d_p1, *d_u1, *d_v1, *d_p2, *d_u2, *d_v2, *c_rl, *dd; // device arrays
 	float rho, c, Temp; // density, speed of sound, temperature
@@ -23,7 +23,7 @@ int main(int argc, char *argv[]){
     
     // domain variables
     t_max = 0.02f; // max time [s], define in terms of domain size and how many times it crosses it
-    f_max = 1000.0f; // [Hz] (cutoff frequency)
+    f_cutoff = 1000.0f; // [Hz] (cutoff frequency)
     h = 0.005f; // uniform grid spacing [m]
     n = 0; // initial time-step
     
@@ -339,13 +339,16 @@ int main(int argc, char *argv[]){
 	
 	// Check if Nyquist-Shannon Theorem is satisfied
 	float fs = 1/dt; // sampling frequency
-	if (!(fs >= 2*f_max)){
+	float f_max = 0.5*fs; // de facto maximum/treshold frequency being simulated
+	printf("\n[OK] f_max = %f (compare with desired cutoff limit)\n\n", f_max);
+	if (!(f_max >= f_cutoff)){
 		printf("[!] Sampling frequency = %f, too low, aborting...\n\n",fs);
 		return -1;
 	}
-	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_max)
-	float lambda = c/f_max;
-	printf("lambda = %f\n",lambda);
+	
+	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
+	float lambda = c/f_cutoff;
+	printf("\nlambda = %f\n",lambda);
 	if (lambda / h < 15.0f){
 		printf("[!] Resolution too low, aborting...\n\n");
 		return -1;
