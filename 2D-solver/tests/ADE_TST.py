@@ -100,8 +100,8 @@ x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 # slice for computing second peak
 print("\nPlease check slice values if necessary\n")
 
-slice_start = 1400
-slice_end = 3400
+slice_start = 1500
+slice_end = 8000
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
@@ -113,8 +113,8 @@ x1_s -= np.mean(x1_s)
 # windowing
 N = len(x0_s)
 window = np.hanning(N) # reduce spectral leakage
-x0_w = np.copy(x0_s) * window
-x1_w = np.copy(x1_s) * window
+x0_w = np.copy(x0_s)# * window
+x1_w = np.copy(x1_s)# * window
 
 # one-sided FFT
 #n_pad = 50000 # zero-padding via FFT
@@ -151,6 +151,16 @@ eps = 1e-30
 R_num = X1 / (X0 + eps)
 Rmag_num = np.abs(R_num)
 
+
+# single period for given frequency f is just T = 1/f
+# in order to properly capture a given frequency in the FFT analysis, it is necessary to simulate at least
+# some cycles of that period (minimum 3, ideally 5 ~ 10 cycles)
+T_gate = (slice_end - slice_start) * dt
+df = 1.0 / T_gate
+print("Gate length T_gate =", T_gate, "s")
+print("Frequency resolution df =", df, "Hz")
+
+
 plt.figure(1)
 plt.plot(x0, 'b', label='Full reflection')
 plt.plot(x1, 'r', linestyle='--', label='Partial reflection')
@@ -165,6 +175,7 @@ plt.semilogx(freq[mask], Rmag_num[mask], 'r', label='|R_num(f)|')
 plt.semilogx(freq[mask], np.abs(R_ana)[mask], 'k--', label='|R_ana(f)|')
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("|R(f)|")
+plt.ylim([0, 1])
 plt.grid(True, which="both")
 plt.legend()
 plt.title("Reflection magnitude: numerical vs analytical")

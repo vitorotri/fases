@@ -5,38 +5,6 @@ from scipy.signal import hilbert
 import os
 
 # ----------------------------
-# Input: octave-band centers, |R| (0..1) from file and cuttof frequency
-# ----------------------------
-f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
-
-read_file = "Material0.mat"
-
-script_dir = os.path.dirname(os.path.abspath(__file__))  # scripts/
-data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
-Rmag_oct = np.loadtxt(data_path)
-
-f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent), should read from input file
-f_tol = 200 # tolerance fequency [Hz] Should be the same for each material (simulation-dependent)
-f_cutoff += f_tol
-
-# ----------------------------
-# Model order (keep small to start!)
-# ----------------------------
-K = 3  # real poles
-L = 1  # complex pairs
-
-# Path to config/poles.txt from scripts/
-poles_path = os.path.join(script_dir, "..", "config", "poles.txt")
-np.savetxt(poles_path, np.array([[K, L]]), fmt="%d")
-
-# ----------------------------
-# Effective cutoff masking
-# ----------------------------
-mask = f_oct <= f_cutoff
-f_oct = f_oct[mask]
-Rmag_oct = Rmag_oct[mask]
-
-# ----------------------------
 # Minimum-phase complex target from |R| only
 # ----------------------------
 def minimum_phase_from_mag(f, mag, ngrid=220):
@@ -48,9 +16,6 @@ def minimum_phase_from_mag(f, mag, ngrid=220):
     logmag_u = np.interp(flog_u, flog, np.log(mag))
     phase_u = -np.imag(hilbert(logmag_u))   # uniform in log-frequency
     return f_u, np.exp(logmag_u + 1j*phase_u)
-
-f_fit, R_target = minimum_phase_from_mag(f_oct, Rmag_oct, ngrid=220)
-w_fit = 2*np.pi*f_fit
 
 # ----------------------------
 # Hornikx–Wang frequency-domain model
@@ -87,6 +52,43 @@ def resid(x, K, L, w, R_tgt, w_pass=None, lam_pass=0.0):
         viol = np.maximum(np.abs(Rp) - 1.0, 0.0)
         r = np.hstack([r, np.sqrt(lam_pass)*viol])
     return r
+
+# ----------------------------
+# Input: octave-band centers, |R| (0..1) from file and cuttof frequency
+# ----------------------------
+f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
+
+read_file = "Material0.mat"
+
+script_dir = os.path.dirname(os.path.abspath(__file__))  # scripts/
+data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
+Rmag_oct = np.loadtxt(data_path)
+
+f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent), should read from conf file
+f_tol = 200 # tolerance fequency [Hz] Should be the same for each material (simulation-dependent)
+f_cutoff += f_tol
+
+# ----------------------------
+# Model order (keep small to start!)
+# ----------------------------
+K = 3  # real poles
+L = 2  # complex pairs
+
+# Path to config/poles.txt from scripts/
+poles_path = os.path.join(script_dir, "..", "config", "poles.txt")
+np.savetxt(poles_path, np.array([[K, L]]), fmt="%d")
+
+# ----------------------------
+# Effective cutoff masking
+# ----------------------------
+mask = f_oct <= f_cutoff
+f_oct = f_oct[mask]
+Rmag_oct = Rmag_oct[mask]
+
+
+f_fit, R_target = minimum_phase_from_mag(f_oct, Rmag_oct, ngrid=220)
+w_fit = 2*np.pi*f_fit
+
 
 # ----------------------------
 # Initial guess
@@ -170,9 +172,13 @@ with open(coefs_path, 'w') as f:
     f.write("# B_l C_l alpha_l beta_l\n")
     for l in range(L):
         f.write(f"{B[l]} {C[l]} {alpha[l]} {beta[l]}\n")  # 4 values per line
+    if L == 0:
+        f.write("0.0 0.0 0.0 0.0\n")
+
+
+R_hat = R_model(w_fit, Rinf, A, zeta, B, C, alpha, beta)
 
 # Plots
-R_hat = R_model(w_fit, Rinf, A, zeta, B, C, alpha, beta)
 plt.figure()
 plt.semilogx(f_fit, np.abs(R_target), label="Target |R| (min-phase)",c='b')
 plt.semilogx(f_fit, np.abs(R_hat), "--", label="Fitted |R|",c='r')
