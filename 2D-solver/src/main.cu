@@ -339,8 +339,10 @@ int main(int argc, char *argv[]){
 	
 	// Check if Nyquist-Shannon Theorem is satisfied
 	float fs = 1/dt; // sampling frequency
-	float f_max = 0.5*fs; // de facto maximum/treshold frequency being simulated
-	printf("\n[OK] f_max = %f (compare with desired cutoff limit)\n\n", f_max);
+	float f_time = 0.5*fs; // = 0.5/dt maximum representable temporal frequency
+	float f_space = 0.5*c/h; // maximum representable spatial frequency (from Nyquist, lambda_min = 2*dx)
+	float f_max = std::min(f_time, f_space); // de factor maximum frequency being simulated in the mesh
+	printf("\n[OK] f_max = %f Hz (compare with desired cutoff limit)\n\n", f_max);
 	if (!(f_max >= f_cutoff)){
 		printf("[!] Sampling frequency = %f, too low, aborting...\n\n",fs);
 		return -1;
