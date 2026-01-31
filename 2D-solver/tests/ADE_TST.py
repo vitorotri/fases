@@ -79,7 +79,7 @@ print("\nRename [outputs].bin if necessary so it can be used right below this li
 f_cutoff = 1000
 C_CFL = 0.3
 h = 0.005
-t_max = 0.02
+t_max = 0.03
 
 R_spec = 287.05
 gamma = 1.4
@@ -100,8 +100,8 @@ x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 # slice for computing second peak
 print("\nPlease check slice values if necessary\n")
 
-slice_start = 1500
-slice_end = 8000
+slice_start = 1750
+slice_end = 6500
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
@@ -113,8 +113,8 @@ x1_s -= np.mean(x1_s)
 # windowing
 N = len(x0_s)
 window = np.hanning(N) # reduce spectral leakage
-x0_w = np.copy(x0_s)# * window
-x1_w = np.copy(x1_s)# * window
+x0_w = np.copy(x0_s) * window
+x1_w = np.copy(x1_s) * window
 
 # one-sided FFT
 #n_pad = 50000 # zero-padding via FFT
@@ -136,7 +136,7 @@ mask = (
 
 # Loads expected reflection coefficients
 script_dir = os.path.dirname(os.path.abspath(__file__)) # tests/
-coef_path = os.path.join(script_dir, "..", "input", "fit", "Material0.fit")
+coef_path = os.path.join(script_dir, "..", "input", "fit", "Material1.fit")
 
 R_inf, A, zeta, B, Cc, alpha, beta = load_R(coef_path)
 
@@ -179,6 +179,13 @@ plt.ylim([0, 1])
 plt.grid(True, which="both")
 plt.legend()
 plt.title("Reflection magnitude: numerical vs analytical")
-plt.show()
+
+plt.figure(3)
+plt.semilogx(freq, 20*np.log10(np.abs(X0) + 1e-30), 'k')
+plt.xlabel("Frequency [Hz]")
+plt.ylabel("|X0(f)| [dB]")
+plt.axvline(x=f_cutoff, linestyle='--', color='red')
+plt.grid(True, which="both")
+plt.title(r"Sanity test: is spectrum 'flat'below f_cutoff?")
 
 plt.show()

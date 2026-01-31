@@ -22,7 +22,7 @@ int main(int argc, char *argv[]){
     double elapsed_time;
     
     // domain variables
-    t_max = 0.07f; // max time [s], define in terms of domain size and how many times it crosses it
+    t_max = 0.03f; // max time [s], define in terms of domain size and how many times it crosses it
     f_cutoff = 1000.0f; // [Hz] (cutoff frequency)
     h = 0.005f; // uniform grid spacing [m]
     n = 0; // initial time-step
@@ -156,12 +156,12 @@ int main(int argc, char *argv[]){
      	// allocate on device and then copy, signed distance field, Reflection, Transmission, barrier thickness
     	cudaMalloc(&d_S, (size_t)Nx*Ny*sizeof(float));
     	cudaMemcpy(d_S, S, (size_t)Nx*Ny*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMalloc(&d_R, nObj*sizeof(float));
-		cudaMemcpy(d_R, R, nObj*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMalloc(&d_T, nObj*sizeof(float));
-		cudaMemcpy(d_T, T, nObj*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMalloc(&d_th, nObj*sizeof(float));
-		cudaMemcpy(d_th, th, nObj*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_R, (nObj-1)*sizeof(float));
+		cudaMemcpy(d_R, R, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_T, (nObj-1)*sizeof(float));
+		cudaMemcpy(d_T, T, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMalloc(&d_th, (nObj-1)*sizeof(float));
+		cudaMemcpy(d_th, th, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
 
     	scene_free(&sc);
     }
@@ -564,16 +564,22 @@ int main(int argc, char *argv[]){
 	//Nt = 100; // for testing
 	
 	// -------- oscillating source (take proper per if kern == 2) --------
-	/*
-	float *p_osc;
-	float freq_osc = 950.0;
-	p[flat(src_x, src_y, Nx)] = 0.0;
-	p_osc = (float*)malloc(Nt*sizeof(float)); // timely sound pressure
-	for (int nn = 0; nn < Nt; nn++){
-		//p_osc[nn] = 10000.0*exp(-0.5*freq_osc*n*dt)*sin(2*M_PI*freq_osc*nn*dt); // cos(omega*t), omega = 2*pi*f
-		p_osc[nn] = 10000.0*sin(2*M_PI*freq_osc*nn*dt); // cos(omega*t), omega = 2*pi*f
+	p0[flat(src_x, src_y, Nx)] += 0.0f;
+	std::vector<float> p_osc(Nt, 0.0f);
+	std::vector<float> tones = {30, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, 1000};
+	std::vector<float> phase(tones.size(), 0.0f);
+	for (int n = 0; n < Nt; ++n) {
+    	float s = 0.0f;
+    	for (size_t i = 0; i < tones.size(); i++){
+        	phase[i] += 2.0f * M_PI * tones[i] * dt;
+        	if (phase[i] > 2.0f * M_PI) {
+            	phase[i] -= 2.0f * M_PI;
+        	}
+        	s += sinf(phase[i]);
+    	}
+    	p_osc[n] = 0.02 * s;
 	}
-	*/
+	
 	// -------- end oscillating source --------
 	
 	int pbin_size = 0; // for plotting animation correctly
@@ -665,6 +671,11 @@ int main(int argc, char *argv[]){
 					cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
 				}
 				*/
+				
+				// Copy pressure to device (for oscillating source)
+				p0[flat(src_x, src_y, Nx)] += p_osc[n]; // if += then it is a soft source
+				cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice);
+				
 				
 				// Launch WENO3 kernel + SSP-RK3
 				
