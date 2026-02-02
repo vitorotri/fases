@@ -58,7 +58,12 @@ def resid(x, K, L, w, R_tgt, w_pass=None, lam_pass=0.0):
 # ----------------------------
 f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
 
+# user inputs
+
 read_file = "Material0.mat"
+K = 1  # real poles
+L = 0  # complex pairs
+dt = 0.000004408
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # scripts/
 data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
@@ -67,12 +72,6 @@ Rmag_oct = np.loadtxt(data_path)
 f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent), should read from conf file
 f_tol = 200 # tolerance fequency [Hz] Should be the same for each material (simulation-dependent)
 f_cutoff += f_tol
-
-# ----------------------------
-# Model order (keep small to start!)
-# ----------------------------
-K = 3  # real poles
-L = 2  # complex pairs
 
 # Path to config/poles.txt from scripts/
 poles_path = os.path.join(script_dir, "..", "config", "poles.txt")
@@ -85,18 +84,27 @@ mask = f_oct <= f_cutoff
 f_oct = f_oct[mask]
 Rmag_oct = Rmag_oct[mask]
 
-
 f_fit, R_target = minimum_phase_from_mag(f_oct, Rmag_oct, ngrid=220)
 w_fit = 2*np.pi*f_fit
-
 
 # ----------------------------
 # Initial guess
 # ----------------------------
+eps = 1e-6
 wmin, wmax = w_fit.min(), w_fit.max()
 zeta0  = np.logspace(np.log10(wmin), np.log10(wmax), K)
 alpha0 = np.logspace(np.log10(wmin), np.log10(wmax), L)
 beta0  = np.logspace(np.log10(wmin), np.log10(wmax), L)
+
+# Bounds: stability/causality + |Rinf|<=1
+zeta_max  = 0.5 / dt
+alpha_max = 0.5 / dt
+beta_max  = 0.5 / dt
+
+zeta0  = np.clip(zeta0,  eps, zeta_max)
+alpha0 = np.clip(alpha0, eps, alpha_max)
+beta0  = np.clip(beta0,  eps, beta_max)
+
 
 Rinf0 = float(np.clip(np.real(R_target[-1]), -0.9, 0.9))
 A0 = np.zeros(K)
@@ -104,12 +112,25 @@ B0 = np.zeros(L)
 C0 = np.zeros(L)
 x0 = np.hstack([Rinf0, A0, zeta0, B0, C0, alpha0, beta0])
 
-# Bounds: stability/causality + |Rinf|<=1
-eps = 1e-6
-lb = np.hstack([-1.0, -np.inf*np.ones(K), eps*np.ones(K), # zeta_k ≥ eps
-                -np.inf*np.ones(L), -np.inf*np.ones(L), eps*np.ones(L), eps*np.ones(L)])
-ub = np.hstack([ 1.0,  np.inf*np.ones(K), np.inf*np.ones(K),
-                 np.inf*np.ones(L),  np.inf*np.ones(L), np.inf*np.ones(L), np.inf*np.ones(L)]) # alpha_l ≥ eps, beta_l ≥ eps
+lb = np.hstack([
+    -1.0,                    # Rinf lower
+    -np.inf*np.ones(K),      # A_k
+    eps*np.ones(K),          # zeta_k >= eps
+    -np.inf*np.ones(L),      # B_l
+    -np.inf*np.ones(L),      # C_l
+    eps*np.ones(L),          # alpha_l >= eps
+    eps*np.ones(L)           # beta_l  >= eps
+])
+
+ub = np.hstack([
+     1.0,                    # Rinf upper
+     np.inf*np.ones(K),      # A_k
+     zeta_max*np.ones(K),    # zeta_k <= zeta_max
+     np.inf*np.ones(L),      # B_l
+     np.inf*np.ones(L),      # C_l
+     alpha_max*np.ones(L),   # alpha_l <= alpha_max
+     beta_max*np.ones(L)     # beta_l  <= beta_max
+])
 
 # Passivity grid (coarse but useful)
 f_pass = np.logspace(np.log10(f_fit.min()), np.log10(f_fit.max()), 450)

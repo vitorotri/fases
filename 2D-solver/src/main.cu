@@ -335,7 +335,7 @@ int main(int argc, char *argv[]){
 
 	float C_CFL = 0.3; // Courant number: pick values < 0.5 (not equal to)
 	dt = C_CFL*h/c; // Courant-Friedrichs-Lewy condition
-	printf("\ndt = %f\n", dt);
+	printf("\ndt = %.9f\n", dt);
 	
 	// Check if Nyquist-Shannon Theorem is satisfied
 	float fs = 1/dt; // sampling frequency
@@ -562,7 +562,7 @@ int main(int argc, char *argv[]){
 	}
 	
 	//Nt = 100; // for testing
-	
+	/*
 	// -------- oscillating source (take proper per if kern == 2) --------
 	p0[flat(src_x, src_y, Nx)] += 0.0f;
 	std::vector<float> p_osc(Nt, 0.0f);
@@ -579,7 +579,7 @@ int main(int argc, char *argv[]){
     	}
     	p_osc[n] = 0.02 * s;
 	}
-	
+	*/
 	// -------- end oscillating source --------
 	
 	int pbin_size = 0; // for plotting animation correctly
@@ -671,17 +671,17 @@ int main(int argc, char *argv[]){
 					cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
 				}
 				*/
-				
+				/*
 				// Copy pressure to device (for oscillating source)
 				p0[flat(src_x, src_y, Nx)] += p_osc[n]; // if += then it is a soft source
 				cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice);
-				
+				*/
 				
 				// Launch WENO3 kernel + SSP-RK3
 				
 				// (0)
 				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as left (can be passed twice as function arguments)
+				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 				
 				// (1)
 				kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S);	

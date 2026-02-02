@@ -562,7 +562,7 @@ __host__ bool check_energy_coeffs(float R, float T){
 	return 0;
 }
 
-
+/*
 // implicit solver for the ADE (Auxiliary Differential Equations)
 // implicitness come from the analytical solving of the equations, still need SSP-RK3 if main solver uses that
 // substituted in the SSP stages is the implicit Euler method at the place of the standard U[n] + dt*L(U[n]),
@@ -610,7 +610,45 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 
     return R_inf[m_ID]*w_in + sum_A + sum_BC;
 }
+*/
 
+// non-implicit, solved with regulatr SSP-RK3, but coefficeits alpha, beta and zeta are restricted in terms
+// of time-step dt in the fitting script
+__device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+    float sum_A  = 0.0f;
+    float sum_BC = 0.0f;
+
+    for (int k = 0; k < K; k++){
+        int m = m_ID*K + k;	// flattened material coeff idx
+        int s = b_ID*K + k; // flattened compact state idx
+
+		// -------------------------------------------------
+		
+		float L_phi = w_in - zeta[m]*phi_right[s];
+		
+		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*(phi_middle[s] + dt*L_phi);
+		phi_left[s] /= c_SSP;
+		sum_A += A[m] * phi_left[s];
+
+    }
+
+    for (int l = 0; l < L; l++){
+        int m = m_ID*L + l;	// flattened material coeff idx
+        int s = b_ID*L + l;	// flattened compact state idx
+        
+        float L_psi_1 = w_in - (alpha[m]*psi_1_right[s] + beta[m]*psi_2_right[s]);
+        float L_psi_2 = beta[m]*psi_1_right[s] - alpha[m]*psi_2_right[s];
+
+		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*(psi_1_middle[s] + dt*L_psi_1);
+		psi_1_left[s] /= c_SSP;
+		psi_2_left[s] = a_SSP*psi_2_middle[s] + b_SSP*(psi_2_middle[s] + dt*L_psi_2);
+		psi_2_left[s] /= c_SSP;
+
+        sum_BC += B[m]*psi_1_left[s] + C[m]*psi_2_left[s];
+    }
+
+    return R_inf[m_ID]*w_in + sum_A + sum_BC;
+}
 
 // clean version
 __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, float *R, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *T, float *th, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){

@@ -100,8 +100,8 @@ x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 # slice for computing second peak
 print("\nPlease check slice values if necessary\n")
 
-slice_start = 1750
-slice_end = 6500
+slice_start = 1500
+slice_end = 5500
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
@@ -113,8 +113,8 @@ x1_s -= np.mean(x1_s)
 # windowing
 N = len(x0_s)
 window = np.hanning(N) # reduce spectral leakage
-x0_w = np.copy(x0_s) * window
-x1_w = np.copy(x1_s) * window
+x0_w = np.copy(x0_s)# * window
+x1_w = np.copy(x1_s)# * window
 
 # one-sided FFT
 #n_pad = 50000 # zero-padding via FFT
