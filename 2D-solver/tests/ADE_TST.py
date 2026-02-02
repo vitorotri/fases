@@ -100,8 +100,8 @@ x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 # slice for computing second peak
 print("\nPlease check slice values if necessary\n")
 
-slice_start = 5
-slice_end = 1500
+slice_start = 1500
+slice_end = 6500
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
@@ -164,6 +164,7 @@ df = 1.0 / T_gate
 print("Gate length T_gate =", T_gate, "s")
 print("Frequency resolution df =", df, "Hz")
 
+err = 20*np.log10(np.abs(R_ana/R_num))
 
 plt.figure(1)
 plt.plot(x0, 'b', label='Full reflection')
@@ -185,6 +186,15 @@ plt.legend()
 plt.title("Reflection magnitude: numerical vs analytical")
 
 plt.figure(3)
+plt.semilogx(freq[mask], err[mask], 'r', label='Error(f)')
+plt.xlabel("Frequency [Hz]")
+plt.ylabel("Error(f) [dB]")
+plt.axhline(y=0, linestyle='--', color='black')
+plt.grid(True, which="both")
+plt.legend()
+plt.title("Error |R_ana / R_num| in dB")
+
+plt.figure(4)
 plt.semilogx(freq, 20*np.log10(np.abs(X0) + 1e-30), 'k')
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("|X0(f)| [dB]")
