@@ -12,11 +12,12 @@ def dB_SPL(p):
 def R_model(w, Rinf, A, zeta, B, C, alpha, beta):
     s = 1j*w
     R = Rinf + 0j
+    eps = 1e-7
     for Ak, zk in zip(A, zeta):
         R += Ak / (zk + s)
     for Bl, Cl, al, bl in zip(B, C, alpha, beta):
         num = (Bl*s + Cl*bl + al*Bl)
-        den = (al + s)**2 + bl**2
+        den = (al + s)**2 + bl**2 + eps
         R += num / den
     return R
 
@@ -101,7 +102,7 @@ x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 print("\nPlease check slice values if necessary\n")
 
 slice_start = 1500
-slice_end = 7115
+slice_end = 11282
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
@@ -156,6 +157,8 @@ print("Gate length T_gate =", T_gate, "s")
 print("Frequency resolution df =", df, "Hz")
 
 err = 20*np.log10(np.abs(R_ana/R_num))
+
+
 
 plt.figure(1)
 plt.plot(x0, 'b', label='Full reflection')

@@ -150,7 +150,8 @@ beta0  = np.logspace(np.log10(wmin), np.log10(wmax), L)
 # Bounds: stability/causality + |Rinf|<=1
 zeta_max  = 0.5 / dt
 alpha_max = 0.5 / dt
-beta_max  = 0.5 / dt
+#beta_max  = 0.5 / dt
+beta_max = 2*np.pi*0.95*f_cutoff # more restrictive
 
 zeta0  = np.clip(zeta0,  eps, zeta_max)
 alpha0 = np.clip(alpha0, eps, alpha_max)
@@ -184,7 +185,7 @@ ub = np.hstack([
 ])
 
 # Passivity grid (coarse but useful)
-f_pass = np.logspace(np.log10(f_fit.min()), np.log10(f_fit.max()), 500) # from ~ 45 Hz to f_cut+tol
+f_pass = np.logspace(np.log10(f_fit.min()), np.log10(f_fit.max()), 500)
 w_pass = 2*np.pi*f_pass
 
 # ----------------------------
@@ -210,6 +211,22 @@ res2 = least_squares(
 )
 
 Rinf, A, zeta, B, C, alpha, beta = unpack(res2.x, K, L)
+
+# resonances test
+if L > 0:
+    f_res = beta / (2*np.pi)
+    damp_ratio = alpha / beta
+
+    print("\n--- Resonance diagnostics ---")
+    for l in range(L):
+        print(
+            f"Pair {l}: "
+            f"f_res = {f_res[l]:.1f} Hz, "
+            f"alpha = {alpha[l]:.3e}, "
+            f"beta = {beta[l]:.3e}, "
+            f"alpha/beta = {damp_ratio[l]:.3f}"
+        )
+
 
 # save to file
 
@@ -251,16 +268,17 @@ with open(coefs_path, 'w') as f:
 R_hat = R_model(w_fit, Rinf, A, zeta, B, C, alpha, beta)
 
 # Plots
-plt.figure()
+plt.figure(1)
 plt.semilogx(f_fit, np.abs(R_target), label="Target |R| (min-phase)",c='b')
 plt.semilogx(f_fit, np.abs(R_hat), "--", label="Fitted |R|",c='r')
 plt.ylim(0, 1.05); plt.grid(True, which="both")
-plt.xlim(0, f_cutoff-f_tol)
+plt.xlim(20, f_cutoff-f_tol)
 plt.xlabel("Frequency [Hz]"); plt.ylabel("|R|"); plt.legend()
 
-plt.figure()
+plt.figure(2)
 plt.semilogx(f_pass, np.abs(R_model(w_pass, Rinf, A, zeta, B, C, alpha, beta)),color='lime')
 plt.axhline(1.0, linewidth=1, c='k')
 plt.ylim(0, 1.2); plt.grid(True, which="both")
 plt.xlabel("Frequency [Hz]"); plt.ylabel("|R_fit| (passivity check)")
+
 plt.show()
