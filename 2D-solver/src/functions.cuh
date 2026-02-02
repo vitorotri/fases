@@ -612,7 +612,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 */
 
-// non-implicit, solved with regulatr SSP-RK3, but coefficeits alpha, beta and zeta are restricted in terms
+// non-implicit, solved with regular SSP-RK3, but coefficients alpha, beta and zeta are restricted in terms
 // of time-step dt in the fitting script
 __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
     float sum_A  = 0.0f;
