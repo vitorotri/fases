@@ -7,6 +7,7 @@ import os
 # ----------------------------
 # Minimum-phase complex target from |R| only
 # ----------------------------
+'''
 def minimum_phase_from_mag(f, mag, ngrid=220):
     f = np.asarray(f, float)
     mag = np.clip(np.asarray(mag, float), 1e-6, 1.0)
@@ -16,20 +17,60 @@ def minimum_phase_from_mag(f, mag, ngrid=220):
     logmag_u = np.interp(flog_u, flog, np.log(mag))
     phase_u = -np.imag(hilbert(logmag_u))   # uniform in log-frequency
     return f_u, np.exp(logmag_u + 1j*phase_u)
+'''
+
+def minimum_phase_from_mag(f_meas, mag_meas,
+                           f_low=5.0, f_high=20000.0,
+                           ngrid=512, pad_frac=0.5,
+                           mag0=1.0):
+    f_meas = np.asarray(f_meas, float)
+    mag_meas = np.clip(np.asarray(mag_meas, float), 1e-6, 1.0)
+
+    # --- build extended anchors (low -> meas -> high) ---
+    f_anchor = np.r_[f_low, f_meas, f_high]
+    mag_anchor = np.r_[mag0,  mag_meas, mag_meas[-1]]  # flat high extension
+
+    # --- uniform in log-frequency grid ---
+    flog = np.log(f_anchor)
+    flog_u = np.linspace(flog.min(), flog.max(), ngrid)
+    f_u = np.exp(flog_u)
+
+    logmag_u = np.interp(flog_u, np.log(f_anchor), np.log(mag_anchor))
+
+    # --- mirror padding to reduce Hilbert edge artifacts ---
+    n_pad = int(pad_frac * ngrid)
+    left  = logmag_u[1:n_pad+1][::-1]
+    right = logmag_u[-n_pad-1:-1][::-1]
+    logmag_pad = np.r_[left, logmag_u, right]
+
+    phase_pad = -np.imag(hilbert(logmag_pad))
+    phase_u = phase_pad[n_pad:n_pad+ngrid]
+
+    Rmin = np.exp(logmag_u + 1j*phase_u)
+    return f_u, Rmin
 
 # ----------------------------
 # Hornikx–Wang frequency-domain model
 # ----------------------------
 def R_model(w, Rinf, A, zeta, B, C, alpha, beta):
-    s = 1j*w
+    s = 1j*w  # (N,)
     R = Rinf + 0j
-    for Ak, zk in zip(A, zeta):
-        R += Ak / (zk + s)
-    for Bl, Cl, al, bl in zip(B, C, alpha, beta):
-        num = (Bl*s + Cl*bl + al*Bl)
-        den = (al + s)**2 + bl**2
-        R += num / den
+
+    # real poles: sum_k A_k / (zeta_k + s)
+    if A.size:
+        R += (A[:, None] / (zeta[:, None] + s[None, :])).sum(axis=0)
+
+    # complex pairs:
+    if B.size:
+        s2 = s[None, :]
+        al = alpha[:, None]
+        bl = beta[:, None]
+        num = B[:, None]*s2 + C[:, None]*bl + al*B[:, None]
+        den = (al + s2)**2 + bl**2
+        R += (num/den).sum(axis=0)
+
     return R
+
 
 def unpack(x, K, L):
     i=0
@@ -60,18 +101,28 @@ f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
 
 # user inputs
 
-read_file = "Material0.mat"
-K = 1  # real poles
-L = 0  # complex pairs
-dt = 0.000004408
+read_file = "Material1.mat"
+K = 3  # real poles
+L = 3  # complex pairs
+
+# read from file?
+h = 0.005 # grid spacing [m]
+C_CFL = 0.3 # Courant number: pick values < 0.5 (not equal to)
+R_spec = 287.05 # specific gas constant for air [J] [kg]^-1 [K]^-1
+gamma = 1.4 # specific heat ratio for air
+rho = 1.225 # average sea level density for air [kg/m3]. For dry air, proportional to p0/R_spec*T
+Temp = 288.15 # temperature [K]
+f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent), should read from conf file
+f_tol = 200 # tolerance fequency [Hz], should be the same for each material (simulation-dependent)
+
+f_cutoff += f_tol
+c = np.sqrt(gamma*R_spec*Temp) # speed of sound [m/s]
+dt = C_CFL*h/c # time-step size [s]
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # scripts/
 data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
 Rmag_oct = np.loadtxt(data_path)
 
-f_cutoff = 1000.0 # [Hz] Should be the same for each material (simulation-dependent), should read from conf file
-f_tol = 200 # tolerance fequency [Hz] Should be the same for each material (simulation-dependent)
-f_cutoff += f_tol
 
 # Path to config/poles.txt from scripts/
 poles_path = os.path.join(script_dir, "..", "config", "poles.txt")
@@ -84,7 +135,7 @@ mask = f_oct <= f_cutoff
 f_oct = f_oct[mask]
 Rmag_oct = Rmag_oct[mask]
 
-f_fit, R_target = minimum_phase_from_mag(f_oct, Rmag_oct, ngrid=220)
+f_fit, R_target = minimum_phase_from_mag(f_oct, Rmag_oct)
 w_fit = 2*np.pi*f_fit
 
 # ----------------------------
@@ -106,7 +157,7 @@ alpha0 = np.clip(alpha0, eps, alpha_max)
 beta0  = np.clip(beta0,  eps, beta_max)
 
 
-Rinf0 = float(np.clip(np.real(R_target[-1]), -0.9, 0.9))
+Rinf0 = float(np.clip(np.real(R_target[-1]), -0.99, 0.99))
 A0 = np.zeros(K)
 B0 = np.zeros(L)
 C0 = np.zeros(L)
@@ -133,7 +184,7 @@ ub = np.hstack([
 ])
 
 # Passivity grid (coarse but useful)
-f_pass = np.logspace(np.log10(f_fit.min()), np.log10(f_fit.max()), 450)
+f_pass = np.logspace(np.log10(f_fit.min()), np.log10(f_fit.max()), 500) # from ~ 45 Hz to f_cut+tol
 w_pass = 2*np.pi*f_pass
 
 # ----------------------------
@@ -143,7 +194,7 @@ res1 = least_squares(
     resid, x0, bounds=(lb, ub),
     args=(K, L, w_fit, R_target, None, 0.0),
     method="trf",
-    max_nfev=800, ftol=1e-7, xtol=1e-7, gtol=1e-7,
+    max_nfev=1200, ftol=1e-7, xtol=1e-7, gtol=1e-7,
     verbose=0
 )
 
@@ -152,9 +203,9 @@ res1 = least_squares(
 # ----------------------------
 res2 = least_squares(
     resid, res1.x, bounds=(lb, ub),
-    args=(K, L, w_fit, R_target, w_pass, 30.0),
+    args=(K, L, w_fit, R_target, w_pass, 1000.0),
     method="trf",
-    max_nfev=1200, ftol=1e-7, xtol=1e-7, gtol=1e-7,
+    max_nfev=1200, ftol=1e-8, xtol=1e-8, gtol=1e-8,
     verbose=0
 )
 
@@ -204,6 +255,7 @@ plt.figure()
 plt.semilogx(f_fit, np.abs(R_target), label="Target |R| (min-phase)",c='b')
 plt.semilogx(f_fit, np.abs(R_hat), "--", label="Fitted |R|",c='r')
 plt.ylim(0, 1.05); plt.grid(True, which="both")
+plt.xlim(0, f_cutoff-f_tol)
 plt.xlabel("Frequency [Hz]"); plt.ylabel("|R|"); plt.legend()
 
 plt.figure()

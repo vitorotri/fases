@@ -101,24 +101,16 @@ x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 print("\nPlease check slice values if necessary\n")
 
 slice_start = 1500
-slice_end = 6500
+slice_end = 7115
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
 
-# remove DC offsets
-x0_s -= np.mean(x0_s)
-x1_s -= np.mean(x1_s)
+# remove DC offsets ? Better to remove with PCS in simulation
+#x0_s -= np.mean(x0_s)
+#x1_s -= np.mean(x1_s)
 
 N = len(x0_s)
-
-# Must actually not window for this case
-'''
-# windowing
-window = np.hanning(N) # reduce spectral leakage
-x0_w = np.copy(x0_s) * window
-x1_w = np.copy(x1_s) * window
-'''
 
 # one-sided FFT
 #n_pad = 50000 # zero-padding via FFT
@@ -134,7 +126,7 @@ power1 = np.abs(X1)**2
 mask = (
     (freq > 0.0) &
     (freq <= f_cutoff) &
-    (np.abs(X0) > 1e-8*np.max(np.abs(X0)))
+    (np.abs(X0) > 1e-6*np.max(np.abs(X0)))
 )
 
 
@@ -151,10 +143,9 @@ w = 2*np.pi*freq  # freq in Hz
 R_ana = R_model(w, R_inf, A, zeta, B, Cc, alpha, beta)
 
 # compute numerical reflection
-eps = 1e-30
+eps = 1e-6
 R_num = X1 / (X0 + eps)
 Rmag_num = np.abs(R_num)
-
 
 # single period for given frequency f is just T = 1/f
 # in order to properly capture a given frequency in the FFT analysis, it is necessary to simulate at least

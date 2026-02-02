@@ -22,7 +22,7 @@ int main(int argc, char *argv[]){
     double elapsed_time;
     
     // domain variables
-    t_max = 0.03f; // max time [s], define in terms of domain size and how many times it crosses it
+    t_max = 0.05f; // max time [s], define in terms of domain size and how many times it crosses it
     f_cutoff = 1000.0f; // [Hz] (cutoff frequency)
     h = 0.005f; // uniform grid spacing [m]
     n = 0; // initial time-step
