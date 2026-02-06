@@ -22,7 +22,7 @@ int main(int argc, char *argv[]){
     double elapsed_time;
     
     // domain variables
-    t_max = 0.05f; // max time [s], define in terms of domain size and how many times it crosses it
+    t_max = 0.035f; // max time [s], define in terms of domain size and how many times it crosses it
     f_cutoff = 1000.0f; // [Hz] (cutoff frequency)
     h = 0.005f; // uniform grid spacing [m]
     n = 0; // initial time-step
@@ -102,8 +102,8 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(d_oid, oid, (size_t)Nx*Ny, cudaMemcpyHostToDevice);
     	
 		// get nObj from scene
-    	nObj = scene_layer_count(sc); // number of layers/materials with boundary
-		//std::vector<std::string> names;
+    	nObj = scene_layer_count(sc); // number of layers/materials including Boundary
+    	//printf("\n\nnObj = %d\n\n", nObj);
 		scene_layer_names(sc, names);
 		std::sort(names.begin() + 1, names.end()); // ordering
 		
@@ -119,30 +119,30 @@ int main(int argc, char *argv[]){
     	printf("\n[OK] Scene processing\n");
     	printf("\nDomain info:\n\nLx = %.6f m Ly = %.6f m\nNx = %d Ny = %d\n", Lx, Ly, Nx, Ny);
     	
-    	int counter_mat = 1; // 0 is boundary in "names"
+    	int counter_mat = 0; // 0 is boundary in "names"
     	float R_val, T_val, th_val;
     	int obj_typ;
-    	while(counter_mat < nObj){
-    		printf("\nAttribute object's type for %s\n", names[counter_mat].c_str());
+    	while(counter_mat < nObj-1){
+    		printf("\nAttribute object's type for %s\n", names[counter_mat+1].c_str());
     		printf("\n(1) Regular obstacle\n(2) Barrier\n(3) Medium interface\n\n");
     		scanf("%d", &obj_typ);
     		switch(obj_typ){
     			case 1:
-    				printf("\nEnter with the R value for the obstacle %s\n\n", names[counter_mat].c_str());
+    				printf("\nEnter with the R value for the obstacle %s\n\n", names[counter_mat+1].c_str());
     				scanf("%f", &R_val);
     				R[counter_mat] = R_val;
     				T[counter_mat] = 0.0f;
     				th[counter_mat] = 0.0f;
     				break;
     			case 2:
-    				printf("\nEnter with the R value for object %s\n\n", names[counter_mat].c_str());
+    				printf("\nEnter with the R value for object %s\n\n", names[counter_mat+1].c_str());
     				scanf("%f", &R_val);
     				R[counter_mat] = R_val;
-    				printf("\nEnter with the T value for the object %s\n\n", names[counter_mat].c_str());
+    				printf("\nEnter with the T value for the object %s\n\n", names[counter_mat+1].c_str());
     				scanf("%f", &T_val);
     				T[counter_mat] = T_val;
     				check_energy_coeffs(R_val,T_val); // warning
-    				printf("\nEnter the thickness value for the object %s\n\n", names[counter_mat].c_str());
+    				printf("\nEnter the thickness value for the object %s\n\n", names[counter_mat+1].c_str());
     				scanf("%f", &th_val);
     				th[counter_mat] = th_val;
     				break;
@@ -375,8 +375,8 @@ int main(int argc, char *argv[]){
 	scanf("%d",&opt);
 	
 	// for Lx = 4.07, Ly = 12.03 [m]
-	int src_x = (int)(0.5f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
-	int rec_x = (int)(0.75f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
+	int src_x = (int)(0.22f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
+	int rec_x = (int)(0.73f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
 	
 	float amp = 100.0f; // amplitude
 	if (opt == 1){
@@ -497,6 +497,8 @@ int main(int argc, char *argv[]){
 		c_rl[flat(2,0,6)] = -0.5; c_rl[flat(2,1,6)] = 1.5;
 			
 		dd[0] = 2.0/3.0; dd[1] = 1.0/3.0;
+		
+		cudaDeviceSynchronize();
 		
 		dm = (6*N + 6 + 2)*sizeof(float);
 
