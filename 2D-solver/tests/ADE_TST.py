@@ -97,44 +97,39 @@ dt = C_CFL*h/c # time-step size [s]
 fs = 1/dt # temporal sampling frequency [Hz]
 
 script_dir = os.path.dirname(os.path.abspath(__file__)) # tests/
-data_path_0 = os.path.join(script_dir, "..", "output", "IR0.bin") # full signal
+data_path_noise = os.path.join(script_dir, "..", "output", "IRnoise.bin") # noise signal
+data_path_0 = os.path.join(script_dir, "..", "output", "IR0.bin") # full reflection signal
 data_path_1 = os.path.join(script_dir, "..", "output", "IR1.bin") # absorbed signal
 
+xNoise = np.fromfile(data_path_noise, dtype=np.float32)
 x0 = np.fromfile(data_path_0, dtype=np.float32) # in-phase signal with full reflection
 x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflections
 
+x0_s = x0 - xNoise
+x1_s = x1 - xNoise
+
+'''
 # slice for computing second peak
 print("\nPlease check slice values if necessary\n")
 
 slice_start = 5500
-slice_end = 20000
+slice_end = 23800
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
 '''
-# proper windowing?
+'''
+# proper windowing ?
 alpha_win = 0.20
 win = tukey(len(x0_s), alpha=alpha_win) if alpha_win > 0 else np.ones(len(x0_s))
 x0_s *= win
 x1_s *= win
 '''
 '''
-x0_s = np.copy(x0[:2000])
-x1_s = np.copy(x0[2000:])
-
-x0_s = np.copy(np.pad(x0_s, (0, len(x0) - 2000), mode='constant', constant_values=x0_s[1999]))
-x1_s = np.copy(np.pad(x1_s, (2000, 0), mode='constant', constant_values=x1[1999]))
-'''
-'''
-plt.figure()
-plt.plot(x0_s)
-plt.plot(x1_s)
-plt.show()
-'''
-
 # remove DC offsets ? Better to remove with PCS in simulation
 x0_s -= np.mean(x0_s)
 x1_s -= np.mean(x1_s)
+'''
 
 N = len(x0_s)
 
@@ -165,30 +160,20 @@ w = 2*np.pi*freq  # freq in Hz
 # compute analytical R
 R_ana = R_model(w, R_inf, A, zeta, B, Cc, alpha, beta)
 
-# compute numerical reflection
-r1 = (0.73 - 0.22)*4 # source -> receiver distance (direct)
-r2 = ((1.00 - 0.22) + (1.00 - 0.73))*4 # image source -> receiver distance (reflected path)
-
-k = w / c
-
-G_r1 = G2D(k, r1)
-G_r2 = G2D(k, r2)
-
 eps = 1e-6
 R_num = X1 / (X0 + eps)
-#R_num = X1 * G_r1 / (X0 * G_r2)
 Rmag_num = np.abs(R_num)
 
 # single period for given frequency f is just T = 1/f
 # in order to properly capture a given frequency in the FFT analysis, it is necessary to simulate at least
 # some cycles of that period (minimum 3, ideally 5 ~ 10 cycles)
 
-
+'''
 T_gate = (slice_end - slice_start) * dt
 df = 1.0 / T_gate
 print("Gate length T_gate =", T_gate, "s")
 print("Frequency resolution df =", df, "Hz")
-
+'''
 err = 20*np.log10(np.abs(R_ana)/np.abs(R_num))
 
 plt.figure(1)
