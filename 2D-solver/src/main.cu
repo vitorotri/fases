@@ -333,7 +333,7 @@ int main(int argc, char *argv[]){
     u0 = new float[N](); // x component of particle velocity 
     v0 = new float[N](); // y component of particle velocity 
 
-	float C_CFL = 0.3; // Courant number: pick values < 0.5 (not equal to)
+	float C_CFL = 0.1; // Courant number: pick values < 0.5 (not equal to)
 	dt = C_CFL*h/c; // Courant-Friedrichs-Lewy condition
 	printf("\ndt = %.9f\n", dt);
 	
@@ -341,7 +341,7 @@ int main(int argc, char *argv[]){
 	float fs = 1/dt; // sampling frequency
 	float f_time = 0.5*fs; // = 0.5/dt maximum representable temporal frequency
 	float f_space = 0.5*c/h; // maximum representable spatial frequency (from Nyquist, lambda_min = 2*dx)
-	float f_max = std::min(f_time, f_space); // de factor maximum frequency being simulated in the mesh
+	float f_max = std::min(f_time, f_space); // de facto maximum frequency being simulated in the mesh
 	printf("\n[OK] f_max = %f Hz (compare with desired cutoff limit)\n\n", f_max);
 	if (!(f_max >= f_cutoff)){
 		printf("[!] Sampling frequency = %f, too low, aborting...\n\n",fs);
@@ -351,7 +351,7 @@ int main(int argc, char *argv[]){
 	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
 	float lambda = c/f_cutoff;
 	printf("\nlambda = %f\n",lambda);
-	if (lambda / h < 15.0f){
+	if (lambda / h < 12.0f){
 		printf("[!] Resolution too low, aborting...\n\n");
 		return -1;
 	}
@@ -375,8 +375,8 @@ int main(int argc, char *argv[]){
 	scanf("%d",&opt);
 	
 	// for Lx = 4.07, Ly = 12.03 [m]
-	int src_x = (int)(0.22f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
-	int rec_x = (int)(0.73f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
+	int src_x = (int)(0.25f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
+	int rec_x = (int)(0.70f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
 	
 	float amp = 100.0f; // amplitude
 	if (opt == 1){

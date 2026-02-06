@@ -5,6 +5,7 @@ import math
 import matplotlib.pyplot as plt
 import os
 from scipy.special import hankel1
+from scipy.signal.windows import tukey
 
 def dB_SPL(p):
 	p0 = 0.00002
@@ -82,7 +83,7 @@ print("\nRename [outputs].bin if necessary so it can be used right below this li
 
 # simulation parameters (should automate this with config file logic)
 f_cutoff = 1000
-C_CFL = 0.3
+C_CFL = 0.1
 h = 0.005
 t_max = 0.035
 
@@ -105,15 +106,35 @@ x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 # slice for computing second peak
 print("\nPlease check slice values if necessary\n")
 
-slice_start = 2000
-slice_end = 7875
+slice_start = 5500
+slice_end = 20000
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
+'''
+# proper windowing?
+alpha_win = 0.20
+win = tukey(len(x0_s), alpha=alpha_win) if alpha_win > 0 else np.ones(len(x0_s))
+x0_s *= win
+x1_s *= win
+'''
+'''
+x0_s = np.copy(x0[:2000])
+x1_s = np.copy(x0[2000:])
+
+x0_s = np.copy(np.pad(x0_s, (0, len(x0) - 2000), mode='constant', constant_values=x0_s[1999]))
+x1_s = np.copy(np.pad(x1_s, (2000, 0), mode='constant', constant_values=x1[1999]))
+'''
+'''
+plt.figure()
+plt.plot(x0_s)
+plt.plot(x1_s)
+plt.show()
+'''
 
 # remove DC offsets ? Better to remove with PCS in simulation
-#x0_s -= np.mean(x0_s)
-#x1_s -= np.mean(x1_s)
+x0_s -= np.mean(x0_s)
+x1_s -= np.mean(x1_s)
 
 N = len(x0_s)
 
@@ -145,8 +166,8 @@ w = 2*np.pi*freq  # freq in Hz
 R_ana = R_model(w, R_inf, A, zeta, B, Cc, alpha, beta)
 
 # compute numerical reflection
-r1 = 1.0 # source -> receiver distance (direct)
-r2 = 3.0 # image source -> receiver distance (reflected path)
+r1 = (0.73 - 0.22)*4 # source -> receiver distance (direct)
+r2 = ((1.00 - 0.22) + (1.00 - 0.73))*4 # image source -> receiver distance (reflected path)
 
 k = w / c
 
@@ -167,7 +188,6 @@ T_gate = (slice_end - slice_start) * dt
 df = 1.0 / T_gate
 print("Gate length T_gate =", T_gate, "s")
 print("Frequency resolution df =", df, "Hz")
-
 
 err = 20*np.log10(np.abs(R_ana)/np.abs(R_num))
 
@@ -206,6 +226,22 @@ plt.ylabel("|X0(f)| [dB]")
 plt.axvline(x=f_cutoff, linestyle='--', color='red')
 plt.grid(True, which="both")
 plt.title(r"Sanity test: is spectrum 'flat'below f_cutoff?")
+
+plt.figure(5)
+plt.plot(freq[mask], np.real(R_num[mask]), 'r', label='R_num(f)')
+plt.plot(freq[mask], np.real(R_ana[mask]), 'k--', label='R_ana(f)')
+plt.xlabel("Frequency [Hz]")
+plt.ylabel("R(f)")
+plt.grid(True, which="both")
+plt.legend()
+
+plt.figure(6)
+plt.plot(freq[mask], np.imag(R_num[mask]), 'r', label='R_num(f)')
+plt.plot(freq[mask], np.imag(R_ana[mask]), 'k--', label='R_ana(f)')
+plt.xlabel("Frequency [Hz]")
+plt.ylabel("R(f)")
+plt.grid(True, which="both")
+plt.legend()
 
 plt.show()
 
