@@ -4,6 +4,7 @@ import numpy as np
 import math
 import matplotlib.pyplot as plt
 import os
+from scipy.special import hankel1
 
 def dB_SPL(p):
 	p0 = 0.00002
@@ -73,6 +74,9 @@ def load_R(filepath):
             np.array(B, dtype=float), np.array(C, dtype=float),
             np.array(alpha, dtype=float), np.array(beta, dtype=float))
 
+# 2D outgoing Helmholtz Green's function
+def G2D(k, r):
+    return 0.25j * hankel1(0, k*r)
 
 print("\nRename [outputs].bin if necessary so it can be used right below this line...\n")
 
@@ -80,7 +84,7 @@ print("\nRename [outputs].bin if necessary so it can be used right below this li
 f_cutoff = 1000
 C_CFL = 0.3
 h = 0.005
-t_max = 0.03
+t_max = 0.035
 
 R_spec = 287.05
 gamma = 1.4
@@ -101,8 +105,8 @@ x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 # slice for computing second peak
 print("\nPlease check slice values if necessary\n")
 
-slice_start = 1500
-slice_end = 11282
+slice_start = 2000
+slice_end = 7875
 
 x0_s = np.copy(x0[slice_start:slice_end])
 x1_s = np.copy(x1[slice_start:slice_end])
@@ -114,20 +118,17 @@ x1_s = np.copy(x1[slice_start:slice_end])
 N = len(x0_s)
 
 # one-sided FFT
-#n_pad = 50000 # zero-padding via FFT
+
 X0 = np.fft.rfft(x0_s)
 X1 = np.fft.rfft(x1_s)
-freq = np.fft.rfftfreq(N, dt)
-
-# Power spectrums
-power0 = np.abs(X0)**2
-power1 = np.abs(X1)**2
+freq = np.fft.rfftfreq(N, d=dt)
 
 # masking for spectrrum plot
+
 mask = (
     (freq > 0.0) &
     (freq <= f_cutoff) &
-    (np.abs(X0) > 1e-6*np.max(np.abs(X0)))
+    (np.abs(X0) > 1e-6*np.max(np.abs(X0))) # for better division
 )
 
 
@@ -144,21 +145,31 @@ w = 2*np.pi*freq  # freq in Hz
 R_ana = R_model(w, R_inf, A, zeta, B, Cc, alpha, beta)
 
 # compute numerical reflection
+r1 = 1.0 # source -> receiver distance (direct)
+r2 = 3.0 # image source -> receiver distance (reflected path)
+
+k = w / c
+
+G_r1 = G2D(k, r1)
+G_r2 = G2D(k, r2)
+
 eps = 1e-6
 R_num = X1 / (X0 + eps)
+#R_num = X1 * G_r1 / (X0 * G_r2)
 Rmag_num = np.abs(R_num)
 
 # single period for given frequency f is just T = 1/f
 # in order to properly capture a given frequency in the FFT analysis, it is necessary to simulate at least
 # some cycles of that period (minimum 3, ideally 5 ~ 10 cycles)
+
+
 T_gate = (slice_end - slice_start) * dt
 df = 1.0 / T_gate
 print("Gate length T_gate =", T_gate, "s")
 print("Frequency resolution df =", df, "Hz")
 
-err = 20*np.log10(np.abs(R_ana/R_num))
 
-
+err = 20*np.log10(np.abs(R_ana)/np.abs(R_num))
 
 plt.figure(1)
 plt.plot(x0, 'b', label='Full reflection')
@@ -197,3 +208,4 @@ plt.grid(True, which="both")
 plt.title(r"Sanity test: is spectrum 'flat'below f_cutoff?")
 
 plt.show()
+
