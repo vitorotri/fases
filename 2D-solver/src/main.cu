@@ -6,10 +6,18 @@
 #include <cstring>
 #include <string>
 #include <filesystem>
+#include <fstream>
+#include <vector>
+#include <sstream>
 #include "functions.cuh"
 //#include <cuda_runtime.h>
 
 int main(int argc, char *argv[]){
+	if (argc < 3) {
+        printf("Usage: %s <filename> <config>\n", argv[0]);
+        return 1;
+    }
+
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
 	float *p0, *u0, *v0, *p1, *u1, *v1, *p2, *u2, *v2; // host arrays
 	float *d_p0, *d_u0, *d_v0, *d_p1, *d_u1, *d_v1, *d_p2, *d_u2, *d_v2, *c_rl, *dd; // device arrays
@@ -21,20 +29,34 @@ int main(int argc, char *argv[]){
     clock_t tic, toc;
     double elapsed_time;
     
+    // read argv[2] file
+    std::vector<float> conf_arr;
+    std::ifstream file(argv[2]);  // argv[2] is your filename
+    std::string line;
+    while (std::getline(file, line)) {
+    	// Truncate at # (remove comments after float)
+    	size_t hash_pos = line.find('#');
+    	if (hash_pos != std::string::npos) {
+        	line.erase(hash_pos);  // Everything after # is gone
+    	}
+    	float f;
+    	std::istringstream(line) >> f;
+    	conf_arr.push_back(f);
+	}
+
+    
     // domain variables
-    t_max = 0.009f; // max time [s], define in terms of domain size and how many times it crosses it
-    f_cutoff = 1000.0f; // [Hz] (cutoff frequency)
-    h = 0.005f; // uniform grid spacing [m]
+    h = conf_arr[0]; // uniform grid spacing [m]
+    t_max = conf_arr[1]; // maximum simulation time [s]
+    f_cutoff = conf_arr[2]; // [Hz] (cutoff frequency)
+    
     n = 0; // initial time-step
     
     // ---------------------- load OBJ/PLY/XYZ/etc file and create scene ---------------------
     
     system("rm output/pressure.bin output/oid.bin output/S.bin output/header.txt");
     
-    if (argc < 2) {
-        printf("Usage: %s <filename>\n", argv[0]);
-        return 1;
-    }
+    
     char *path = argv[1];
     FILE *fp = fopen(path, "r");
     if (!fp) {
@@ -199,6 +221,9 @@ int main(int argc, char *argv[]){
     
     int K_m, L_m;
     
+    K_m = int(conf_arr[5]);
+    L_m = int(conf_arr[6]);
+    /*
     std::ifstream polesf("config/poles.txt");
     if (!polesf) {
         std::cerr << "\n[!] Could not open config/poles.txt\n";
@@ -206,6 +231,7 @@ int main(int argc, char *argv[]){
     }
     polesf >> K_m >> L_m;
     polesf.close();
+    */
     
 	Ak 		= new float[K_m * nMat];
 	zeta 	= new float[K_m * nMat];
@@ -316,11 +342,11 @@ int main(int argc, char *argv[]){
 	
 	// should to to config later
 	
-	float R_spec = 287.05; // specific gas constant for air [J] [kg]^-1 [K]^-1
-	float gamma = 1.4; // specific heat ratio for air
+	float R_spec = 287.05f; // specific gas constant for air [J] [kg]^-1 [K]^-1
+	float gamma = 1.4f; // specific heat ratio for air
 	
-	rho = 1.225; // average sea level density for air [kg/m3]. For dry air, proportional to p0/R_spec*T
-	Temp = 288.15; // temperature [K]
+	rho = 1.225f; // average sea level density for air [kg/m3]. For dry air, proportional to p0/R_spec*T
+	Temp = conf_arr[3] + 273.15f; // temperature [K] = Celsius_temp + 273.15
 	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
 	// c = sqrt(K/rho) in case of liquids
     
@@ -333,7 +359,7 @@ int main(int argc, char *argv[]){
     u0 = new float[N](); // x component of particle velocity 
     v0 = new float[N](); // y component of particle velocity 
 
-	float C_CFL = 0.2; // Courant number: pick values < 0.5 (not equal to)
+	float C_CFL = conf_arr[4]; // Courant number: pick values < 0.5 (not equal to)
 	dt = C_CFL*h/c; // Courant-Friedrichs-Lewy condition
 	printf("\ndt = %.9f\n", dt);
 	
@@ -376,7 +402,7 @@ int main(int argc, char *argv[]){
 	
 	// for Lx = 4.07, Ly = 12.03 [m]
 	int src_x = (int)(0.5f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
-	int rec_x = (int)(0.70f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
+	int rec_x = (int)(0.75f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
 	
 	float amp = 0.001f; // amplitude
 	if (opt == 1){

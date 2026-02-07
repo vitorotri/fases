@@ -1,0 +1,7 @@
+0.005 	# grid spacing h [m]
+0.01	# maximum simulation time t_max [s]
+1000.0	# cutoff frequency f_cutoff [Hz]
+22.0	# temperature Temp [°C]
+0.2		# Courant-Friedrich-Lewy number C_CFL
+3		# number of real poles K_m for ADE
+2		# number of complex poles L_m for ADE
