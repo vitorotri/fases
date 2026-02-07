@@ -22,7 +22,7 @@ int main(int argc, char *argv[]){
     double elapsed_time;
     
     // domain variables
-    t_max = 0.035f; // max time [s], define in terms of domain size and how many times it crosses it
+    t_max = 0.009f; // max time [s], define in terms of domain size and how many times it crosses it
     f_cutoff = 1000.0f; // [Hz] (cutoff frequency)
     h = 0.005f; // uniform grid spacing [m]
     n = 0; // initial time-step
@@ -333,7 +333,7 @@ int main(int argc, char *argv[]){
     u0 = new float[N](); // x component of particle velocity 
     v0 = new float[N](); // y component of particle velocity 
 
-	float C_CFL = 0.1; // Courant number: pick values < 0.5 (not equal to)
+	float C_CFL = 0.2; // Courant number: pick values < 0.5 (not equal to)
 	dt = C_CFL*h/c; // Courant-Friedrichs-Lewy condition
 	printf("\ndt = %.9f\n", dt);
 	
@@ -375,13 +375,13 @@ int main(int argc, char *argv[]){
 	scanf("%d",&opt);
 	
 	// for Lx = 4.07, Ly = 12.03 [m]
-	int src_x = (int)(0.25f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
+	int src_x = (int)(0.5f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
 	int rec_x = (int)(0.70f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
 	
-	float amp = 100.0f; // amplitude
+	float amp = 0.001f; // amplitude
 	if (opt == 1){
 		// Delta pulse
-		p0[flat(src_x, src_y, Nx)] = amp; // [Pa]
+		//p0[flat(src_x, src_y, Nx)] = amp; // [Pa]
 		//p0[flat((int)(0.75f*Nx), src_y, Nx)] = amp; // 2nd source
 		/*
 		// Directional source
@@ -392,19 +392,19 @@ int main(int argc, char *argv[]){
 		// Delta distribution
 		//delta(p0, 1.0/2.0, src_x, src_y, Nx, Ny, 390.0);
 		
-		/*
+		
 		// Plane wave
-		int src_x_0 = (int)(0.03*Nx);
-		int src_x_1 = (int)(0.08*Nx);
+		//int src_x_0 = (int)(0.25f*Nx);
+		//int src_x_1 = (int)(0.08*Nx);
 		
 		//for (int j = (int)(0.05*Ny); j < Ny-(int)(0.05*Ny); j++){ // depends on resolution
-		for (int j = 3; j < Ny-3; j++){
-			for (int i = src_x_0; i <= src_x_1; i++){
-				u0[flat(i,j,Nx)] = amp;
-				p0[flat(i,j,Nx)] = amp;
-			}
+		for (int j = int(0.05f*Ny); j < int(0.95f*Ny); j++){
+			//for (int i = src_x_0; i <= src_x_1; i++){
+				u0[flat(src_x,j,Nx)] = amp;
+				p0[flat(src_x,j,Nx)] = 0.1*amp;
+			//}
 		}
-		*/
+		
 		
 	}
 	else if (opt == 2){
@@ -492,9 +492,9 @@ int main(int argc, char *argv[]){
 		cudaMallocManaged(&c_rl, 6*sizeof(float)); // coefficients
 		cudaMallocManaged(&dd, 2*sizeof(float)); // array
 			
-		c_rl[flat(0,0,6)] = 1.5; c_rl[flat(0,1,6)] = -0.5;
-		c_rl[flat(1,0,6)] = 0.5; c_rl[flat(1,1,6)] = 0.5;
-		c_rl[flat(2,0,6)] = -0.5; c_rl[flat(2,1,6)] = 1.5;
+		c_rl[flat(0,0,3)] = 1.5; c_rl[flat(0,1,3)] = -0.5;
+		c_rl[flat(1,0,3)] = 0.5; c_rl[flat(1,1,3)] = 0.5;
+		c_rl[flat(2,0,3)] = -0.5; c_rl[flat(2,1,3)] = 1.5;
 			
 		dd[0] = 2.0/3.0; dd[1] = 1.0/3.0;
 		
