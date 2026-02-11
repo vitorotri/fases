@@ -11,7 +11,7 @@ Solver for enclosed and open spaces.
 ## Usage
 
 ```bash
-# ./run <path_to_scene.obj> <path_to_config.txt>
+# ./run <path_to_scene.obj> <path_to_config.txt> <path_to_sources.txt> <path_to_receivers.txt>
 ```
 
 ## Plotting
