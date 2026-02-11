@@ -13,10 +13,14 @@
 //#include <cuda_runtime.h>
 
 int main(int argc, char *argv[]){
-	if (argc < 3) {
-        printf("Usage: %s <filename> <config>\n", argv[0]);
+	if (argc < 4) {
+        printf("Usage: %s <scene> <config> <src> <rec>\n", argv[0]);
         return 1;
     }
+
+	printf("\n[!] Fit all materials first!\n");
+
+	printf("\n[!] Call Python script showing scene config here?\n");
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
 	float *p0, *u0, *v0, *p1, *u1, *v1, *p2, *u2, *v2; // host arrays
@@ -31,9 +35,9 @@ int main(int argc, char *argv[]){
     
     // read argv[2] file
     std::vector<float> conf_arr;
-    std::ifstream file(argv[2]);  // argv[2] is your filename
+    std::ifstream file(argv[2]);
     std::string line;
-    while (std::getline(file, line)) {
+    while (std::getline(file, line)){
     	// Truncate at # (remove comments after float)
     	size_t hash_pos = line.find('#');
     	if (hash_pos != std::string::npos) {
@@ -43,8 +47,9 @@ int main(int argc, char *argv[]){
     	std::istringstream(line) >> f;
     	conf_arr.push_back(f);
 	}
-
-    
+	file.close();
+	file.clear();
+	
     // domain variables
     h = conf_arr[0]; // uniform grid spacing [m]
     t_max = conf_arr[1]; // maximum simulation time [s]
@@ -199,11 +204,10 @@ int main(int argc, char *argv[]){
     	fclose(pre_header);
     }
     
+    
     // --------------------------------------------------------------------------------------------------
     
     int N = Nx*Ny; // number of grid cells
-    
-    
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
     
@@ -394,9 +398,61 @@ int main(int argc, char *argv[]){
     	return -1;
 	}
 	
+	
+	// ----------------------- Parse sources and receivers from argv[3] and argv[4] --------------------
+    
+    // parse sources
+    
+    file.open(argv[3]);
+	if (!file.is_open()){
+    	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
+    	return -1;
+	}
+	while (std::getline(file, line)) {
+    	if (line.empty() || line[0] == '#') continue;
+    	float val_x, val_y, val_s;
+    	std::istringstream iss(line);
+    	if (iss >> val_x >> val_y >> val_s) {
+        	int i_src = int(val_x / h);
+        	int j_src = int(val_y / h);
+        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny) {
+            	p0[flat(i_src, j_src, Nx)] = val_s;
+        	}
+    	}
+	}
+	file.close();
+	file.clear();
+    
+    // parse single receiver (for now), use array later
+    
+    int rec_x, rec_y;
+    file.open(argv[4]);
+	if (!file.is_open()){
+    	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
+    	return -1;
+	}
+	while (std::getline(file, line)) {
+    	if (line.empty() || line[0] == '#') continue;
+    	float val_x, val_y;
+    	std::istringstream iss(line);
+    	if (iss >> val_x >> val_y) {
+        	int i_rec = int(val_x / h);
+        	int j_rec = int(val_y / h);
+        	if (i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny) {
+            	rec_x = i_rec;
+            	rec_y = j_rec;
+        	}
+    	}
+	}
+	file.close();
+	file.clear();
+	
+	
 	// --------------------------- Fields initialization (sources and receiver) ----------------------
 	
+	
 	int opt;
+	/*
 	printf("\nChoose pulse type:\n\n 1) Delta\n 2) Gaussian\n 3) Top-hat\n\n");
 	scanf("%d",&opt);
 	
@@ -409,12 +465,12 @@ int main(int argc, char *argv[]){
 		// Delta pulse
 		//p0[flat(src_x, src_y, Nx)] = amp; // [Pa]
 		//p0[flat((int)(0.75f*Nx), src_y, Nx)] = amp; // 2nd source
-		/*
+		
 		// Directional source
-		p0[flat(src_x+1, src_y+1, Nx)] = amp; // without pressure scheme seems not TVD
-		u0[flat(src_x+1, src_y, Nx)] = 0.04;
-		v0[flat(src_x, src_y+1, Nx)] = 0.04;
-		*/
+		//p0[flat(src_x+1, src_y+1, Nx)] = amp; // without pressure scheme seems not TVD
+		//u0[flat(src_x+1, src_y, Nx)] = 0.04;
+		//v0[flat(src_x, src_y+1, Nx)] = 0.04;
+		
 		// Delta distribution
 		//delta(p0, 1.0/2.0, src_x, src_y, Nx, Ny, 390.0);
 		
@@ -461,15 +517,15 @@ int main(int argc, char *argv[]){
 			}
 		}
 	}
+	*/
 	
-	// -------------------------------------------------------------------------------------
+	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
 	// Kernel launch parameters
 	dim3 TP(8,8); // multiples of 32, max is 1024 (TP.x * TP.y <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
 	dim3 BP((Nx + TP.x - 1)/TP.x,(Ny + TP.y - 1)/TP.y); // BLOCKS Per Grid
 	
-	// Copy data to device
-	// Can do outside main loop since it is a one step system with in-place update
+	// Copy initial data to device
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){

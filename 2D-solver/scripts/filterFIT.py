@@ -8,29 +8,32 @@ from scipy.signal import hilbert
 # ============================================================
 f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
 
-read_file = "Material1.mat"
-K = 3  # real poles
-L = 2  # complex conjugate pairs
-
-# simulation / medium (kept)
-h = 0.005
-C_CFL = 0.3
-R_spec = 287.05
-gamma = 1.4
-rho = 1.225
-Temp = 288.15
-f_cutoff = 1000.0
-f_tol = 200
-f_cutoff += f_tol
-c = np.sqrt(gamma * R_spec * Temp)
-dt = C_CFL * h / c
+read_file = "Material0.mat"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
 Rmag_oct = np.loadtxt(data_path)
 
-poles_path = os.path.join(script_dir, "..", "config", "poles.txt")
-np.savetxt(poles_path, np.array([[K, L]]), fmt="%d")
+config_path = os.path.join(script_dir, "..", "config", "config.txt")
+
+v = np.loadtxt(config_path)
+
+K = int(v[5])  # real poles
+L = int(v[6])  # complex conjugate pairs
+
+# simulation / medium (kept)
+h = v[0]
+f_cutoff = v[2]
+Temp = v[3]
+C_CFL = v[4]
+R_spec = 287.05
+gamma = 1.4
+rho = 1.225
+f_tol = 0.2*f_cutoff
+f_cutoff += f_tol
+c = np.sqrt(gamma * R_spec * Temp)
+dt = C_CFL * h / c
+
 
 # ============================================================
 # SETTINGS (assertive defaults)
@@ -302,7 +305,7 @@ Ccoef = -(alpha / beta) * Bcoef  # enforced output
 # ============================================================
 save_file = read_file[:-4] + ".fit"
 coefs_path = os.path.join(script_dir, "..", "input", "fit", save_file)
-np.savetxt(poles_path, np.array([[K, L]]), fmt="%d")
+#np.savetxt(poles_path, np.array([[K, L]]), fmt="%d")
 
 with open(coefs_path, 'w') as f:
     f.write("# R_inf\n")
