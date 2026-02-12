@@ -1,6 +1,5 @@
 #include <cmath>
 #include <cstring>
-//#include <stdbool.h>
 #include "../include/parsing.h"
 #include "../include/filterABC.h"
 
@@ -796,11 +795,11 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 // 
 __host__ __device__ void sPML(float *q, int i, int j, int Nx, int Ny, float h){
     float s_max = 0.018f; // Maximum absorption factor
-    int max_idx = (int)(0.25f*(Nx < Ny ? Nx : Ny)); // halfwidth
+    int max_idx = (int)(0.15f*(Nx < Ny ? Nx : Ny)); // halfwidth
     float half   = (float)max_idx;
 
 	// ramps in [0,1] (to exclude a side, multiply by 0.0f)
-	float rx = 0.0f;//fmaxf(0.0f, fminf((i - (Nx - half)) / half, 1.0f)); // right boundary ramp
+	float rx = fmaxf(0.0f, fminf((i - (Nx - half)) / half, 1.0f)); // right boundary ramp
 	float lx = fmaxf(0.0f, fminf((half - i) / half, 1.0f)); // left boundary ramp
 	float ly = fmaxf(0.0f, fminf((half - j) / half, 1.0f)); // lower boundary ramp
 	float uy = fmaxf(0.0f, fminf((j - (Ny - half)) / half, 1.0f)); // upper boundary ramp)
@@ -891,7 +890,7 @@ __device__ float construct_Vi_12(float *u, int i, int j, int Nx, float *c_rl, in
 	float retval = 0.0;
 	for (int l = 0; l <= 1; l++){
 		//if (r+idx > 3) printf("[!] Violation");
-		retval += c_rl[flat(r+idx,l,6)]*u[flat(i-r+l,j,Nx)];
+		retval += c_rl[flat(r+idx,l,3)]*u[flat(i-r+l,j,Nx)];
 	}
 	return retval;
 }
@@ -901,7 +900,7 @@ __device__ float construct_Vi_12(float *u, int i, int j, int Nx, float *c_rl, in
 __device__ float construct_Vj_12(float *u, int i, int j, int Nx, float *c_rl, int r, int idx){
 	float retval = 0.0;
 	for (int l = 0; l <= 1; l++){
-		retval += c_rl[flat(r+idx,l,6)]*u[flat(i,j-r+l,Nx)];
+		retval += c_rl[flat(r+idx,l,3)]*u[flat(i,j-r+l,Nx)];
 	}
 	return retval;
 }
@@ -1083,11 +1082,11 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		v1[Cij] = v0[Cij] + dt*((-G_vP + G_vM)/h);
 		p1[Cij] = p0[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h);
 
-		
+		/*
 		sPML(u1, i, j, Nx, Ny, h);
 		sPML(v1, i, j, Nx, Ny, h);
 		sPML(p1, i, j, Nx, Ny, h);
-		
+		*/
 	}
 }
 
@@ -1146,11 +1145,11 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		v2[Cij] = 0.75f*v0[Cij] + 0.25f*(v1[Cij] + dt*((-G_vP + G_vM)/h));
 		p2[Cij] = 0.75f*p0[Cij] + 0.25f*(p1[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h));
 
-		
+		/*
 		sPML(u2, i, j, Nx, Ny, h);
 		sPML(v2, i, j, Nx, Ny, h);
 		sPML(p2, i, j, Nx, Ny, h);
-		
+		*/
 	}
 }
 
@@ -1210,11 +1209,11 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		v1[Cij] = (v0[Cij] + 2.0f*(v2[Cij] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		p1[Cij] = (p0[Cij] + 2.0f*(p2[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h)))/3.0f;
 
-		
+		/*
 		sPML(u1, i, j, Nx, Ny, h);
 		sPML(v1, i, j, Nx, Ny, h);
 		sPML(p1, i, j, Nx, Ny, h);
-		
+		*/
 	}
 }
 
