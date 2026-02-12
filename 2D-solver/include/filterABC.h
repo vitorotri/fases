@@ -34,7 +34,7 @@ static void die_if_fail(const std::ifstream& in, const std::string& what, const 
 
 void read_fit_file(
     const std::string& filename,
-    int m,              // material index: 0..nMat-1
+    int m,
     int K_m,
     int L_m,
     float* R_inf,
@@ -43,8 +43,7 @@ void read_fit_file(
     float* Bl,
     float* Cl,
     float* alpha,
-    float* beta,
-    int nMat            // number of materials (boundary layer name excluded)
+    float* beta
 ) {
     std::ifstream in(filename);
     if (!in.is_open()) {
@@ -52,28 +51,48 @@ void read_fit_file(
         std::exit(EXIT_FAILURE);
     }
 
+    int K_local = 0, L_local = 0;
+
     // R_inf
     skip_to_data(in);
     in >> R_inf[m];
     die_if_fail(in, "R_inf", filename);
 
-    // A_k, zeta_k
+    // K L
     skip_to_data(in);
-    for (int k = 0; k < K_m; ++k) {
-        in >> Ak[ flat(k, m, K_m) ] >> zeta[ flat(k, m, K_m) ];
+    in >> K_local >> L_local;
+    die_if_fail(in, "K L", filename);
+
+    if (K_local < 0 || K_local > K_m) {
+        std::cerr << "Invalid K_local=" << K_local << " (K_m=" << K_m
+                  << ") in file: " << filename << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+    if (L_local < 0 || L_local > L_m) {
+        std::cerr << "Invalid L_local=" << L_local << " (L_m=" << L_m
+                  << ") in file: " << filename << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    // A_k zeta_k
+    skip_to_data(in);
+    for (int k = 0; k < K_local; ++k) {
+        in >> Ak[ flat(k, m, K_m) ]       // stride = K_m
+           >> zeta[ flat(k, m, K_m) ];
         die_if_fail(in, "A_k zeta_k row " + std::to_string(k), filename);
     }
 
-    // B_l, C_l, alpha_l, beta_l
+    // B_l C_l alpha_l beta_l
     skip_to_data(in);
-    for (int l = 0; l < L_m; ++l) {
-        in >> Bl[ flat(l, m, L_m) ]
+    for (int l = 0; l < L_local; ++l) {
+        in >> Bl[ flat(l, m, L_m) ]       // stride = L_m
            >> Cl[ flat(l, m, L_m) ]
            >> alpha[ flat(l, m, L_m) ]
            >> beta[ flat(l, m, L_m) ];
         die_if_fail(in, "B_l C_l alpha_l beta_l row " + std::to_string(l), filename);
     }
 }
+
 
 // build bmap and return nB
 // re-implement on GPU if slow
