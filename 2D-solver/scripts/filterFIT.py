@@ -1,12 +1,85 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-from scipy.signal import hilbert
+#!/usr/bin/env python3
+"""
+Vector fitting of normal-incedance reflection coefficient using scikit-rf (skrf).
 
-# ============================================================
-# DO NOT TOUCH YOUR I/O CONVENTIONS (kept)
-# ============================================================
-f_oct = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
+This is a Python translation of the provided MATLAB script.
+- MATLAB vectfit3(...)  ->  skrf.vectorFitting.VectorFitting.vector_fit(...)
+- Saving .mat          ->  scipy.io.savemat(...)
+
+Notes (important and intentional):
+- In the MATLAB script, s = j*omega with omega = 2*pi*f (rad/s).
+  Therefore poles should also be in rad/s. Here we initialize poles in rad/s.
+- opts.asymp = 1 (no constant term) is mapped to fit_constant=False and fit_proportional=False.
+"""
+
+import numpy as np
+from scipy.io import savemat
+import os
+import skrf as rf
+from skrf.vectorFitting import VectorFitting
+
+def octave_centers():
+    return np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
+
+def interp_loglog(f, fc, y_fc):
+    # interpolate y in log-f domain
+    lf = np.log(f)
+    lfc = np.log(fc)
+    return np.interp(lf, lfc, y_fc, left=y_fc[0], right=y_fc[-1])
+
+def min_phase_from_mag(f, Rmag):
+    """
+    f: Hz, 1D increasing
+    Rmag: |R(f)|, same shape
+    returns phase phi(f) (radians) using PV integral in omega
+    """
+    Rmag = np.clip(Rmag, 1e-12, 0.999999999)
+    omega = 2*np.pi*f
+    logmag = np.log(Rmag)
+
+    phi = np.zeros_like(f, dtype=float)
+    # PV integral discretization
+    for i in range(len(f)):
+        w = omega[i]
+        denom = omega - w
+        denom[i] = np.inf  # remove singular term
+        integrand = logmag / denom
+        # trapezoidal integral over omega
+        phi[i] = -(1/np.pi) * np.trapz(integrand, omega)
+
+    return phi
+
+def Z_from_octave_Rmag(freq, R_oct, z0):
+    """
+    freq : Hz array (your target grid)
+    R_oct: 8 values at octave centers 63..8000 Hz (magnitudes)
+    z0   : characteristic impedance
+    returns: complex Z(freq)
+    """
+    fc = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], float)
+    R_oct = np.clip(np.asarray(R_oct, float), 1e-6, 0.999999)
+
+    # interpolate ln|R| on ln f (log-log)
+    logR = np.interp(np.log(freq), np.log(fc), np.log(R_oct),
+                     left=np.log(R_oct[0]), right=np.log(R_oct[-1]))
+    Rmag = np.exp(logR)
+
+    # minimum-phase phase via PV integral (simple, O(N^2), OK for ~1e4 points)
+    omega = 2*np.pi*freq
+    logmag = np.log(np.clip(Rmag, 1e-12, 1.0))
+    phi = np.zeros_like(freq, float)
+    for i in range(freq.size):
+        denom = omega - omega[i]
+        denom[i] = np.inf
+        phi[i] = -(1/np.pi) * np.trapz(logmag / denom, omega)
+
+    R = Rmag * np.exp(1j*phi)
+    Z = z0 * (1 + R) / (1 - R)
+    return Z
+
+# --------------------
+# Block 1: User input
+# --------------------
 
 read_file = "Material0.mat"
 
@@ -18,294 +91,126 @@ config_path = os.path.join(script_dir, "..", "config", "config.txt")
 
 v = np.loadtxt(config_path)
 
-K = int(v[5])  # real poles
-L = int(v[6])  # complex conjugate pairs
-
-# simulation / medium (kept)
-h = v[0]
 f_cutoff = v[2]
-Temp = v[3]
-C_CFL = v[4]
-R_spec = 287.05
-gamma = 1.4
-rho = 1.225
 f_tol = 0.2*f_cutoff
 f_cutoff += f_tol
-c = np.sqrt(gamma * R_spec * Temp)
-dt = C_CFL * h / c
+Temp = v[3]
+R_spec = 287.05
+gamma = 1.4
+
+#c0 = np.sqrt(gamma * R_spec * Temp)         # speed of sound (m/s)
+#rho0 = 1.225                                # air density
+c0 = 343
+rho0 = 1.213
+z0 = c0 * rho0                              # characteristic impedance of air
+
+savename = "carpet"  # output .mat filename (without extension)
+
+# Frequency samples (Hz)
+f_min = 20.0
+#f_max = f_cutoff
+f_max = 2000
+frequency_step = 10.0
+freq = np.arange(f_min, f_max + 0.5 * frequency_step, frequency_step)  # include f_max robustly
+
+Niter = 20  # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
+N = 5       # "number of poles" in MATLAB script (here: number of REAL starting poles)
+
+# Example impedance (Miki model) to be approximated
+
+sigma = 100000.0
+x = freq / sigma
+Z_Miki = z0 * (1.0 + 5.50 * (x * 1000.0) ** (-0.632) - 1j * 8.43 * (x * 1000.0) ** (-0.632))
+
+Zs_to_fit = Z_Miki
+
+#Zs_to_fit = Z_from_octave_Rmag(freq, Rmag_oct, z0)
+
+# --------------------------------------------------------------------------------
+# Block 2: Vector fit reflection coefficient with scikit-rf
+# --------------------------------------------------------------------------------
+ReflectionCoefficient = (Zs_to_fit / z0 - 1.0) / (Zs_to_fit / z0 + 1.0)
+
+# Build a 1-port skrf Network with S11 = ReflectionCoefficient
+frequency = rf.Frequency.from_f(freq, unit="hz")
+nw = rf.Network(frequency=frequency)
+nw.s = ReflectionCoefficient.reshape(-1, 1, 1)  # shape: (n_freq, n_ports, n_ports)
+nw.name = savename
+
+vf = VectorFitting(nw)
+vf.max_iterations = int(Niter)
+
+# Provide custom initial poles (rad/s), matching s = j*2*pi*f.
+# MATLAB used: poles = -linspace(freq(1),freq(end),N)  (but s is rad/s)
+# Here we do it consistently in rad/s:
+poles_init = -2.0 * np.pi * np.linspace(freq[0], freq[-1], N).astype(float)
+vf.poles = poles_init.astype(complex)
+
+print("vector fitting (scikit-rf)...")
+vf.vector_fit(
+    n_poles_real=0,             # ignored for custom spacing
+    n_poles_cmplx=0,            # ignored for custom spacing
+    init_pole_spacing="custom", # uses vf.poles as initial poles
+    parameter_type="s",         # fit directly S11
+    fit_constant=False,          # opts.asymp=1  -> no constant term
+    fit_proportional=False,     # no proportional term
+)
+
+# Final RMS error (scalar response i=j=0)
+rmserr = float(vf.get_rms_error(i=0, j=0))
+print(f"RMS error (final): {rmserr:.6e}")
+
+# Fitted model parameters
+poles = np.array(vf.poles, dtype=complex)              # shape (K,) ; complex poles stored with +imag only
+residues = np.array(vf.residues[0], dtype=complex)     # shape (K,) ; because 1-port => M=1 response
 
 
-# ============================================================
-# SETTINGS (assertive defaults)
-# ============================================================
-USE_MIN_PHASE = True          # you only have |R| => must synthesize a causal phase
-LF_ANCHOR_TO_RIGID = True     # |R| -> 1 at LF (recommended)
-MAG_FLOOR = 1e-6
+# ------------------------------------------------------------
+# Block 3: Extract coefficients in ADE form and save to file
+# ------------------------------------------------------------
 
-VF_ITERS = 13
-VF_TOL_IMAG_REAL = 1e-8
-VF_RELAX = 0.1               # pole update relaxation (stability)
+poles = np.array(vf.poles, dtype=complex)
+residues = np.array(vf.residues[0], dtype=complex)
 
-# ============================================================
-# helpers
-# ============================================================
-def mag_target_from_octaves(f_meas, mag_meas,
-                            f_low=20.0, f_high=None,
-                            ngrid=512,
-                            mag_low=None, mag_high=None):
-    f_meas = np.asarray(f_meas, float)
-    mag_meas = np.clip(np.asarray(mag_meas, float), MAG_FLOOR, 1.0)
-    if f_high is None:
-        f_high = float(f_meas.max())
-    if mag_low is None:
-        mag_low = float(mag_meas[0])
-    if mag_high is None:
-        mag_high = float(mag_meas[-1])
+# Constant term (R_inf)
+Rinf = float(vf.constant_coeff[0]) if vf.constant_coeff is not None else 0.0
 
-    f_anchor = np.r_[f_low, f_meas, f_high]
-    mag_anchor = np.r_[mag_low, mag_meas, mag_high]
-    mag_anchor = np.clip(mag_anchor, MAG_FLOOR, 1.0)
+# Separate real and complex poles
+real_mask = np.isclose(np.imag(poles), 0.0)
+cmplx_mask = ~real_mask
 
-    flog_u = np.linspace(np.log(f_anchor.min()), np.log(f_anchor.max()), ngrid)
-    f_u = np.exp(flog_u)
+poles_real = poles[real_mask]
+res_real = residues[real_mask]
 
-    lnmag_u = np.interp(flog_u, np.log(f_anchor), np.log(mag_anchor))
-    mag_u = np.exp(lnmag_u)
-    mag_u = np.clip(mag_u, MAG_FLOOR, 1.0)
-    return f_u, mag_u
+poles_cmplx = poles[cmplx_mask]
+res_cmplx = residues[cmplx_mask]
 
-def min_phase_from_mag(f_grid, mag_grid, w_uniform):
-    w_src = 2*np.pi*np.asarray(f_grid, float)
-    mag_src = np.clip(np.asarray(mag_grid, float), MAG_FLOOR, 1.0)
-    lnmag_src = np.log(mag_src)
+# -----------------------------
+# REAL POLES  ->  A_k, zeta_k
+# -----------------------------
+zeta = (-poles_real.real)        # because pole = -zeta
+Acoef = res_real.real            # residue
 
-    lnmag_u = np.interp(w_uniform, w_src, lnmag_src)
-    analytic = hilbert(lnmag_u)     # uniform grid required
-    phi_u = -np.imag(analytic)
-    mag_u = np.exp(lnmag_u)
-    mag_u = np.clip(mag_u, MAG_FLOOR, 1.0)
-    return mag_u, phi_u
+K = len(zeta)
 
-def stack_real_imag(Ac, bc):
-    A = np.vstack([np.real(Ac), np.imag(Ac)])
-    b = np.hstack([np.real(bc), np.imag(bc)])
-    return A, b
+# -------------------------------------------
+# COMPLEX POLES -> B_l C_l alpha_l beta_l
+# -------------------------------------------
+# scikit-rf stores only ONE pole per complex pair (positive imag part)
 
-def enforce_stable(a):
-    # reflect unstable poles into LHP
-    ar = np.real(a)
-    ai = np.imag(a)
-    ar = -np.abs(ar)
-    return ar + 1j*ai
+alpha = (-poles_cmplx.real)
+beta  = (-poles_cmplx.imag)
 
-def pack_poles_from_zeta_alpha_beta(zeta, alpha, beta):
-    a = []
-    for k in range(len(zeta)):
-        a.append(-zeta[k] + 0j)
-    for l in range(len(alpha)):
-        a.append(-alpha[l] + 1j*beta[l])
-        a.append(-alpha[l] - 1j*beta[l])
-    return np.array(a, dtype=complex)
+Bcoef = 2.0 * res_cmplx.real
+Ccoef = -2.0 * res_cmplx.imag
 
-def unpack_to_zeta_alpha_beta(a, K, L):
-    # Choose K "most real" poles as real; rest as L conjugate pairs (positive imag)
-    a = np.array(a, dtype=complex)
+L = len(alpha)
 
-    # snap near-real
-    a2 = a.copy()
-    a2[np.abs(np.imag(a2)) < VF_TOL_IMAG_REAL] = np.real(a2[np.abs(np.imag(a2)) < VF_TOL_IMAG_REAL]) + 0j
+# ------------------------------------------------------------
+# SAVE IN YOUR C++ FORMAT
+# ------------------------------------------------------------
 
-    # pick real poles
-    idx_sorted = np.argsort(np.abs(np.imag(a2)))
-    real_idx = []
-    for idx in idx_sorted:
-        if len(real_idx) >= K:
-            break
-        if np.abs(np.imag(a2[idx])) < 1e-3:
-            real_idx.append(idx)
-    # if not enough "real", just take smallest imag
-    if len(real_idx) < K:
-        real_idx = list(idx_sorted[:K])
-
-    real_poles = a2[real_idx]
-    rest_mask = np.ones(len(a2), dtype=bool)
-    rest_mask[real_idx] = False
-    rest = a2[rest_mask]
-
-    # build conjugate pairs by taking positive imag poles
-    pos = rest[np.imag(rest) > 0]
-    if len(pos) < L:
-        # fallback: pick poles with largest |imag| as pairs
-        rest_sorted = rest[np.argsort(-np.abs(np.imag(rest)))]
-        pos = rest_sorted[np.imag(rest_sorted) >= 0][:L]
-    pos = pos[:L]
-
-    zeta = -np.real(real_poles)
-    alpha = -np.real(pos)
-    beta = np.abs(np.imag(pos))
-
-    # ensure strictly positive
-    zeta = np.clip(zeta, 1e-6, None)
-    alpha = np.clip(alpha, 1e-6, None)
-    beta = np.clip(beta, 1e-6, None)
-    return zeta, alpha, beta
-
-# ============================================================
-# Hornikx–Wang constrained model (C = -alpha B / beta)
-# This simplifies the pair term to:  B * s / ((s+alpha)^2 + beta^2)
-# ============================================================
-def R_model_constrained(w, Rinf, A, zeta, B, alpha, beta):
-    s = 1j*w
-    R = (Rinf + 0j) * np.ones_like(s)
-
-    if len(zeta):
-        R += (A[:, None] / (zeta[:, None] + s[None, :])).sum(axis=0)
-
-    if len(alpha):
-        den = (s[None, :] + alpha[:, None])**2 + (beta[:, None]**2)
-        R += (B[:, None] * s[None, :] / den).sum(axis=0)
-
-    return R
-
-# ============================================================
-# Vector Fitting: pole relocation (Gustavsen-style)
-# ============================================================
-def vector_fit_poles(s, F, a_init, n_iters=10, relax=0.6):
-    a = np.array(a_init, dtype=complex)
-
-    for _ in range(n_iters):
-        # Build LS system for: F*(1 + sum d/(s-a)) ≈ c0 + sum c/(s-a)
-        Phi = 1.0 / (s[:, None] - a[None, :])             # (Ns, Np)
-        # Unknowns: [c0, c(1..N), d(1..N)]
-        Ac = np.hstack([
-            np.ones((len(s), 1), dtype=complex),
-            Phi,
-            -F[:, None] * Phi
-        ])
-        bc = F
-
-        A, b = stack_real_imag(Ac, bc)
-        x, *_ = np.linalg.lstsq(A, b, rcond=None)
-
-        # Extract d
-        d = x[1+len(a):1+2*len(a)]
-        d = d.astype(float)  # from real-stacked system
-
-        # Relocation: roots of sigma(s)=1+sum d/(s-a)
-        # Eigenvalues of: diag(a) - 1*d^T
-        Arel = np.diag(a) - np.ones((len(a), 1)) @ d.reshape(1, -1)
-        a_new = np.linalg.eigvals(Arel)
-
-        # enforce stability + relax
-        a_new = enforce_stable(a_new)
-        a = relax*a_new + (1.0-relax)*a
-        a = enforce_stable(a)
-
-    return a
-
-# ============================================================
-# Final constrained LS solve for (Rinf, A_k, B_l) with fixed poles
-# ============================================================
-def solve_constrained_coeffs(s, F, zeta, alpha, beta):
-    # Basis: 1, 1/(s+zeta_k), s/((s+alpha_l)^2+beta_l^2)
-    cols = [np.ones_like(s)]
-    for zk in zeta:
-        cols.append(1.0 / (s + zk))
-    for al, be in zip(alpha, beta):
-        cols.append(s / ((s + al)**2 + be**2))
-
-    Ac = np.column_stack(cols)  # complex
-    A, b = stack_real_imag(Ac, F)
-    x, *_ = np.linalg.lstsq(A, b, rcond=None)
-    x = x.astype(float)
-
-    Rinf = x[0]
-    Acoef = x[1:1+len(zeta)]
-    Bcoef = x[1+len(zeta):]
-    return Rinf, Acoef, Bcoef
-
-# ============================================================
-# CUT-OFF MASKING (kept)
-# ============================================================
-mask = f_oct <= f_cutoff
-f_oct = f_oct[mask]
-Rmag_oct = Rmag_oct[mask]
-
-# ============================================================
-# Build |R| target (kept style) + complex target via min-phase
-# ============================================================
-f_low = 20.0
-f_high = float(f_cutoff)
-
-mag_low = 0.999 if LF_ANCHOR_TO_RIGID else float(Rmag_oct[0])
-mag_high = float(Rmag_oct[-1])
-
-f_log, mag_log = mag_target_from_octaves(f_oct, Rmag_oct,
-                                         f_low=f_low, f_high=f_high,
-                                         ngrid=512,
-                                         mag_low=mag_low, mag_high=mag_high)
-
-w_min = 2*np.pi*f_low
-w_max = 2*np.pi*f_high
-Nw = 2048
-w_fit = np.linspace(w_min, w_max, Nw)
-f_fit = w_fit / (2*np.pi)
-s_fit = 1j*w_fit
-
-mag_fit = np.interp(f_fit, f_log, mag_log)
-mag_fit = np.clip(mag_fit, MAG_FLOOR, 1.0)
-
-if USE_MIN_PHASE:
-    mag_u, phi_u = min_phase_from_mag(f_log, mag_log, w_fit)
-    R_tgt = mag_u * np.exp(1j*phi_u)
-else:
-    R_tgt = mag_fit.astype(complex)
-
-# ============================================================
-# Initial poles (fixed count) with your stability bounds logic
-# ============================================================
-eps = 1e-6
-nu_SSP_RE = 2.5127
-nu_SSP_IM = 1.732
-omega_max = 2*np.pi*float(f_cutoff)
-kappa_band = 5.0
-
-zeta_max  = min(nu_SSP_RE / dt, kappa_band * omega_max)
-alpha_max = min(nu_SSP_RE / dt, kappa_band * omega_max)
-beta_max  = min(0.85 * omega_max, nu_SSP_IM / dt)
-beta_min  = 2*np.pi*max(0.8*float(f_oct.min()), f_low)
-
-zeta0  = np.clip(np.logspace(np.log10(w_fit.min()), np.log10(w_fit.max()), K), eps, zeta_max)
-alpha0 = np.clip(np.logspace(np.log10(w_fit.min()), np.log10(w_fit.max()), L), eps, alpha_max)
-beta0  = np.clip(np.logspace(np.log10(beta_min), np.log10(w_fit.max()), L), beta_min, beta_max)
-
-a0 = pack_poles_from_zeta_alpha_beta(zeta0, alpha0, beta0)
-
-# ============================================================
-# VECTOR FITTING (pole relocation)
-# ============================================================
-a_vf = vector_fit_poles(s_fit, R_tgt, a0, n_iters=VF_ITERS, relax=VF_RELAX)
-a_vf = enforce_stable(a_vf)
-
-# re-quantize into exactly K real + L pairs
-zeta, alpha, beta = unpack_to_zeta_alpha_beta(a_vf, K, L)
-# clip within your stability limits
-zeta  = np.clip(zeta,  eps, zeta_max)
-alpha = np.clip(alpha, eps, alpha_max)
-beta  = np.clip(beta,  beta_min, beta_max)
-
-# ============================================================
-# FINAL constrained coefficients solve (enforces C = -alpha B / beta)
-# ============================================================
-Rinf, Acoef, Bcoef = solve_constrained_coeffs(s_fit, R_tgt, zeta, alpha, beta)
-Ccoef = -(alpha / beta) * Bcoef  # enforced output
-
-# ============================================================
-# SAVE (SAME FORMAT, SAME PATHS)
-# ============================================================
-save_file = read_file[:-4] + ".fit"
-coefs_path = os.path.join(script_dir, "..", "input", "fit", save_file)
-#np.savetxt(poles_path, np.array([[K, L]]), fmt="%d")
+coefs_path = f"./{savename}.txt"
 
 with open(coefs_path, 'w') as f:
     f.write("# R_inf\n")
@@ -318,40 +223,7 @@ with open(coefs_path, 'w') as f:
     f.write("# B_l C_l alpha_l beta_l\n")
     for l in range(L):
         f.write(f"{Bcoef[l]} {Ccoef[l]} {alpha[l]} {beta[l]}\n")
-    if L == 0:
-        f.write("0.0 0.0 0.0 0.0\n")
 
-# ============================================================
-# PLOTS (|R| + Re/Im, you asked for it)
-# ============================================================
-R_hat = R_model_constrained(w_fit, Rinf, Acoef, zeta, Bcoef, alpha, beta)
+print(f"Saved coefficients to {coefs_path}")
 
-plt.figure(1)
-plt.semilogx(f_fit, np.abs(R_tgt), label="Target |R|", linewidth=2)
-plt.semilogx(f_fit, np.abs(R_hat), "--", label="Fitted |R|", linewidth=2)
-plt.ylim(0, 1.05)
-plt.grid(True, which="both")
-plt.xlim(f_low, f_high)
-plt.xlabel("Frequency [Hz]")
-plt.ylabel("|R|")
-plt.legend()
 
-plt.figure(2)
-plt.semilogx(f_fit, np.real(R_tgt), label="Target Re(R)", linewidth=2)
-plt.semilogx(f_fit, np.real(R_hat), "--", label="Fitted Re(R)", linewidth=2)
-plt.grid(True, which="both")
-plt.xlim(f_low, f_high)
-plt.xlabel("Frequency [Hz]")
-plt.ylabel("Re(R)")
-plt.legend()
-
-plt.figure(3)
-plt.semilogx(f_fit, np.imag(R_tgt), label="Target Im(R)", linewidth=2)
-plt.semilogx(f_fit, np.imag(R_hat), "--", label="Fitted Im(R)", linewidth=2)
-plt.grid(True, which="both")
-plt.xlim(f_low, f_high)
-plt.xlabel("Frequency [Hz]")
-plt.ylabel("Im(R)")
-plt.legend()
-
-plt.show()
