@@ -81,7 +81,7 @@ def Z_from_octave_Rmag(freq, R_oct, z0):
 # Block 1: User input
 # --------------------
 
-read_file = "Material0.mat"
+read_file = "Material1.mat"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
@@ -98,33 +98,30 @@ Temp = v[3]
 R_spec = 287.05
 gamma = 1.4
 
-#c0 = np.sqrt(gamma * R_spec * Temp)         # speed of sound (m/s)
-#rho0 = 1.225                                # air density
-c0 = 343
-rho0 = 1.213
+c0 = np.sqrt(gamma * R_spec * Temp)         # speed of sound (m/s)
+rho0 = 1.225                                # air density
 z0 = c0 * rho0                              # characteristic impedance of air
 
-savename = "carpet"  # output .mat filename (without extension)
+savename = np.copy(read_file[:-4]) # output .mat filename (without extension)
 
 # Frequency samples (Hz)
 f_min = 20.0
-#f_max = f_cutoff
-f_max = 2000
-frequency_step = 10.0
+f_max = f_cutoff
+frequency_step = 5.0
 freq = np.arange(f_min, f_max + 0.5 * frequency_step, frequency_step)  # include f_max robustly
 
-Niter = 20  # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
-N = 5       # "number of poles" in MATLAB script (here: number of REAL starting poles)
+Niter = 20       # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
+N = int(v[5])    # "number of poles" in MATLAB script (here: number of REAL starting poles)
 
-# Example impedance (Miki model) to be approximated
-
+# Example impedance (Miki model) to be approximated (not reading from .mat file)
+'''
 sigma = 100000.0
 x = freq / sigma
 Z_Miki = z0 * (1.0 + 5.50 * (x * 1000.0) ** (-0.632) - 1j * 8.43 * (x * 1000.0) ** (-0.632))
 
 Zs_to_fit = Z_Miki
-
-#Zs_to_fit = Z_from_octave_Rmag(freq, Rmag_oct, z0)
+'''
+Zs_to_fit = Z_from_octave_Rmag(freq, Rmag_oct, z0)
 
 # --------------------------------------------------------------------------------
 # Block 2: Vector fit reflection coefficient with scikit-rf
@@ -152,7 +149,7 @@ vf.vector_fit(
     n_poles_cmplx=0,            # ignored for custom spacing
     init_pole_spacing="custom", # uses vf.poles as initial poles
     parameter_type="s",         # fit directly S11
-    fit_constant=False,          # opts.asymp=1  -> no constant term
+    fit_constant=True,          # if False -> no constant term R_inf
     fit_proportional=False,     # no proportional term
 )
 
@@ -207,14 +204,18 @@ Ccoef = -2.0 * res_cmplx.imag
 L = len(alpha)
 
 # ------------------------------------------------------------
-# SAVE IN YOUR C++ FORMAT
+# SAVE IN C++ FORMAT
 # ------------------------------------------------------------
 
-coefs_path = f"./{savename}.txt"
+save_file = read_file[:-4] + ".fit"
+coefs_path = os.path.join(script_dir, "..", "input", "fit", save_file)
 
 with open(coefs_path, 'w') as f:
     f.write("# R_inf\n")
     f.write(f"{Rinf}\n")
+
+    f.write("# K L\n")
+    f.write(f"{K} {L}\n")
 
     f.write("# A_k zeta_k\n")
     for k in range(K):
@@ -226,4 +227,17 @@ with open(coefs_path, 'w') as f:
 
 print(f"Saved coefficients to {coefs_path}")
 
+# ------------------------------------------------------------
+# SAVE MAX NUMBER OF POLES IF SUPERIOR
+# ------------------------------------------------------------
 
+Npoles_path = os.path.join(script_dir, "..", "config/poles.txt")
+Npoles = np.loadtxt(Npoles_path)
+K_m = Npoles[0]
+L_m = Npoles[1]
+if K > K_m:
+	K_m = K
+if L > L_m:
+	L_m = L
+Npoles = np.array([[int(K_m), int(L_m)]], dtype=int)
+np.savetxt(Npoles_path, Npoles, fmt='%d', delimiter=' ')

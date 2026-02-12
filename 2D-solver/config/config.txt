@@ -3,5 +3,4 @@
 1000.0	# cutoff frequency f_cutoff [Hz]
 22.0	# temperature Temp [°C]
 0.2		# Courant-Friedrich-Lewy number C_CFL
-3		# number of real poles K_m for ADE
-2		# number of complex poles L_m for ADE
+8		# number of poles for the ADE (vector fitting redistributes between real and imaginary)

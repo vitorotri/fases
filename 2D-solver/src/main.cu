@@ -219,31 +219,32 @@ int main(int argc, char *argv[]){
     
     int nMat = nObj - 1; // exclude boundary
     
-    Rinf = new float[nMat];
+    Rinf = new float[nMat]();
     
     // read K_m and L_m from file
     
-    int K_m, L_m;
+    int K_m, L_m; // k_max and L_max from all the fits
     
-    K_m = int(conf_arr[5]);
-    L_m = int(conf_arr[6]);
-    /*
-    std::ifstream polesf("config/poles.txt");
-    if (!polesf) {
-        std::cerr << "\n[!] Could not open config/poles.txt\n";
-        return -1;
+    //K_m = int(conf_arr[5]);
+    //L_m = int(conf_arr[6]);
+    
+    // read poles.txt file
+    file.open("config/poles.txt");
+    if (!file.is_open()) {
+        std::cerr << "[!] Cannot open config/file.txt" << std::endl;
+        return EXIT_FAILURE;
     }
-    polesf >> K_m >> L_m;
-    polesf.close();
-    */
+    file >> K_m >> L_m;
+	file.close();
+	file.clear();
     
-	Ak 		= new float[K_m * nMat];
-	zeta 	= new float[K_m * nMat];
+	Ak 		= new float[K_m * nMat]();
+	zeta 	= new float[K_m * nMat]();
 	
-	Bl 		= new float[L_m * nMat];
-    Cl 		= new float[L_m * nMat];
-    alpha 	= new float[L_m * nMat];
-    beta 	= new float[L_m * nMat]; 
+	Bl 		= new float[L_m * nMat]();
+    Cl 		= new float[L_m * nMat]();
+    alpha 	= new float[L_m * nMat]();
+    beta 	= new float[L_m * nMat](); 
     
     for (size_t i = 0; i < names.size(); ++i){
   		std::cout << i << " -> " << names[i] << "\n";
@@ -254,7 +255,7 @@ int main(int argc, char *argv[]){
     	std::string filename = "input/fit/" + names[m+1] + ".fit"; // names[0] = Boundary
     	std::cout << "Reading: " << filename << "\n";
 	
-    	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta, nMat);
+    	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
 	
 		// simple print test
     	std::printf("Rinf[%d] = %.15f\n", m, (float)Rinf[m]);
