@@ -76,17 +76,19 @@ int main(int argc, char *argv[]){
         return -1;
     }
     int nObj = 0; // number of obejcts in the scene (initialization)
-    int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
+    //int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
     float tol = 3.0f*h; // tolerance
 
+	/*
     float *R = NULL; // surfaces reflection coefficient
     float *d_R = NULL;
     float *T = NULL; // barrier transmission coefficient
     float *d_T = NULL;
     float *th = NULL; // barrier thickness
     float *d_th = NULL;
+    */
     uint8_t *oid = NULL; // for surface attribution
     uint8_t* d_oid = NULL;
     
@@ -141,6 +143,8 @@ int main(int argc, char *argv[]){
 		scene_layer_names(sc, names);
 		std::sort(names.begin() + 1, names.end()); // ordering
 		
+		//allocate single R, T, thickness arrays
+		/*
 		// allocate array of reflection coefficients per material/obj
 		R = new float[nObj-1]; // exclude boundary
 		
@@ -149,10 +153,11 @@ int main(int argc, char *argv[]){
 		
 		// allocate array of thickness per barrier
 		th = new float[nObj-1]; // exclude boundary
-    	
+    	*/
     	printf("\n[OK] Scene processing\n");
     	printf("\nDomain info:\n\nLx = %.6f m Ly = %.6f m\nNx = %d Ny = %d\n", Lx, Ly, Nx, Ny);
     	
+    	/*
     	int counter_mat = 0; // 0 is boundary in "names"
     	float R_val, T_val, th_val;
     	int obj_typ;
@@ -186,17 +191,18 @@ int main(int argc, char *argv[]){
     		}
     		counter_mat += 1;
     	}
-    	
+    	*/
      	// allocate on device and then copy, signed distance field, Reflection, Transmission, barrier thickness
     	cudaMalloc(&d_S, (size_t)Nx*Ny*sizeof(float));
     	cudaMemcpy(d_S, S, (size_t)Nx*Ny*sizeof(float), cudaMemcpyHostToDevice);
+    	/*
 		cudaMalloc(&d_R, (nObj-1)*sizeof(float));
 		cudaMemcpy(d_R, R, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
 		cudaMalloc(&d_T, (nObj-1)*sizeof(float));
 		cudaMemcpy(d_T, T, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
 		cudaMalloc(&d_th, (nObj-1)*sizeof(float));
 		cudaMemcpy(d_th, th, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
-
+		*/
     	scene_free(&sc);
     }
     // process PLY/VOX test
@@ -691,195 +697,131 @@ int main(int argc, char *argv[]){
 	printf("\n[OK] Simulation start\n\n");
 	tic = clock();
 
-	if (kern == 1){ // Godunov + Euler
-		if (file_opt == 0){ // OBJ
-			while(n < Nt){
-			// Launch Euler kernel
+	// Godunov + Euler
+	if (kern == 1){ 
+		while(n < Nt){
+		// Launch Euler kernel
 			
-			kernel_Euler<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S, N_PML, S_PML, E_PML, W_PML);
+		kernel_Euler<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S, N_PML, S_PML, E_PML, W_PML);
 			
-			//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+		//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 			
-			// exchange arrays
+		// exchange arrays
+		cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+		cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+		cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+			
+		cudaDeviceSynchronize();
+			
+		print_progress(n, Nt, 50);
+	
+		// Copy result back to host
+		cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+			
+		// write to file
+		if (n % anim_step == 0){
+			fwrite(p1, sizeof(float), N, fptr);
+        	fflush(fptr);  // Ensure data is written to disk
+        	pbin_size += 1;
+        }
+		
+		n += 1; // update time-step
+	}
+	
+	// Copy final results back to host (for computing TVs)
+	
+	cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(u1, d_u1, N*sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(v1, d_v1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		
+	TV_p_ = TV(p1, Nx, Ny, h);
+	TV_u_ = TV(u1, Nx, Ny, h);
+	TV_v_ = TV(v1, Nx, Ny, h);
+		
+	TV_1 = TV_p_ + TV_u_ + TV_v_;
+	printf("\n\nTV_0 = %f\n", TV_0);
+	printf("\nTV_1 = %f\n", TV_1);
+		
+	is_TVD(TV_0, TV_1);
+
+    // Free memory
+    delete[] p0, delete[] u0, delete[] v0;
+    delete[] p1, delete[] u1, delete[] v1;
+    cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1);
+    cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2);
+    	
+    }
+    // WENO3 + SSP-RK3
+    else{
+		while(n < Nt){
+			/*
+			// counter pressure for directive source
+			// be mindfull as this can work like a local obstacle, so reflections may arise
+			if (n < 10){
+				p0[flat(src_x-3, src_y-3, Nx)] = 0.0;
+				p0[flat(src_x-2, src_y-2, Nx)] = 0.0;
+				p0[flat(src_x-1, src_y-1, Nx)] = 0.0; 
+					
+				p0[flat(src_x-1, src_y, Nx)] = 0.0;
+				p0[flat(src_x, src_y-1, Nx)] = 0.0;
+				p0[flat(src_x-2, src_y, Nx)] = 0.0;
+				p0[flat(src_x, src_y-2, Nx)] = 0.0;
+				p0[flat(src_x-3, src_y, Nx)] = 0.0;
+				p0[flat(src_x, src_y-3, Nx)] = 0.0;
+					
+				cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
+			}
+			*/
+			/*
+			// Copy pressure to device (for oscillating source)
+			p0[flat(src_x, src_y, Nx)] += p_osc[n]; // if += then it is a soft source
+			cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice);
+			*/
+				
+			// Launch WENO3 kernel + SSP-RK3
+				
+			// (0)
+			kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);	
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+				
+			// (1)
+			kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);	
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
+				
+			// (2)
+			kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+
+			// exchange state arrays
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-			
+				
+			// exchange ADE state arrays
+			cudaMemcpy(phi_old, phi, nB * K_m * sizeof(float), cudaMemcpyDeviceToDevice);
+			cudaMemcpy(psi_1_old, psi_1, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
+			cudaMemcpy(psi_2_old, psi_2, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
+				
+			// sync
 			cudaDeviceSynchronize();
-			
+				
 			print_progress(n, Nt, 50);
-	
+		
 			// Copy result back to host
 			cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
-			
-			// write to file
+				
+			// write to file for animation (full pressure of size Nx * Nx * pbin)
 			if (n % anim_step == 0){
 				fwrite(p1, sizeof(float), N, fptr);
         		fflush(fptr);  // Ensure data is written to disk
         		pbin_size += 1;
         	}
-			
+        		
+        	// write to file for single receiver
+			fwrite(&p1[flat(rec_x, rec_y, Nx)], sizeof(float), 1, f_rec);
+        	fflush(f_rec);  // Ensure data is written to disk
+        		
 			n += 1; // update time-step
-		}
-	
-		// Copy final results back to host (for computing TVs) ---------> comment if using serial code
-		
-		cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(u1, d_u1, N*sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(v1, d_v1, N*sizeof(float), cudaMemcpyDeviceToHost);
-		
-		TV_p_ = TV(p1, Nx, Ny, h);
-		TV_u_ = TV(u1, Nx, Ny, h);
-		TV_v_ = TV(v1, Nx, Ny, h);
-		
-		TV_1 = TV_p_ + TV_u_ + TV_v_;
-		printf("\n\nTV_0 = %f\n", TV_0);
-		printf("\nTV_1 = %f\n", TV_1);
-		
-		is_TVD(TV_0, TV_1);
-	
-    	// Free memory
-    	delete[] p0, delete[] u0, delete[] v0;
-    	delete[] p1, delete[] u1, delete[] v1;
-    	cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1);
-    	cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2);
-    	
-    	}
-    }
-    else { // WENO3
-    	if (file_opt == 0){ // OBJ
-			while(n < Nt){
-				/*
-				// counter pressure for directive source
-				// be mindfull as this can work like a local obstacle, so reflections may arise
-				if (n < 10){
-					p0[flat(src_x-3, src_y-3, Nx)] = 0.0;
-					p0[flat(src_x-2, src_y-2, Nx)] = 0.0;
-					p0[flat(src_x-1, src_y-1, Nx)] = 0.0; 
-					
-					p0[flat(src_x-1, src_y, Nx)] = 0.0;
-					p0[flat(src_x, src_y-1, Nx)] = 0.0;
-					p0[flat(src_x-2, src_y, Nx)] = 0.0;
-					p0[flat(src_x, src_y-2, Nx)] = 0.0;
-					p0[flat(src_x-3, src_y, Nx)] = 0.0;
-					p0[flat(src_x, src_y-3, Nx)] = 0.0;
-					
-					cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
-				}
-				*/
-				/*
-				// Copy pressure to device (for oscillating source)
-				p0[flat(src_x, src_y, Nx)] += p_osc[n]; // if += then it is a soft source
-				cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice);
-				*/
-				
-				// Launch WENO3 kernel + SSP-RK3
-				
-				// (0)
-				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
-				
-				// (1)
-				kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);	
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
-				
-				// (2)
-				kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);
-				kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
-
-				// exchange state arrays
-				cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-				cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-				cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-				
-				// exchange ADE state arrays
-				cudaMemcpy(phi_old, phi, nB * K_m * sizeof(float), cudaMemcpyDeviceToDevice);
-				cudaMemcpy(psi_1_old, psi_1, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
-				cudaMemcpy(psi_2_old, psi_2, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
-				
-				// sync
-				cudaDeviceSynchronize();
-				
-				print_progress(n, Nt, 50);
-		
-				// Copy result back to host
-				cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
-				
-				// write to file for animation (full pressure of size Nx * Nx * pbin)
-				if (n % anim_step == 0){
-					fwrite(p1, sizeof(float), N, fptr);
-        			fflush(fptr);  // Ensure data is written to disk
-        			pbin_size += 1;
-        		}
-        		
-        		// write to file for single receiver
-				fwrite(&p1[flat(rec_x, rec_y, Nx)], sizeof(float), 1, f_rec);
-        		fflush(f_rec);  // Ensure data is written to disk
-        		
-				n += 1; // update time-step
-			}
-		}
-		else if (file_opt == 1){ // VOX / PLY
-			while(n < Nt){
-				/*
-				// counter pressure for directive source
-				// be mindfull as this can work like a local obstacle, so reflections may arise
-				if (n < 10){
-					p[flat(src_x-3, src_y-3, Nx)] = 0.0;
-					p[flat(src_x-2, src_y-2, Nx)] = 0.0;
-					p[flat(src_x-1, src_y-1, Nx)] = 0.0; 
-					
-					p[flat(src_x-1, src_y, Nx)] = 0.0;
-					p[flat(src_x, src_y-1, Nx)] = 0.0;
-					p[flat(src_x-2, src_y, Nx)] = 0.0;
-					p[flat(src_x, src_y-2, Nx)] = 0.0;
-					p[flat(src_x-3, src_y, Nx)] = 0.0;
-					p[flat(src_x, src_y-3, Nx)] = 0.0;
-					
-					cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
-				}
-				*/
-				
-				// Launch WENO3 kernel + SSP-RK2
-				kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);
-				
-				kernel_apply_BC_vox<<<BP, TP>>>(d_u1, d_S, Nx, Ny, -1.0f);
-				kernel_apply_BC_vox<<<BP, TP>>>(d_v1, d_S, Nx, Ny, -1.0f);
-				kernel_apply_BC_vox<<<BP, TP>>>(d_p1, d_S, Nx, Ny, 1.0f);
-				
-				kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);
-				
-				kernel_apply_BC_vox<<<BP, TP>>>(d_u2, d_S, Nx, Ny, -1.0f);
-				kernel_apply_BC_vox<<<BP, TP>>>(d_v2, d_S, Nx, Ny, -1.0f);
-				kernel_apply_BC_vox<<<BP, TP>>>(d_p2, d_S, Nx, Ny, 1.0f);
-				
-				kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);
-				
-				kernel_apply_BC_vox<<<BP, TP>>>(d_u1, d_S, Nx, Ny, -1.0f);
-				kernel_apply_BC_vox<<<BP, TP>>>(d_v1, d_S, Nx, Ny, -1.0f);
-				kernel_apply_BC_vox<<<BP, TP>>>(d_p1, d_S, Nx, Ny, 1.0f);
-				
-				// exchange arrays
-				cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-				cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-				cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-				
-				cudaDeviceSynchronize();
-				
-				print_progress(n, Nt, 50);
-		
-				// Copy result back to host
-				cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
-				
-				// write to file for animation (full pressure of size Nx * Nx * pbin)
-				if (n % anim_step == 0){
-					fwrite(p1, sizeof(float), N, fptr);
-        			fflush(fptr);  // Ensure data is written to disk
-        			pbin_size += 1;
-        		}
-        		
-				n += 1; // update time-step
-			}
 		}
 		
 		// Copy final results back to host (for computing TVs)
@@ -942,11 +884,11 @@ int main(int argc, char *argv[]){
     
     delete[] S;
     delete[] oid;
-    delete[] R;
+    //delete[] R;
     
     cudaFree(d_S);
     cudaFree(d_oid);
-    cudaFree(d_R);
+    //cudaFree(d_R);
     
     printf("\n[OK] Freed arrays\n");  
     
