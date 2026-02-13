@@ -1,0 +1,18 @@
+Tested with ADE_TST.py. Configurations:
+
+4.0		# Lx = Ly [m]		
+0.005 	# grid spacing h [m]
+0.05	# maximum simulation time t_max [s]
+1000.0	# cutoff frequency f_cutoff [Hz]
+22.0	# temperature Temp [°C]
+0.3		# Courant-Friedrich-Lewy number C_CFL
+7		# number of poles for the ADE
+(2,2)	# src_x, src_y
+(3,2)	# rec_x, rec_y
+
+In all simulations, the domain is excited with a plane wave with amplitude p0 = 0.0001 and u0 = 0.001.
+IRnoise.bin is obtained with PMLs on all sides.
+IR0.bin is obtained with a rigid boundary (R = 0.999 at all frequencies) on the east wall.
+IR1.bin is obtained with an adapted material fited with vectFIT.py using the ADE.
+Then the noise is extracted from both signals and then their FFTs are divided so we can obtain the complex R
+and compare to the analytical rational one fitted by the model.
