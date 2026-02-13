@@ -1,12 +1,12 @@
 Tested with ADE_TST.py. Configurations:
 
-4.0		# Lx = Ly [m]		
-0.005 	# grid spacing h [m]
+4.0	# Lx = Ly [m]		
+0.005	# grid spacing h [m]
 0.05	# maximum simulation time t_max [s]
 1000.0	# cutoff frequency f_cutoff [Hz]
 22.0	# temperature Temp [°C]
-0.3		# Courant-Friedrich-Lewy number C_CFL
-7		# number of poles for the ADE
+0.3	# Courant-Friedrich-Lewy number C_CFL
+7	# number of poles for the ADE
 (2,2)	# src_x, src_y
 (3,2)	# rec_x, rec_y
 
