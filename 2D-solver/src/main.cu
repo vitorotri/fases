@@ -21,6 +21,8 @@ int main(int argc, char *argv[]){
 	printf("\n[!] Fit all materials first!\n");
 
 	printf("\n[!] Call Python script showing scene config here?\n");
+	
+	printf("\n[!] Is poles.txt consistent?\n");
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
 	float *p0, *u0, *v0, *p1, *u1, *v1, *p2, *u2, *v2; // host arrays
@@ -30,7 +32,7 @@ int main(int argc, char *argv[]){
 	float N_PML, S_PML, E_PML, W_PML; // Perfectly Matched Layer activation keys
     int Nx, Ny, n; // number of points in x, y, time step
     
-    // timing
+    // timing variables
     clock_t tic, toc;
     double elapsed_time;
     
@@ -67,8 +69,7 @@ int main(int argc, char *argv[]){
     // ---------------------- load OBJ/PLY/XYZ/etc file and create scene ---------------------
     
     system("rm output/pressure.bin output/oid.bin output/S.bin output/header.txt");
-    
-    
+        
     char *path = argv[1];
     FILE *fp = fopen(path, "r");
     if (!fp) {
@@ -433,8 +434,14 @@ int main(int argc, char *argv[]){
     	if (iss >> val_x >> val_y >> val_s) {
         	int i_src = int(val_x / h);
         	int j_src = int(val_y / h);
-        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny) {
-            	p0[flat(i_src, j_src, Nx)] = val_s;
+        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny){
+        		// point source
+            	//p0[flat(i_src, j_src, Nx)] = val_s;
+            	// plane wave
+            	for (int j = 0; j < Ny; j++){
+            		p0[flat(i_src, j, Nx)] = 0.1f*val_s;
+            		u0[flat(i_src, j, Nx)] = val_s;
+            	}
         	}
     	}
 	}
@@ -496,7 +503,6 @@ int main(int argc, char *argv[]){
 		// Plane wave
 		//int src_x_0 = (int)(0.25f*Nx);
 		//int src_x_1 = (int)(0.08*Nx);
-		
 		//for (int j = (int)(0.05*Ny); j < Ny-(int)(0.05*Ny); j++){ // depends on resolution
 		for (int j = int(0.05f*Ny); j < int(0.95f*Ny); j++){
 			//for (int i = src_x_0; i <= src_x_1; i++){
@@ -664,25 +670,6 @@ int main(int argc, char *argv[]){
 	}
 	
 	//Nt = 100; // for testing
-	/*
-	// -------- oscillating source (take proper per if kern == 2) --------
-	p0[flat(src_x, src_y, Nx)] += 0.0f;
-	std::vector<float> p_osc(Nt, 0.0f);
-	std::vector<float> tones = {30, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, 1000};
-	std::vector<float> phase(tones.size(), 0.0f);
-	for (int n = 0; n < Nt; ++n) {
-    	float s = 0.0f;
-    	for (size_t i = 0; i < tones.size(); i++){
-        	phase[i] += 2.0f * M_PI * tones[i] * dt;
-        	if (phase[i] > 2.0f * M_PI) {
-            	phase[i] -= 2.0f * M_PI;
-        	}
-        	s += sinf(phase[i]);
-    	}
-    	p_osc[n] = 0.02 * s;
-	}
-	*/
-	// -------- end oscillating source --------
 	
 	int pbin_size = 0; // for plotting animation correctly
 	
