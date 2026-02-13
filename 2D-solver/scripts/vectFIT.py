@@ -188,7 +188,7 @@ def R_constant_from_octaves(freq, R_oct, mag_ceil=1-1e-12):
 # Block 1: User input
 # --------------------
 
-read_file = "Material0.mat"
+read_file = "Material1.mat"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
@@ -315,12 +315,22 @@ else:
     # scikit-rf stores only ONE pole per complex pair (positive imag part)
     
     alpha = (-poles_cmplx.real)
-    beta  = (-poles_cmplx.imag)
+    beta  = (poles_cmplx.imag)
     
     Bcoef = 2.0 * res_cmplx.real
-    Ccoef = 2.0 * res_cmplx.imag
+    Ccoef = -2.0 * res_cmplx.imag
     
     L = len(alpha)
+    
+# ------------------------------------------------------------
+# Causality and reality test
+# ------------------------------------------------------------
+tst_alpha = np.all(alpha >= 0)
+tst_beta = np.all(beta >= 0)
+tst_zeta = np.all(zeta >= 0)
+
+if not (tst_alpha and tst_beta and tst_zeta):
+	print("\n[!] alpha's, beta's or zeta's have negative real values: failed causality test\n")
 
 # ------------------------------------------------------------
 # SAVE IN C++ FORMAT
@@ -373,29 +383,26 @@ w = 2 * np.pi * freq
 R_hat = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w)
 
 plt.figure(1)
-plt.semilogx(freq, np.abs(R_tgt), label="Target |R|", linewidth=2)
-plt.semilogx(freq, np.abs(R_hat), "--", label="Fitted |R|", linewidth=2)
+plt.semilogx(freq, np.abs(R_tgt), label="Target |R|", color='k', linewidth=2)
+plt.semilogx(freq, np.abs(R_hat), "--", label="Fitted |R|", color='r', linewidth=2)
 plt.ylim(0, 1.05)
 plt.grid(True, which="both")
-#plt.xlim(f_low, f_high)
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("|R|")
 plt.legend()
 
 plt.figure(2)
-plt.semilogx(freq, np.real(R_tgt), label="Target Re(R)", linewidth=2)
-plt.semilogx(freq, np.real(R_hat), "--", label="Fitted Re(R)", linewidth=2)
+plt.semilogx(freq, np.real(R_tgt), label="Target Re(R)", color='k', linewidth=2)
+plt.semilogx(freq, np.real(R_hat), "--", label="Fitted Re(R)", color='b', linewidth=2)
 plt.grid(True, which="both")
-#plt.xlim(f_low, f_high)
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("Re(R)")
 plt.legend()
 
 plt.figure(3)
-plt.semilogx(freq, np.imag(R_tgt), label="Target Im(R)", linewidth=2)
-plt.semilogx(freq, np.imag(R_hat), "--", label="Fitted Im(R)", linewidth=2)
+plt.semilogx(freq, np.imag(R_tgt), label="Target Im(R)", color='k', linewidth=2)
+plt.semilogx(freq, np.imag(R_hat), "--", label="Fitted Im(R)", color='lime', linewidth=2)
 plt.grid(True, which="both")
-#plt.xlim(f_low, f_high)
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("Im(R)")
 plt.legend()
