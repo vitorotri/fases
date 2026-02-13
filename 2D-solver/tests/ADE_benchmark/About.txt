@@ -13,6 +13,6 @@ Tested with ADE_TST.py. Configurations:
 In all simulations, the domain is excited with a plane wave with amplitude p0 = 0.0001 and u0 = 0.001.
 IRnoise.bin is obtained with PMLs on all sides.
 IR0.bin is obtained with a rigid boundary (R = 0.999 at all frequencies) on the east wall.
-IR1.bin is obtained with an adapted material fited with vectFIT.py using the ADE.
-Then the noise is extracted from both signals and then their FFTs are divided so we can obtain the complex R
+IR1.bin is obtained with an adapted material fitted with vectFIT.py for the ADE.
+Then the noise is subtracted from both signals and then their FFTs are divided so we can obtain the complex R
 and compare to the analytical rational one fitted by the model.
