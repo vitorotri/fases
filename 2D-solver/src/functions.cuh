@@ -650,7 +650,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, float *R, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *T, float *th, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2; // bicubic interp limits to + 3 instead of +2
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -698,11 +698,11 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 		//float R_obj = R[o_ID];
     	
     	// --------------- barrier approach (inside domain, transmission) -------------------
-    	
+    	/*
     	// NEW: per-object thickness and transmission
         float th_obj = th[o_ID]; // 0 for walls, >0 for partitions
         float T_obj  = T[o_ID]; // 0 for walls, >0 for partitions
-
+		*/
         // --- local side normal/tangential ---
         const float un =  uD*nx + vD*ny;
         const float ut = -uD*ny + vD*nx;
@@ -712,7 +712,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 
         // ------------------- incoming characteristic from fluid LOCAL side (towards obstacle) -------
         const float w_in_local = pD - Z0 * un;
-		
+		/*
         // ---------- other side sample (always computed) ----------
         // For partitions: sample across thickness + offset into opposite fluid.
         // For walls: th_obj == 0, T_obj == 0 ⇒ this term is harmless and
@@ -734,7 +734,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         // The exact sign convention you'll tune, but it does NOT matter
         // for non-partitions because T_obj == 0 there.
         const float w_in_opp = pE - Z0 * un_opp;
-
+		*/
         // ---------- unified scattering (no extra branch) ----------
         //
         // Generalized 1-port view for THIS side:
@@ -780,6 +780,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	p[Cij] = p_b;
     	*/
 		
+		// immersed boundary smoothing
 		u[Cij] = (1.0f - chi) * u[Cij] + chi * u_b;
     	v[Cij] = (1.0f - chi) * v[Cij] + chi * v_b;
     	p[Cij] = (1.0f - chi) * p[Cij] + chi * p_b;
@@ -793,16 +794,16 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 // https://reference.wolfram.com/language/PDEModels/tutorial/Acoustics/AcousticsTimeDomain.html
 // 
 // 
-__host__ __device__ void sPML(float *q, int i, int j, int Nx, int Ny, float h){
+__host__ __device__ void sPML(float *q, int i, int j, int Nx, int Ny, float h, float N_PML, float S_PML, float E_PML, float W_PML){
     float s_max = 0.018f; // Maximum absorption factor
     int max_idx = (int)(0.15f*(Nx < Ny ? Nx : Ny)); // halfwidth
     float half   = (float)max_idx;
 
 	// ramps in [0,1] (to exclude a side, multiply by 0.0f)
-	float rx = fmaxf(0.0f, fminf((i - (Nx - half)) / half, 1.0f)); // right boundary ramp
-	float lx = fmaxf(0.0f, fminf((half - i) / half, 1.0f)); // left boundary ramp
-	float ly = fmaxf(0.0f, fminf((half - j) / half, 1.0f)); // lower boundary ramp
-	float uy = fmaxf(0.0f, fminf((j - (Ny - half)) / half, 1.0f)); // upper boundary ramp)
+	float rx = E_PML*fmaxf(0.0f, fminf((i - (Nx - half)) / half, 1.0f)); // right boundary ramp
+	float lx = W_PML*fmaxf(0.0f, fminf((half - i) / half, 1.0f)); // left boundary ramp
+	float ly = S_PML*fmaxf(0.0f, fminf((half - j) / half, 1.0f)); // lower boundary ramp
+	float uy = N_PML*fmaxf(0.0f, fminf((j - (Ny - half)) / half, 1.0f)); // upper boundary ramp)
 	
 	// cubic (faster than powf)
 	float rx3 = rx*rx*rx, lx3 = lx*lx*lx, ly3 = ly*ly*ly, uy3 = uy*uy*uy;
@@ -825,7 +826,7 @@ __host__ __device__ void sPML(float *q, int i, int j, int Nx, int Ny, float h){
 }
 
 // Euler integration kernel
-__global__ void kernel_Euler(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, int limiter_IDx, int limiter_IDy, float *S){
+__global__ void kernel_Euler(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, int limiter_IDx, int limiter_IDy, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 1;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 1;
@@ -874,11 +875,11 @@ __global__ void kernel_Euler(int Nx, int Ny, float *p0, float *u0, float *v0, fl
 		u1[Cij] += dt*((-F_uP + F_uM)/h);
 		v1[Cij] += dt*((-G_vP + G_vM)/h);
 		p1[Cij] += dt*((-F_pP + F_pM - G_pP + G_pM)/h);
-		/*
-		sPML(u1, i, j, Nx, Ny, h);
-		sPML(v1, i, j, Nx, Ny, h);
-		sPML(p1, i, j, Nx, Ny, h);
-		*/
+		
+		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		
 	}
 }
 
@@ -1028,7 +1029,7 @@ __device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, int i
 }
 
 // WENO3 SSP-RK3 step 0
-__global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S){
+__global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -1082,16 +1083,16 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		v1[Cij] = v0[Cij] + dt*((-G_vP + G_vM)/h);
 		p1[Cij] = p0[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h);
 
-		/*
-		sPML(u1, i, j, Nx, Ny, h);
-		sPML(v1, i, j, Nx, Ny, h);
-		sPML(p1, i, j, Nx, Ny, h);
-		*/
+		
+		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		
 	}
 }
 
 // WENO3 SSP-RK3 step 1
-__global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S){
+__global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -1145,16 +1146,16 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		v2[Cij] = 0.75f*v0[Cij] + 0.25f*(v1[Cij] + dt*((-G_vP + G_vM)/h));
 		p2[Cij] = 0.75f*p0[Cij] + 0.25f*(p1[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h));
 
-		/*
-		sPML(u2, i, j, Nx, Ny, h);
-		sPML(v2, i, j, Nx, Ny, h);
-		sPML(p2, i, j, Nx, Ny, h);
-		*/
+		
+		sPML(u2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(v2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(p2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		
 	}
 }
 
 // WENO3 SSP-RK3 step 2
-__global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S){
+__global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -1209,11 +1210,11 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		v1[Cij] = (v0[Cij] + 2.0f*(v2[Cij] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		p1[Cij] = (p0[Cij] + 2.0f*(p2[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h)))/3.0f;
 
-		/*
-		sPML(u1, i, j, Nx, Ny, h);
-		sPML(v1, i, j, Nx, Ny, h);
-		sPML(p1, i, j, Nx, Ny, h);
-		*/
+		
+		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		
 	}
 }
 
