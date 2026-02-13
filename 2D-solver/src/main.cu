@@ -237,6 +237,10 @@ int main(int argc, char *argv[]){
     file >> K_m >> L_m;
 	file.close();
 	file.clear();
+	
+	// minimum reasonable size safety
+	if (K_m < 1) K_m = 1;
+	if (L_m < 1) L_m = 1;
     
 	Ak 		= new float[K_m * nMat]();
 	zeta 	= new float[K_m * nMat]();
@@ -426,7 +430,7 @@ int main(int argc, char *argv[]){
     
     // parse single receiver (for now), use array later
     
-    int rec_x, rec_y;
+    int rec_x = Nx/2, rec_y = Ny/2; // safe default
     file.open(argv[4]);
 	if (!file.is_open()){
     	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
