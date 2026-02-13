@@ -79,34 +79,45 @@ def load_R(filepath):
 def G2D(k, r):
     return 0.25j * hankel1(0, k*r)
 
-print("\nRename [outputs].bin if necessary so it can be used right below this line...\n")
+def next_pow2(n):
+    return 1 << (int(n - 1).bit_length())
+
+def extract_window(x, center, half_width, alpha=0.20):
+    i0 = max(0, center - half_width)
+    i1 = min(len(x), center + half_width)
+    seg = np.array(x[i0:i1], dtype=float)
+    if len(seg) < 16:
+        raise RuntimeError("Gate too small or too close to boundary.")
+    win = tukey(len(seg), alpha) if alpha > 0 else np.ones(len(seg))
+    return seg * win
 
 # simulation parameters (should automate this with config file logic)
 f_cutoff = 1000
-C_CFL = 0.1
+C_CFL = 0.2
 h = 0.005
-t_max = 0.035
+t_max = 0.03
 
 R_spec = 287.05
 gamma = 1.4
 rho = 1.225
-Temp = 288.15
+Temp = 22 + 273.15
 
 c = np.sqrt(gamma*R_spec*Temp) # speed of sound [m/s]
 dt = C_CFL*h/c # time-step size [s]
 fs = 1/dt # temporal sampling frequency [Hz]
 
 script_dir = os.path.dirname(os.path.abspath(__file__)) # tests/
+print("\nRename [outputs].bin if necessary so it can be used right below this line...\n")
 data_path_noise = os.path.join(script_dir, "..", "output", "IRnoise.bin") # noise signal
 data_path_0 = os.path.join(script_dir, "..", "output", "IR0.bin") # full reflection signal
 data_path_1 = os.path.join(script_dir, "..", "output", "IR1.bin") # absorbed signal
 
-xNoise = np.fromfile(data_path_noise, dtype=np.float32)
-x0 = np.fromfile(data_path_0, dtype=np.float32) # in-phase signal with full reflection
-x1 = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflections
+p_d = np.fromfile(data_path_noise, dtype=np.float32) # direct pulse
+p_f = np.fromfile(data_path_0, dtype=np.float32) # in-phase signal with full reflection
+p_r = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 
-x0_s = x0 - xNoise
-x1_s = x1 - xNoise
+p_f = np.copy(p_f) - np.copy(p_d)
+p_r = np.copy(p_r) - np.copy(p_d)
 
 '''
 # slice for computing second peak
@@ -131,12 +142,12 @@ x0_s -= np.mean(x0_s)
 x1_s -= np.mean(x1_s)
 '''
 
-N = len(x0_s)
+N = len(p_r)
 
 # one-sided FFT
 
-X0 = np.fft.rfft(x0_s)
-X1 = np.fft.rfft(x1_s)
+Pr = np.fft.rfft(p_r)
+Pf = np.fft.rfft(p_f)
 freq = np.fft.rfftfreq(N, d=dt)
 
 # masking for spectrrum plot
@@ -144,7 +155,7 @@ freq = np.fft.rfftfreq(N, d=dt)
 mask = (
     (freq > 0.0) &
     (freq <= f_cutoff) &
-    (np.abs(X0) > 1e-6*np.max(np.abs(X0))) # for better division
+    (np.abs(Pr) > 1e-6*np.max(np.abs(Pr))) # for better division
 )
 
 
@@ -160,8 +171,21 @@ w = 2*np.pi*freq  # freq in Hz
 # compute analytical R
 R_ana = R_model(w, R_inf, A, zeta, B, Cc, alpha, beta)
 
+# distances
+Lx = 4.006073
+Ly = 4.066619
+r1 = 3.0 - 2.0 # receiver -> source
+r2 = 1.9304 + 0.9360 # image-source -> receiver
+
+# angular frequencies
+w = 2*np.pi*freq  # freq in Hz
+
+# wavenumbers
+k = w / c
+
 eps = 1e-6
-R_num = X1 / (X0 + eps)
+R_num = Pr / (Pf + eps)
+#R_num = Pr * G2D(k, r1) / (Pf * G2D(k, r2) + eps)
 Rmag_num = np.abs(R_num)
 
 # single period for given frequency f is just T = 1/f
@@ -177,8 +201,8 @@ print("Frequency resolution df =", df, "Hz")
 err = 20*np.log10(np.abs(R_ana)/np.abs(R_num))
 
 plt.figure(1)
-plt.plot(x0, 'b', label='Full reflection')
-plt.plot(x1, 'r', linestyle='--', label='Partial reflection')
+plt.plot(p_d, 'b', label='Direct signal')
+plt.plot(p_r, 'r', linestyle='--', label='Pure reflection')
 plt.xlabel('Samples (n)')
 plt.ylabel('Sound Pressure (Pa)')
 plt.grid(True)
@@ -205,7 +229,7 @@ plt.legend()
 plt.title("Error |R_ana / R_num| in dB")
 
 plt.figure(4)
-plt.semilogx(freq, 20*np.log10(np.abs(X0) + 1e-30), 'k')
+plt.semilogx(freq, 20*np.log10(np.abs(Pr) + 1e-30), 'k')
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("|X0(f)| [dB]")
 plt.axvline(x=f_cutoff, linestyle='--', color='red')
