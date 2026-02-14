@@ -70,7 +70,7 @@ def min_phase_from_octave_mag(freq_hz, R_oct,
     phi_ext = -np.imag(hilbert(ln_ext))
     phi_u = phi_ext[:len(w_u)]
 
-    # --- back to your target grid ---
+    # --- back to target grid ---
     w_t = 2*np.pi*freq_hz
     lnmag_t = np.interp(w_t, w_u, lnmag_u)
     phi_t   = np.interp(w_t, w_u, phi_u)
@@ -249,7 +249,7 @@ else:
     R_tgt, Rmag_interp, phi = min_phase_octave_cepstrum(freq, Rmag_oct, ext_oct=2, n_w=8192)
     # proceed with VF as usual
 
-    Zs_to_fit = Z_from_R(R_tgt, z0)   # optional; only if you need Z later
+    Zs_to_fit = Z_from_R(R_tgt, z0)   # optional; only if needed Z later
 
     # --------------------------------------------------------------------------------
     # Block 2: Vector fit reflection coefficient with scikit-rf
@@ -389,7 +389,7 @@ os.makedirs(os.path.dirname(Npoles_path), exist_ok=True)
 np.savetxt(Npoles_path, Npoles, fmt="%d", delimiter=" ")
 
 # ============================================================
-# PLOTS (|R| + Re/Im, you asked for it)
+# PLOTS (|R| + Re/Im)
 # ============================================================
 w = 2 * np.pi * freq
 R_hat = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w)
