@@ -264,6 +264,7 @@ int main(int argc, char *argv[]){
     alpha 	= new float[L_m * nMat]();
     beta 	= new float[L_m * nMat](); 
     
+    printf("\nChecking materials\n\n");
     for (size_t i = 0; i < names.size(); ++i){
   		std::cout << i << " -> " << names[i] << "\n";
   	}
@@ -271,10 +272,10 @@ int main(int argc, char *argv[]){
     
     for (int m = 0; m < nMat; ++m) {
     	std::string filename = "input/fit/" + names[m+1] + ".fit"; // names[0] = Boundary
-    	std::cout << "Reading: " << filename << "\n";
+    	std::cout << "\nReading: " << filename << "\n";
 	
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
-	
+		/*
 		// simple print test
     	std::printf("Rinf[%d] = %.15f\n", m, (float)Rinf[m]);
     	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
@@ -283,6 +284,7 @@ int main(int argc, char *argv[]){
     	std::printf("Ak(1,%d)  = %.15f   zeta(1,%d) = %.15f\n\n",
                 	m, (float)Ak[flat(1, m, K_m)],
                 	m, (float)zeta[flat(1, m, K_m)]);
+        */
 	}
 
 	// ----- device arrays for materials -----
@@ -373,7 +375,7 @@ int main(int argc, char *argv[]){
 	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
 	// c = sqrt(K/rho) in case of liquids
     
-    printf("\nc = %f m/s\n",c);
+    printf("\nc = %.2f m/s\n",c);
     
     // ---------------------------------------------------------------------------------------------------------
 
@@ -399,15 +401,12 @@ int main(int argc, char *argv[]){
 	
 	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
 	float lambda = c/f_cutoff;
-	printf("\nlambda = %f\n",lambda);
 	if (lambda / h < 12.0f){
 		printf("[!] Resolution too low, aborting...\n\n");
 		return -1;
 	}
 	
 	int Nt = (int) (t_max/dt) + 1; // number of iterations
-	
-	printf("\nNt = %d\n\n",Nt);
 
     // Allocate device memory
     if (cudaMalloc(&d_p0, N*sizeof(float)) != cudaSuccess
@@ -436,12 +435,14 @@ int main(int argc, char *argv[]){
         	int j_src = int(val_y / h);
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny){
         		// point source
-            	//p0[flat(i_src, j_src, Nx)] = val_s;
+            	p0[flat(i_src, j_src, Nx)] = val_s;
             	// plane wave
+            	/*
             	for (int j = 0; j < Ny; j++){
             		p0[flat(i_src, j, Nx)] = 0.1f*val_s;
             		u0[flat(i_src, j, Nx)] = val_s;
             	}
+            	*/
         	}
     	}
 	}

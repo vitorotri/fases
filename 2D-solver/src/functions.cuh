@@ -3,12 +3,6 @@
 #include "../include/parsing.h"
 #include "../include/filterABC.h"
 
-// flattening function
-/*
-__host__ __device__ int flat(int i, int j, int Nx){
-    return (j*Nx) + i;
-}
-*/
 __host__ __device__ float no_slope(float *u, int i, int j, int Nx){
 	return 0.0;
 }
