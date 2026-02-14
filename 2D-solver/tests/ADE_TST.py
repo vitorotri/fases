@@ -93,9 +93,9 @@ def extract_window(x, center, half_width, alpha=0.20):
 
 # simulation parameters (should automate this with config file logic)
 f_cutoff = 1000
-C_CFL = 0.2
+C_CFL = 0.3
 h = 0.005
-t_max = 0.03
+t_max = 0.05
 
 R_spec = 287.05
 gamma = 1.4

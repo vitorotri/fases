@@ -23,7 +23,7 @@ from skrf.vectorFitting import VectorFitting
 
 def min_phase_from_octave_mag(freq_hz, R_oct,
                              fc=np.array([63,125,250,500,1000,2000,4000,8000], float),
-                             n_w=2048,
+                             n_w=4096,
                              ext_oct=2,
                              taper_frac=0.08,
                              mag_floor=1e-6,
@@ -82,7 +82,7 @@ def min_phase_from_octave_mag(freq_hz, R_oct,
 
 def min_phase_octave_cepstrum(freq_hz, R_oct,
                              fc=np.array([63,125,250,500,1000,2000,4000,8000], float),
-                             n_w=2048, ext_oct=2,
+                             n_w=4096, ext_oct=2,
                              mag_floor=1e-8, mag_ceil=1-1e-12):
     freq_hz = np.asarray(freq_hz, float)
     R_oct = np.clip(np.asarray(R_oct, float), mag_floor, mag_ceil)
@@ -198,6 +198,8 @@ config_path = os.path.join(script_dir, "..", "config", "config.txt")
 
 v = np.loadtxt(config_path)
 
+h = float(v[0])
+C_CFL = float(v[4])
 f_cutoff = v[2]
 f_tol = 0.2*f_cutoff
 f_cutoff += f_tol
@@ -205,9 +207,13 @@ Temp = v[3]
 R_spec = 287.05
 gamma = 1.4
 
+omega_cutoff = 2 * np.pi * f_cutoff
+
 c0 = np.sqrt(gamma * R_spec * Temp)         # speed of sound (m/s)
 rho0 = 1.225                                # air density
 z0 = c0 * rho0                              # characteristic impedance of air
+
+dt = C_CFL * h / c0
 
 savename = np.copy(read_file[:-4]) # output .mat filename (without extension)
 
@@ -215,7 +221,9 @@ savename = np.copy(read_file[:-4]) # output .mat filename (without extension)
 f_min = 20.0
 f_max = f_cutoff
 frequency_step = 5.0
-freq = np.arange(f_min, f_max + 0.5 * frequency_step, frequency_step)  # include f_max robustly
+#freq = np.arange(f_min, f_max + 0.5 * frequency_step, frequency_step)  # include f_max robustly
+Npts = int((f_max - f_min)/frequency_step) + 1 # keep about same count as above
+freq = np.logspace(np.log10(f_min), np.log10(f_max), Npts) # log-spaced
 
 Niter = 25       # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
 N = int(v[5])    # "number of poles" in MATLAB script (here: number of REAL starting poles)
@@ -331,6 +339,10 @@ tst_zeta = np.all(zeta >= 0)
 
 if not (tst_alpha and tst_beta and tst_zeta):
 	print("\n[!] alpha's, beta's or zeta's have negative real values: failed causality test\n")
+if (np.any(alpha > 2.5127 / dt) or
+    np.any(beta  > 2.5127 / dt) or
+    np.any(zeta  > min(1.732 / dt, omega_cutoff))):
+    print("\n[!] alpha/beta/zeta are above expected values, may cause instability\n")
 
 # ------------------------------------------------------------
 # SAVE IN C++ FORMAT
