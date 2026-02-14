@@ -10,7 +10,6 @@
 #include <vector>
 #include <sstream>
 #include "functions.cuh"
-//#include <cuda_runtime.h>
 
 int main(int argc, char *argv[]){
 	if (argc < 4) {

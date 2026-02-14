@@ -16,6 +16,7 @@ import numpy as np
 import skrf as rf
 import matplotlib.pyplot as plt
 import os
+import sys
 from scipy.io import savemat
 from scipy.interpolate import PchipInterpolator
 from scipy.signal import hilbert
@@ -188,13 +189,21 @@ def R_constant_from_octaves(freq, R_oct, mag_ceil=1-1e-12):
 # Block 1: User input
 # --------------------
 
-read_file = "Material1.mat"
+read_file = sys.argv[1] if len(sys.argv) > 1 else sys.exit("\nUsage: python3 vectFIT.py <material_name.mat>\n")
+
+n = int(input("\nEnter with an option:\n\n0) 2D-solver\n1) 3D-solver\n"))
+if not (n == 0 or n == 1):
+    sys.exit("\n[!] No possible option\n")
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-data_path = os.path.join(script_dir, "..", "input", "mat", read_file)
-Rmag_oct = np.loadtxt(data_path)
+if n == 0:
+    pre_path = "2D-solver"
+if n == 1:
+    pre_path = "3D-solver"
 
-config_path = os.path.join(script_dir, "..", "config", "config.txt")
+Rmag_oct = np.loadtxt(read_file)
+
+config_path = os.path.join(script_dir, "..", pre_path, "config", "config.txt")
 
 v = np.loadtxt(config_path)
 
@@ -338,7 +347,7 @@ tst_beta = np.all(beta >= 0)
 tst_zeta = np.all(zeta >= 0)
 
 if not (tst_alpha and tst_beta and tst_zeta):
-	print("\n[!] alpha's, beta's or zeta's have negative real values: failed causality test\n")
+    print("\n[!] alpha's, beta's or zeta's have negative real values: failed causality test\n")
 if (np.any(alpha > 2.5127 / dt) or
     np.any(beta  > 2.5127 / dt) or
     np.any(zeta  > min(1.732 / dt, omega_cutoff))):
@@ -348,8 +357,13 @@ if (np.any(alpha > 2.5127 / dt) or
 # SAVE IN C++ FORMAT
 # ------------------------------------------------------------
 
-save_file = read_file[:-4] + ".fit"
-coefs_path = os.path.join(script_dir, "..", "input", "fit", save_file)
+save_file = os.path.splitext(os.path.basename(read_file))[0] + ".fit"
+coefs_path = os.path.join(script_dir, "..", pre_path, "input", "fit", save_file)
+
+print(script_dir)
+print(pre_path)
+print(save_file)
+print(coefs_path)
 
 with open(coefs_path, 'w') as f:
     f.write("# R_inf\n")

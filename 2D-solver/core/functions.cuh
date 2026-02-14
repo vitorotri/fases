@@ -1,7 +1,7 @@
 #include <cmath>
 #include <cstring>
-#include "../include/parsing.h"
-#include "../include/filterABC.h"
+#include "parsing.h"
+#include "filterABC.h"
 
 __host__ __device__ float no_slope(float *u, int i, int j, int Nx){
 	return 0.0;
