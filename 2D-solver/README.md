@@ -1,4 +1,4 @@
-# PHASES
+# PHASES 2D
 
 Solver for enclosed and open spaces.
 
@@ -9,6 +9,8 @@ Solver for enclosed and open spaces.
 ```
 
 ## Usage
+
+Fit materials coefficients per octave band with filterFIT.py in the "common" directory. Then:
 
 ```bash
 # ./run <path_to_scene.obj> <path_to_config.txt> <path_to_sources.txt> <path_to_receivers.txt>
