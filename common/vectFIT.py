@@ -386,7 +386,7 @@ print(f"Saved coefficients to {coefs_path}")
 # SAVE MAX NUMBER OF POLES IF SUPERIOR
 # ------------------------------------------------------------
 
-Npoles_path = os.path.join(script_dir, "..", "config", "poles.txt")
+Npoles_path = os.path.join(script_dir, "..", pre_path, "config", "poles.txt")
 if os.path.exists(Npoles_path):
     Npoles = np.loadtxt(Npoles_path)
     K_m, L_m = Npoles
