@@ -1,0 +1,2 @@
+# pos_x pos_y value
+2.0 2.0 70
