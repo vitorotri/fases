@@ -191,19 +191,28 @@ def R_constant_from_octaves(freq, R_oct, mag_ceil=1-1e-12):
 
 read_file = sys.argv[1] if len(sys.argv) > 1 else sys.exit("\nUsage: python3 vectFIT.py <material_name.mat>\n")
 
-n = int(input("\nEnter with an option:\n\n0) 2D-solver\n1) 3D-solver\n"))
-if not (n == 0 or n == 1):
+s_opt = int(input("\nEnter with an option:\n\n0) 2D-solver\n1) 3D-solver\n\n"))
+if not (s_opt == 0 or s_opt == 1):
     sys.exit("\n[!] No possible option\n")
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-if n == 0:
-    pre_path = "2D-solver"
-if n == 1:
-    pre_path = "3D-solver"
+if s_opt == 0:
+    solver_path = "2D-solver"
+if s_opt == 1:
+    solver_path = "3D-solver"
+
+s_delete = input("\nReffiting for new project? Y/N\n\n")
+if not (s_delete == "Y" or s_delete == "N"):
+    sys.exit("\n[!] No possible option\n")
+
+Npoles_path = os.path.join(script_dir, "..", solver_path, "config", "poles.txt")
+if s_delete == "Y":
+	delete_str = "rm " + Npoles_path
+	os.system(delete_str)
 
 Rmag_oct = np.loadtxt(read_file)
 
-config_path = os.path.join(script_dir, "..", pre_path, "config", "config.txt")
+config_path = os.path.join(script_dir, "..", solver_path, "config", "config.txt")
 
 v = np.loadtxt(config_path)
 
@@ -358,12 +367,7 @@ if (np.any(alpha > 2.5127 / dt) or
 # ------------------------------------------------------------
 
 save_file = os.path.splitext(os.path.basename(read_file))[0] + ".fit"
-coefs_path = os.path.join(script_dir, "..", pre_path, "input", "fit", save_file)
-
-print(script_dir)
-print(pre_path)
-print(save_file)
-print(coefs_path)
+coefs_path = os.path.join(script_dir, "..", solver_path, "input", "fit", save_file)
 
 with open(coefs_path, 'w') as f:
     f.write("# R_inf\n")
@@ -386,7 +390,6 @@ print(f"Saved coefficients to {coefs_path}")
 # SAVE MAX NUMBER OF POLES IF SUPERIOR
 # ------------------------------------------------------------
 
-Npoles_path = os.path.join(script_dir, "..", pre_path, "config", "poles.txt")
 if os.path.exists(Npoles_path):
     Npoles = np.loadtxt(Npoles_path)
     K_m, L_m = Npoles
