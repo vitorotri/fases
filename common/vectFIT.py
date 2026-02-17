@@ -22,7 +22,7 @@ from scipy.interpolate import PchipInterpolator
 from scipy.signal import hilbert
 from skrf.vectorFitting import VectorFitting
 
-def min_phase_from_octave_mag(freq_hz, R_oct,
+def min_phase_octave_hilbert(freq_hz, R_oct,
                              fc=np.array([63,125,250,500,1000,2000,4000,8000], float),
                              n_w=4096,
                              ext_oct=2,
@@ -71,7 +71,7 @@ def min_phase_from_octave_mag(freq_hz, R_oct,
     phi_ext = -np.imag(hilbert(ln_ext))
     phi_u = phi_ext[:len(w_u)]
 
-    # --- back to target grid ---
+    # --- back to your target grid ---
     w_t = 2*np.pi*freq_hz
     lnmag_t = np.interp(w_t, w_u, lnmag_u)
     phi_t   = np.interp(w_t, w_u, phi_u)
@@ -83,7 +83,7 @@ def min_phase_from_octave_mag(freq_hz, R_oct,
 
 def min_phase_octave_cepstrum(freq_hz, R_oct,
                              fc=np.array([63,125,250,500,1000,2000,4000,8000], float),
-                             n_w=4096, ext_oct=2,
+                             n_w=2048, ext_oct=2,
                              mag_floor=1e-8, mag_ceil=1-1e-12):
     freq_hz = np.asarray(freq_hz, float)
     R_oct = np.clip(np.asarray(R_oct, float), mag_floor, mag_ceil)
@@ -142,21 +142,6 @@ def min_phase_octave_cepstrum(freq_hz, R_oct,
     phi_t = np.unwrap(np.angle(R_t))
     return R_t, mag_t, phi_t
 
-def R_from_octave_mag_minphase(freq, R_oct):
-    fc = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], float)
-    R_oct = np.clip(np.asarray(R_oct, float), 1e-6, 0.999999)
-
-    lf = np.log(freq)
-    lfc = np.log(fc)
-    logR = np.interp(lf, lfc, np.log(R_oct),
-                     left=np.log(R_oct[0]), right=np.log(R_oct[-1]))
-    Rmag = np.exp(logR)
-
-    phi = min_phase_from_mag_logfreq(freq, Rmag, n_log=4096, ext_octaves=4, taper_frac=0.08)
-    R = Rmag * np.exp(1j * phi)
-    return R, Rmag
-
-
 def Z_from_R(R, z0):
     R = np.asarray(R, complex)
     return z0 * (1 + R) / (1 - R)
@@ -201,7 +186,7 @@ if s_opt == 0:
 if s_opt == 1:
     solver_path = "3D-solver"
 
-s_delete = input("\nReffiting for new project? Y/N\n\n")
+s_delete = input("\nReffiting for new simulation? Y/N\n\n")
 if not (s_delete == "Y" or s_delete == "N"):
     sys.exit("\n[!] No possible option\n")
 
@@ -218,9 +203,7 @@ v = np.loadtxt(config_path)
 
 h = float(v[0])
 C_CFL = float(v[4])
-f_cutoff = v[2]
-f_tol = 0.2*f_cutoff
-f_cutoff += f_tol
+f_cutoff = v[2] #balance with N_poles for stability and better distribution of poles
 Temp = v[3]
 R_spec = 287.05
 gamma = 1.4
@@ -264,7 +247,8 @@ if is_near_one(Rmag_oct):
     alpha = np.array([], float); beta = np.array([], float)
     print("\nNear rigid material\n")
 else:
-    R_tgt, Rmag_interp, phi = min_phase_octave_cepstrum(freq, Rmag_oct, ext_oct=2, n_w=8192)
+    R_tgt, Rmag_interp, phi = min_phase_octave_cepstrum(freq, Rmag_oct, ext_oct=2, n_w=4096)
+    #R_tgt, Rmag_interp, phi = min_phase_octave_hilbert(freq, Rmag_oct, ext_oct=2, n_w=8192)
     # proceed with VF as usual
 
     Zs_to_fit = Z_from_R(R_tgt, z0)   # optional; only if needed Z later
@@ -408,6 +392,7 @@ np.savetxt(Npoles_path, Npoles, fmt="%d", delimiter=" ")
 # ============================================================
 # PLOTS (|R| + Re/Im)
 # ============================================================
+
 w = 2 * np.pi * freq
 R_hat = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w)
 
