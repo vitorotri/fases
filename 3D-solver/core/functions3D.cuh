@@ -193,12 +193,13 @@ __device__ float peskin_chi(float s){
 }
 
 // correctly considers cases where s < h, so it does not sum itself with old U[Cij] values
-__device__ inline float chi_layered(float s, float h, float W){
-	// not considering cases where s < 0.0, provided sdf kernel computes only where o_IDs are s > 0.0
-    if (s >= W)	return 0.0f;
-	if (s <= h)	return 1.0f;
-    float r = (s - h) / (W - h);
-    float smooth = 3.0f*r*r - 2.0f*r*r*r;
+__device__ inline float chi_layered(float s, float h, float tol, int skip){
+    if (s >= tol)				return 0.0f;
+	if (s <= (float)skip * h)	return 1.0f;
+	
+    float r = (s - (float)skip * h) / (tol - (float)skip * h);
+    float smooth = r*r*(3.0f - 2.0f*r);
+    
     return 1.0f - smooth;
 }
 
@@ -225,7 +226,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 		
 		float L_phi = w_in - zeta[m]*phi_right[s];
 		
-		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*(phi_middle[s] + dt*L_phi);
+		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*(phi_right[s] + dt*L_phi);
 		phi_left[s] /= c_SSP;
 		sum_A += A[m] * phi_left[s];
 
@@ -238,9 +239,9 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
         float L_psi_1 = w_in - (alpha[m]*psi_1_right[s] + beta[m]*psi_2_right[s]);
         float L_psi_2 = beta[m]*psi_1_right[s] - alpha[m]*psi_2_right[s];
 
-		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*(psi_1_middle[s] + dt*L_psi_1);
+		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*(psi_1_right[s] + dt*L_psi_1);
 		psi_1_left[s] /= c_SSP;
-		psi_2_left[s] = a_SSP*psi_2_middle[s] + b_SSP*(psi_2_middle[s] + dt*L_psi_2);
+		psi_2_left[s] = a_SSP*psi_2_middle[s] + b_SSP*(psi_2_right[s] + dt*L_psi_2);
 		psi_2_left[s] /= c_SSP;
 
         sum_BC += B[m]*psi_1_left[s] + C[m]*psi_2_left[s];
@@ -338,13 +339,24 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
 		const float v_b = un_b*ny + uty;
 		const float w_b = un_b*nz + utz;  	
     	
-    	const float chi = chi_layered(s, h, tol);
-		
+    	const float chi = chi_layered(s, h, tol, skip);
+		/*
 		// immersed boundary smoothing
+		// uses "new" values cause WENO3 was already called at this time-step
 		u[Cijk] = (1.0f - chi) * u[Cijk] + chi * u_b;
     	v[Cijk] = (1.0f - chi) * v[Cijk] + chi * v_b;
     	w[Cijk] = (1.0f - chi) * w[Cijk] + chi * w_b;
     	p[Cijk] = (1.0f - chi) * p[Cijk] + chi * p_b;
+    	*/
+    	// immersed boundary smoothing / blending (Brinkman penalization): tuned to different resolutions
+    	float kappa = 0.5f; // once tuned for a test case, no more need to change (for a given tol and chi)
+    	float eta = kappa * h / c;
+    	float lam = 1.0f - expf(-chi * dt / eta); // dimensionless
+		lam = fminf(lam, 1.0f); // clamp for explicit stability + no overshoot
+		
+		u[Cij] = (1.0f - lam) * u[Cij] + lam * u_b;
+    	v[Cij] = (1.0f - lam) * v[Cij] + lam * v_b;
+    	p[Cij] = (1.0f - lam) * p[Cij] + lam * p_b;
     	
     	    
     }
@@ -396,7 +408,6 @@ __host__ __device__ void sPML(float *q, int i, int j, k, int Nx, int Ny, int Nz,
 __device__ float construct_Vi_12(float *u, int i, int j, int Nx, float *c_rl, int r, int idx){
 	float retval = 0.0;
 	for (int l = 0; l <= 1; l++){
-		//if (r+idx > 3) printf("[!] Violation");
 		retval += c_rl[flat(r+idx,l,3)]*u[flat(i-r+l,j,Nx)];
 	}
 	return retval;

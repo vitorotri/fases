@@ -79,7 +79,7 @@ int main(int argc, char *argv[]){
     //int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
-    float tol = 3.0f*h; // tolerance
+    float tol = 4.0f*h; // tolerance
 
 	/*
     float *R = NULL; // surfaces reflection coefficient
@@ -670,6 +670,8 @@ int main(int argc, char *argv[]){
 	}
 	
 	//Nt = 100; // for testing
+	
+	int skip = 2;
 	
 	int pbin_size = 0; // for plotting animation correctly
 	
