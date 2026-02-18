@@ -79,7 +79,7 @@ int main(int argc, char *argv[]){
     //int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
-    float tol = 4.0f*h; // tolerance
+    float tol = 3.0f*h; // tolerance
 
 	/*
     float *R = NULL; // surfaces reflection coefficient
@@ -693,7 +693,7 @@ int main(int argc, char *argv[]){
     	exit(1);
 	}
 	
-	int skip = 2; // cells to skip inside the WENO kernel (dealt by the BC kernel
+	int skip = 1; // cells to skip inside the WENO kernel (dealt by the BC kernel
 	
 	//Nt = 100; // for testing
 	

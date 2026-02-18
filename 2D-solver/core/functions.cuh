@@ -682,11 +682,15 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float Wy = Cy - s * ny;
 	
     	// interpolation point slightly inside the fluid along n
-    	float l = s + h;
+    	//float l = s + h;
+    	// avoid bicubic interpolation using zero-valued cells, so reflections are not injected with the WENO3
+    	// stencil ==> l = (s + 2h)
+    	float l = s + 2.0f * h; 
     	float Dx = Wx + l * nx;
     	float Dy = Wy + l * ny;
 		
 		// "old" stands only for previous SSP stage, not time-step
+		// interpolate inside fluid
     	float pD = bicubic_interp(p_old, Nx, Dx, Dy, h);
     	float uD = bicubic_interp(u_old, Nx, Dx, Dy, h);
     	float vD = bicubic_interp(v_old, Nx, Dx, Dy, h);
@@ -729,6 +733,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         const float v_b = un_b*ny + ut_b*nx;
     	
     	const float chi = chi_layered(s, h, tol, skip);
+    	// -------------------------------------------------------------------------------------
 		/*
 		// immersed boundary smoothing / blending
 		// uses "new" values cause WENO3 was already called at this time-step
@@ -738,6 +743,8 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	v[Cij] = (1.0f - chi) * v[Cij] + chi * v_b;
     	p[Cij] = (1.0f - chi) * p[Cij] + chi * p_b;
     	*/
+    	// -------------------------------------------------------------------------------------
+    	
     	// immersed boundary smoothing / blending (Brinkman penalization): tuned to different resolutions
     	float kappa = 0.5f; // once tuned for a test case, no more need to change (for a given tol and chi)
     	float eta = kappa * h / c;
@@ -747,7 +754,14 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 		u[Cij] = (1.0f - lam) * u[Cij] + lam * u_b;
     	v[Cij] = (1.0f - lam) * v[Cij] + lam * v_b;
     	p[Cij] = (1.0f - lam) * p[Cij] + lam * p_b;
-    	  
+    	
+    	// -------------------------------------------------------------------------------------
+    	// test without layering (check kernel_WENO stages and comment section above)
+    	/*
+    	u[Cij] = u_b;
+    	v[Cij] = v_b;
+    	p[Cij] = p_b;
+    	  */
     }
 }
 
@@ -1149,6 +1163,7 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		int Cij = flat(i,j,Nx);
 		
 		// restrict (leave it for total blending case wusing chi_layered in sdf_kernel)
+		//if (S[Cij] < 0.0f) return; // test without layering (comment line below)
 		if (S[Cij] < (float)skip * h) return;
     	
     	// flux values
@@ -1213,6 +1228,7 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		int Cij = flat(i,j,Nx);
 		
 		// restrict (leave it for total blending case wusing chi_layered in sdf_kernel)
+		//if (S[Cij] < 0.0f) return; // test without layering (comment line below)
 		if (S[Cij] < (float)skip * h) return;
     	
     	// flux values
@@ -1277,6 +1293,7 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		int Cij = flat(i,j,Nx);
 		
 		// restrict (leave it for total blending case wusing chi_layered in sdf_kernel)
+		//if (S[Cij] < 0.0f) return; // test without layering (comment line below)
 		if (S[Cij] < (float)skip * h) return;
 		
 		// flux values

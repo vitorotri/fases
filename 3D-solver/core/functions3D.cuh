@@ -193,11 +193,11 @@ __device__ float peskin_chi(float s){
 }
 
 // correctly considers cases where s < h, so it does not sum itself with old U[Cij] values
-__device__ inline float chi_layered(float s, float h, float tol, int skip){
-    if (s >= tol)				return 0.0f;
-	if (s <= (float)skip * h)	return 1.0f;
+__device__ inline float chi_layered(float s, float h, float tol){
+    if (s >= tol) return 0.0f;
+	if (s <= h)	return 1.0f;
 	
-    float r = (s - (float)skip * h) / (tol - (float)skip * h);
+    float r = (s - h) / (tol -  h);
     float smooth = r*r*(3.0f - 2.0f*r);
     
     return 1.0f - smooth;
@@ -293,7 +293,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	float Wz = Cz - s * nz;
 	
     	// interpolation point slightly inside the fluid along n
-    	float l = s + h;
+    	//float l = s + h;
+    	// avoid bicubic interpolation using zero-valued cells, so reflections are not injected with the WENO3
+    	// stencil ==> l = (s + 2h)
+    	float l = s + 2.0f * h; 
     	float Dx = Wx + l * nx;
     	float Dy = Wy + l * ny;
     	float Dz = Wz + l * nz;
@@ -339,7 +342,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
 		const float v_b = un_b*ny + uty;
 		const float w_b = un_b*nz + utz;  	
     	
-    	const float chi = chi_layered(s, h, tol, skip);
+    	const float chi = chi_layered(s, h, tol);
 		/*
 		// immersed boundary smoothing
 		// uses "new" values cause WENO3 was already called at this time-step
