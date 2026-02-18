@@ -79,7 +79,7 @@ int main(int argc, char *argv[]){
     //int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
-    float tol = 3.0f*h; // tolerance
+    float tol = 4.0f*h; // tolerance
 
 	/*
     float *R = NULL; // surfaces reflection coefficient
@@ -140,8 +140,8 @@ int main(int argc, char *argv[]){
 		// get nObj from scene
     	nObj = scene_layer_count(sc); // number of layers/materials including Boundary
     	//printf("\n\nnObj = %d\n\n", nObj);
+    	
 		scene_layer_names(sc, names);
-		std::sort(names.begin() + 1, names.end()); // ordering
 		
 		//allocate single R, T, thickness arrays
 		/*
@@ -263,7 +263,7 @@ int main(int argc, char *argv[]){
     alpha 	= new float[L_m * nMat]();
     beta 	= new float[L_m * nMat](); 
     
-    printf("\nChecking materials\n\n");
+    printf("\nChecking objects\n\n");
     for (size_t i = 0; i < names.size(); ++i){
   		std::cout << i << " -> " << names[i] << "\n";
   	}
@@ -425,6 +425,7 @@ int main(int argc, char *argv[]){
     	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
     	return -1;
 	}
+	float src_x; // for raised cosine (see below)
 	while (std::getline(file, line)) {
     	if (line.empty() || line[0] == '#') continue;
     	float val_x, val_y, val_s;
@@ -432,21 +433,44 @@ int main(int argc, char *argv[]){
     	if (iss >> val_x >> val_y >> val_s) {
         	int i_src = int(val_x / h);
         	int j_src = int(val_y / h);
-        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny){
+        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny){ // domain sanity check
         		// point source
-            	p0[flat(i_src, j_src, Nx)] = val_s;
-            	// plane wave
+            	//p0[flat(i_src, j_src, Nx)] = val_s;
+            	// plane wave (forced)
             	/*
             	for (int j = 0; j < Ny; j++){
             		p0[flat(i_src, j, Nx)] = 0.1f*val_s;
             		u0[flat(i_src, j, Nx)] = val_s;
             	}
             	*/
+            	// for plane wave (raised cosine), see below
+            	src_x = val_x;
+            	
         	}
     	}
 	}
 	file.close();
 	file.clear();
+	
+	// raised cosine
+	float W_full = 0.04f;
+	float ww = 0.5f * W_full;
+	float A = 0.1f;
+    for (int j = 0; j < Ny; ++j){
+        for (int i = 0; i < Nx; ++i){
+            // choose x location consistent with your FV storage:
+            // if p is cell-centered: (i + 0.5f)*h is often better
+            float xx = (i + 0.5f) * h;
+
+            float g  = raised_cosine(xx, src_x, ww);
+            float pI = A * g;
+
+            int Cij = flat(i, j, Nx);
+
+            p0[Cij] = pI;
+            u0[Cij] = pI / (rho * c);  // right-going wave
+        }
+    }
     
     // parse single receiver (for now), use array later
     
@@ -669,6 +693,8 @@ int main(int argc, char *argv[]){
     	exit(1);
 	}
 	
+	int skip = 2; // cells to skip inside the WENO kernel (dealt by the BC kernel
+	
 	//Nt = 100; // for testing
 	
 	int pbin_size = 0; // for plotting animation correctly
@@ -768,16 +794,16 @@ int main(int argc, char *argv[]){
 			// Launch WENO3 kernel + SSP-RK3
 				
 			// (0)
-			kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);	
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+			kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip);	
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old, skip); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 				
 			// (1)
-			kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);	
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
+			kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip);	
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2, skip);
 				
 			// (2)
-			kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+			kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu, skip);
 
 			// exchange state arrays
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);

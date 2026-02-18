@@ -266,7 +266,7 @@ __host__ __device__ void enclosing_BC(float *p, float *u, float *v, int i, int j
 
 // Periodic BC in x (absorsive in j = 0 and absorsive in j = Ny-1)
 __host__ __device__ void periodic_BC(float *p, float *u, float *v, int i, int j, int Nx, int Ny, int max_idx){
-	
+	/*
     // Left boundary
     p[flat(max_idx-1,j,Nx)] = p[flat(Nx-(max_idx+1),j,Nx)];
     u[flat(max_idx-1,j,Nx)] = u[flat(Nx-(max_idx+1),j,Nx)];
@@ -274,30 +274,21 @@ __host__ __device__ void periodic_BC(float *p, float *u, float *v, int i, int j,
     // Right boundary
     p[flat(Nx-max_idx,j,Nx)] = p[flat(max_idx,j,Nx)];
     u[flat(Nx-max_idx,j,Nx)] = u[flat(max_idx,j,Nx)];
-    /*
+    */
 	// Top boundary
     p[flat(i,Ny-max_idx,Nx)] = p[flat(i,Ny-(max_idx+1),Nx)];
     v[flat(i,Ny-max_idx,Nx)] = v[flat(i,Ny-(max_idx+1),Nx)];
-    // for WENO5
+    // for WENO3
     p[flat(i,Ny-(max_idx-1),Nx)] = p[flat(i,Ny-(max_idx+1),Nx)];
     v[flat(i,Ny-(max_idx-1),Nx)] = v[flat(i,Ny-(max_idx+1),Nx)];
         
     // Bottom boundary
     p[flat(i,max_idx-1,Nx)] = p[flat(i,max_idx,Nx)];
     v[flat(i,max_idx-1,Nx)] = v[flat(i,max_idx,Nx)];
-    // for WENO5
+    // for WENO3
     p[flat(i,max_idx-2,Nx)] = p[flat(i,max_idx,Nx)];
     v[flat(i,max_idx-2,Nx)] = v[flat(i,max_idx,Nx)];
-    */
     
-    // Absorsive
-    
-    // Top boundary
-    p[flat(i,Ny-max_idx,Nx)] = p[flat(i,Ny-(max_idx+1),Nx)];
-    v[flat(i,Ny-max_idx,Nx)] = v[flat(i,Ny-(max_idx+1),Nx)];
-    // Bottom boundary
-    p[flat(i,max_idx-1,Nx)] = p[flat(i,max_idx,Nx)];
-    v[flat(i,max_idx-1,Nx)] = v[flat(i,max_idx,Nx)];
 }
 
 __host__ float SPL(float p){
@@ -537,12 +528,14 @@ __device__ float peskin_chi(float s){
 }
 
 // correctly considers cases where s < h, so it does not sum itself with old U[Cij] values
-__device__ inline float chi_layered(float s, float h, float W){
+__device__ inline float chi_layered(float s, float h, float tol, int skip){
 	// not considering cases where s < 0.0, provided sdf kernel computes only where o_IDs are s > 0.0
-    if (s >= W)	return 0.0f;
-	if (s <= h)	return 1.0f;
-    float r = (s - h) / (W - h);
-    float smooth = 3.0f*r*r - 2.0f*r*r*r;
+    if (s >= tol)				return 0.0f;
+	if (s <= (float)skip * h)	return 1.0f;
+	
+    float r = (s - (float)skip * h) / (tol - (float)skip * h);
+    float smooth = r*r*(3.0f - 2.0f*r);
+    
     return 1.0f - smooth;
 }
 
@@ -605,6 +598,13 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 */
 
+// Raised-cosine bump: full width = 2*w (Smits: 0.04 m => w=0.02 m)
+__host__ __device__ float raised_cosine(float x, float x0, float w){
+    float xi = (x - x0) / w;
+    if (fabsf(xi) > 1.0f) return 0.0f;
+    return 0.5f * (1.0f + cosf((float)M_PI * xi));
+}
+
 // non-implicit, solved with regular SSP-RK3, but coefficients alpha, beta and zeta are restricted in terms
 // of time-step dt in the fitting script
 __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
@@ -619,7 +619,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 		
 		float L_phi = w_in - zeta[m]*phi_right[s];
 		
-		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*(phi_middle[s] + dt*L_phi);
+		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*(phi_right[s] + dt*L_phi);
 		phi_left[s] /= c_SSP;
 		sum_A += A[m] * phi_left[s];
 
@@ -632,9 +632,9 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
         float L_psi_1 = w_in - (alpha[m]*psi_1_right[s] + beta[m]*psi_2_right[s]);
         float L_psi_2 = beta[m]*psi_1_right[s] - alpha[m]*psi_2_right[s];
 
-		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*(psi_1_middle[s] + dt*L_psi_1);
+		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*(psi_1_right[s] + dt*L_psi_1);
 		psi_1_left[s] /= c_SSP;
-		psi_2_left[s] = a_SSP*psi_2_middle[s] + b_SSP*(psi_2_middle[s] + dt*L_psi_2);
+		psi_2_left[s] = a_SSP*psi_2_middle[s] + b_SSP*(psi_2_right[s] + dt*L_psi_2);
 		psi_2_left[s] /= c_SSP;
 
         sum_BC += B[m]*psi_1_left[s] + C[m]*psi_2_left[s];
@@ -644,7 +644,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right, int skip){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2; // bicubic interp limits to + 3 instead of +2
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -658,7 +658,8 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	// those values are only on positive s, which is the case here
     	// oid[] ranges from 1 to nMat, 255 elsewhere
 		const uint8_t o_ID = oid[Cij]; // object's material ID
-		if (o_ID == 0xFF) return;
+		if (o_ID == 0 || o_ID == 0xFF) return;
+		//if (s < 0.0f) return;
 		
 		int b_ID = bmap[Cij];
 		//if (b_ID < 0) return; // safety; should match oid test
@@ -685,6 +686,115 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float Dx = Wx + l * nx;
     	float Dy = Wy + l * ny;
 		
+		// "old" stands only for previous SSP stage, not time-step
+    	float pD = bicubic_interp(p_old, Nx, Dx, Dy, h);
+    	float uD = bicubic_interp(u_old, Nx, Dx, Dy, h);
+    	float vD = bicubic_interp(v_old, Nx, Dx, Dy, h);
+
+    	
+    	// ---------------------------------------------------------------------------------------------
+
+        // --- local side normal/tangential ---
+        const float un =  uD*nx + vD*ny;
+        const float ut = -uD*ny + vD*nx;
+
+        const float Z0 = rho * c;
+        //float Zb = R_to_Zb(R_obj, Z0);
+
+        // ------------------- incoming characteristic from fluid LOCAL side (towards obstacle) -------
+        const float w_in_local = pD - Z0 * un;
+        
+        int m_ID = o_ID - 1; // material ID
+        
+        const float w_out_local = ADE_solver(
+    		b_ID, m_ID, w_in_local, dt,
+    		Ak, zeta,
+    		Bl, Cl, alpha, beta,
+    		Rinf,
+    		K_m, L_m,
+    		a_SSP, b_SSP, c_SSP,
+    		phi_left, phi_middle, phi_right,
+    		psi_1_left, psi_1_middle, psi_1_right,
+    		psi_2_left, psi_2_middle, psi_2_right
+		);
+		
+        // boundary state on THIS side (same as before when T_obj = 0)
+        const float p_b  = 0.5f * (w_in_local + w_out_local);
+        const float un_b = (w_out_local - w_in_local) / (2.0f * Z0);
+
+        const float ut_b = ut; // still free-slip (or add tangential model)
+
+        // back to Cartesian
+        const float u_b = un_b*nx - ut_b*ny;
+        const float v_b = un_b*ny + ut_b*nx;
+    	
+    	const float chi = chi_layered(s, h, tol, skip);
+		/*
+		// immersed boundary smoothing / blending
+		// uses "new" values cause WENO3 was already called at this time-step
+		// using tol = 3*h, the first cell is completelly u[Cij] = u_b (no blending), so
+		// it is skept in the WENO3 kernel with the conditional (s < h) return;´
+		u[Cij] = (1.0f - chi) * u[Cij] + chi * u_b;
+    	v[Cij] = (1.0f - chi) * v[Cij] + chi * v_b;
+    	p[Cij] = (1.0f - chi) * p[Cij] + chi * p_b;
+    	*/
+    	// immersed boundary smoothing / blending (Brinkman penalization): tuned to different resolutions
+    	float kappa = 0.5f; // once tuned for a test case, no more need to change (for a given tol and chi)
+    	float eta = kappa * h / c;
+    	float lam = 1.0f - expf(-chi * dt / eta); // dimensionless
+		lam = fminf(lam, 1.0f); // clamp for explicit stability + no overshoot
+		
+		u[Cij] = (1.0f - lam) * u[Cij] + lam * u_b;
+    	v[Cij] = (1.0f - lam) * v[Cij] + lam * v_b;
+    	p[Cij] = (1.0f - lam) * p[Cij] + lam * p_b;
+    	  
+    }
+}
+
+/*
+// kernel apply BC immsersed with signed distance field
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 2; // bicubic interp limits to + 3 instead of +2
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
+    if ((i < Nx-2) && (j < Ny-2)){
+		
+    	int Cij = flat(i,j,Nx);
+    	
+    	float s = S[Cij]; // signed distance from cell center to boundary
+    	
+    	// only act on immersed cells (fluid-side band from your OID map), provided
+    	// those values are only on positive s, which is the case here
+    	// oid[] ranges from 1 to nMat, 255 elsewhere
+		const uint8_t o_ID = oid[Cij]; // object's material ID
+		if (o_ID == 0 || o_ID == 0xFF) return;
+		
+		int b_ID = bmap[Cij];
+		//if (b_ID < 0) return; // safety; should match oid test
+		
+		// gradients from S[] for detecting normals   
+    	float gx = (S[flat(i+1,j,Nx)] - S[flat(i-1,j,Nx)]) * (0.5f / h);
+    	float gy = (S[flat(i,j+1,Nx)] - S[flat(i,j-1,Nx)]) * (0.5f / h);
+    	float gn = sqrtf(gx*gx + gy*gy);
+    	gn = fmaxf(gn, 1e-12f); //safety
+	
+    	float nx = gx/gn;
+    	float ny = gy/gn;
+	
+    	// cell center
+    	float Cx = i * h;
+    	float Cy = j * h;
+		
+    	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid) 
+    	float Wx = Cx - s * nx;
+    	float Wy = Cy - s * ny;
+	
+    	// interpolation point slightly inside the fluid along n
+    	float l = s + h;
+    	float Dx = Wx + l * nx;
+    	float Dy = Wy + l * ny;
+		
+		// "old" stands only for previous SSP stage, not time-step
     	float pD = bicubic_interp(p_old, Nx, Dx, Dy, h);
     	float uD = bicubic_interp(u_old, Nx, Dx, Dy, h);
     	float vD = bicubic_interp(v_old, Nx, Dx, Dy, h);
@@ -698,6 +808,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         float T_obj  = T[o_ID]; // 0 for walls, >0 for partitions
 		*/
         // --- local side normal/tangential ---
+        /*
         const float un =  uD*nx + vD*ny;
         const float ut = -uD*ny + vD*nx;
 
@@ -706,6 +817,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 
         // ------------------- incoming characteristic from fluid LOCAL side (towards obstacle) -------
         const float w_in_local = pD - Z0 * un;
+        */
 		/*
         // ---------- other side sample (always computed) ----------
         // For partitions: sample across thickness + offset into opposite fluid.
@@ -742,7 +854,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         
         // considering only reflection for now
         // if using transmission, also implement implicit computation of w_in_opp similar to w_in_local
-        
+        /*
         int m_ID = o_ID - 1; // material ID
         
         const float w_out_local = ADE_solver(
@@ -765,23 +877,27 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 
         // back to Cartesian
         const float u_b = un_b*nx - ut_b*ny;
-        const float v_b = un_b*ny + ut_b*nx;    	
+        const float v_b = un_b*ny + ut_b*nx;
     	
     	const float chi = chi_layered(s, h, tol);
+    	*/
 		/*
 		u[Cij] = u_b;
     	v[Cij] = v_b;
     	p[Cij] = p_b;
     	*/
-		
-		// immersed boundary smoothing
+		/*
+		// immersed boundary smoothing / blending (Brinkman penalization)
+		// uses "new" values cause WENO3 was already called at this time-step
 		u[Cij] = (1.0f - chi) * u[Cij] + chi * u_b;
     	v[Cij] = (1.0f - chi) * v[Cij] + chi * v_b;
     	p[Cij] = (1.0f - chi) * p[Cij] + chi * p_b;
-    	
+    	*/
     	    
-    }
-}
+    //}
+//}
+
+
 
 // sPML Layer - "simple" PML according to:
 // 
@@ -1023,7 +1139,7 @@ __device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, int i
 }
 
 // WENO3 SSP-RK3 step 0
-__global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
+__global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -1032,9 +1148,8 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
     	// central index
 		int Cij = flat(i,j,Nx);
 		
-		// restrict
-		//if (S[Cij] < 0.0f) return;
-		if (S[Cij] < h) return;
+		// restrict (leave it for total blending case wusing chi_layered in sdf_kernel)
+		if (S[Cij] < (float)skip * h) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -1082,11 +1197,13 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		
+		periodic_BC(p1, u1, v1, i, j, Nx, Ny, 2);
+		
 	}
 }
 
 // WENO3 SSP-RK3 step 1
-__global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
+__global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -1095,9 +1212,8 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
     	// central index
 		int Cij = flat(i,j,Nx);
 		
-		// restrict
-		//if (S[Cij] < 0.0f) return;
-		if (S[Cij] < h) return;
+		// restrict (leave it for total blending case wusing chi_layered in sdf_kernel)
+		if (S[Cij] < (float)skip * h) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -1145,11 +1261,13 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		sPML(v2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(p2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		
+		periodic_BC(p2, u2, v2, i, j, Nx, Ny, 2);
+		
 	}
 }
 
 // WENO3 SSP-RK3 step 2
-__global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
+__global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -1158,9 +1276,8 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		// central index
 		int Cij = flat(i,j,Nx);
 		
-		// restrict
-		//if (S[Cij] < 0.0f) return;
-		if (S[Cij] < h) return;
+		// restrict (leave it for total blending case wusing chi_layered in sdf_kernel)
+		if (S[Cij] < (float)skip * h) return;
 		
 		// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -1208,6 +1325,8 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		
+		periodic_BC(p1, u1, v1, i, j, Nx, Ny, 2);
 		
 	}
 }
