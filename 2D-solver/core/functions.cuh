@@ -205,11 +205,11 @@ __host__ __device__ float F_u_Godunov(float pM, float pP, float uM, float uP, fl
 }
 
 __host__ __device__ float G_p_Godunov(float pM, float pP, float vM, float vP, float rho, float c, int j){
-	return 0.5*(rho*c*c*vP + rho*c*c*vM - (c*pP - c*pM));
+	return 0.5*(rho*c*c*(vP + vM) - c*(pP - pM));
 }
 
 __host__ __device__ float G_v_Godunov(float pM, float pP, float vM, float vP, float rho, float c, int j){
-	return 0.5*(pM/rho + pP/rho - (c*vP - c*vM));
+	return 0.5*((pM + pP)/rho - c*(vP - vM));
 }
 
 // limiter type
@@ -477,9 +477,7 @@ __device__ inline float bicubic_interp(float *f, int Nx, float Dx, float Dy, flo
 __host__ __device__ inline float R_to_Zb(float R, float Z0){
     // clamp away from ±1
     const float eps = 1e-6f;
-    if (R >  1.f - eps) R =  1.f - eps;
-    if (R < -1.f + eps) R = -1.f + eps;
-    return Z0 * (1.0f + R) / (1.0f - R);
+    return Z0 * (1.0f + R) / (1.0f - R + eps);
 }
 
 // artificial diffusion
@@ -612,8 +610,8 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
     float sum_BC = 0.0f;
 
     for (int k = 0; k < K; k++){
-        int m = m_ID*K + k;	// flattened material coeff idx
-        int s = b_ID*K + k; // flattened compact state idx
+        int m = m_ID*K + k;	// flattened material coeff idx (m_ID ranges from 0 to number of materials nMat)
+        int s = b_ID*K + k; // flattened compact state idx (b_ID ranges from 0 to number of boundary cells nB)
 
 		// -------------------------------------------------
 		
@@ -644,9 +642,9 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right, int skip){
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right, int skip, float *u_BC, float *v_BC, float *p_BC){
 
-	int i = blockIdx.x*blockDim.x + threadIdx.x + 2; // bicubic interp limits to + 3 instead of +2
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
     if ((i < Nx-2) && (j < Ny-2)){
 		
@@ -659,10 +657,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	// oid[] ranges from 1 to nMat, 255 elsewhere
 		const uint8_t o_ID = oid[Cij]; // object's material ID
 		if (o_ID == 0 || o_ID == 0xFF) return;
-		//if (s < 0.0f) return;
+		if (s < h) return; // for WENO3 stencil, leave last boundary element as zero?
 		
 		int b_ID = bmap[Cij];
-		//if (b_ID < 0) return; // safety; should match oid test
+		//if (b_ID < 0) return; // safety; should match oid[] logic
 		
 		// gradients from S[] for detecting normals   
     	float gx = (S[flat(i+1,j,Nx)] - S[flat(i-1,j,Nx)]) * (0.5f / h);
@@ -670,6 +668,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float gn = sqrtf(gx*gx + gy*gy);
     	gn = fmaxf(gn, 1e-12f); //safety
 	
+		// points from boundary to fluid (expected convention)
     	float nx = gx/gn;
     	float ny = gy/gn;
 	
@@ -682,34 +681,31 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float Wy = Cy - s * ny;
 	
     	// interpolation point slightly inside the fluid along n
-    	//float l = s + h;
-    	// avoid bicubic interpolation using zero-valued cells, so reflections are not injected with the WENO3
-    	// stencil ==> l = (s + 2h)
-    	float l = s + 2.0f * h; 
+    	float l = s + h;
     	float Dx = Wx + l * nx;
     	float Dy = Wy + l * ny;
 		
-		// "old" stands only for previous SSP stage, not time-step
+		// "old" stands only for previous SSP stage, not time-step (avoid race conditions, since not all
+		// were currently updated)
 		// interpolate inside fluid
     	float pD = bicubic_interp(p_old, Nx, Dx, Dy, h);
     	float uD = bicubic_interp(u_old, Nx, Dx, Dy, h);
     	float vD = bicubic_interp(v_old, Nx, Dx, Dy, h);
 
-    	
     	// ---------------------------------------------------------------------------------------------
 
-        // --- local side normal/tangential ---
+        // --- local side normal/tangential velocities ---
         const float un =  uD*nx + vD*ny;
         const float ut = -uD*ny + vD*nx;
 
         const float Z0 = rho * c;
-        //float Zb = R_to_Zb(R_obj, Z0);
 
-        // ------------------- incoming characteristic from fluid LOCAL side (towards obstacle) -------
-        const float w_in_local = pD - Z0 * un;
+        // -------------------------------------- characteristics --------------------------------------
+        //const float w_in_local = pD - Z0 * un; // incoming into the cell
+        const float w_out_local = pD + Z0 * un; // outgoing from the cell
         
         int m_ID = o_ID - 1; // material ID
-        
+        /*
         const float w_out_local = ADE_solver(
     		b_ID, m_ID, w_in_local, dt,
     		Ak, zeta,
@@ -721,10 +717,17 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     		psi_1_left, psi_1_middle, psi_1_right,
     		psi_2_left, psi_2_middle, psi_2_right
 		);
+		*/
+		
+		float R = 0.05f;
+		// convolution of constant R is just multiplication
+		//float w_out_local = R * w_in_local;
+		float w_in_local = R * w_out_local; 
+		//float w_out_local = w_in_local / R;
 		
         // boundary state on THIS side (same as before when T_obj = 0)
         const float p_b  = 0.5f * (w_in_local + w_out_local);
-        const float un_b = (w_out_local - w_in_local) / (2.0f * Z0);
+       	const float un_b = (w_out_local - w_in_local) / (2.0f * Z0);
 
         const float ut_b = ut; // still free-slip (or add tangential model)
 
@@ -732,10 +735,13 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         const float u_b = un_b*nx - ut_b*ny;
         const float v_b = un_b*ny + ut_b*nx;
     	
-    	const float chi = chi_layered(s, h, tol, skip);
     	// -------------------------------------------------------------------------------------
+    	
+    	//const float chi = chi_layered(s, h, tol, skip);
+    	
 		/*
-		// immersed boundary smoothing / blending
+		// immersed boundary smoothing / blending (Brinkman penalization)
+		// this is effectivelly some type of low-pass filtering
 		// uses "new" values cause WENO3 was already called at this time-step
 		// using tol = 3*h, the first cell is completelly u[Cij] = u_b (no blending), so
 		// it is skept in the WENO3 kernel with the conditional (s < h) return;´
@@ -744,7 +750,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	p[Cij] = (1.0f - chi) * p[Cij] + chi * p_b;
     	*/
     	// -------------------------------------------------------------------------------------
-    	
+    	/*
     	// immersed boundary smoothing / blending (Brinkman penalization): tuned to different resolutions
     	float kappa = 0.5f; // once tuned for a test case, no more need to change (for a given tol and chi)
     	float eta = kappa * h / c;
@@ -754,14 +760,33 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 		u[Cij] = (1.0f - lam) * u[Cij] + lam * u_b;
     	v[Cij] = (1.0f - lam) * v[Cij] + lam * v_b;
     	p[Cij] = (1.0f - lam) * p[Cij] + lam * p_b;
-    	
+    	*/
     	// -------------------------------------------------------------------------------------
     	// test without layering (check kernel_WENO stages and comment section above)
     	/*
-    	u[Cij] = u_b;
-    	v[Cij] = v_b;
-    	p[Cij] = p_b;
-    	  */
+    	float R = 0.99f;
+    	float Z = R_to_Zb(R, Z0);
+    
+    	p[Cij] = Z * un;
+    	*/
+    	/*
+    	// mirror extrapolation to ghost cell center
+    	float pG  = 2.0f*p_b  - pD;
+    	float unG = 2.0f*un_b - un;
+    	float utG = ut_b; // slip
+	
+    	float uG = unG*nx - utG*ny;
+    	float vG = unG*ny + utG*nx;
+		
+    	p[Cij] = pG;
+    	u[Cij] = uG;
+    	v[Cij] = vG;
+		*/
+		
+		p_BC[Cij] = p_b;
+    	u_BC[Cij] = u_b;
+    	v_BC[Cij] = v_b;
+    	
     }
 }
 
@@ -1152,8 +1177,16 @@ __device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, int i
 	Q_V[3] = WENO_y(V, dd, c_rl, i, j, Nx, 0, eps);
 }
 
+// test if cell is oid (excluding bounding box), returns float as convenience
+__device__ float tst(uint8_t val){
+	if (val != 0 && val != 0xFF){
+		return 1.0f;
+	}
+	return 0.0f;
+}
+
 // WENO3 SSP-RK3 step 0
-__global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip){
+__global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *p_BC, float *u_BC, float *v_BC, uint8_t *oid){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -1173,6 +1206,15 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		// final reconstructed WENO values V+, V-
 		float p_V[4], u_V[4], v_V[4];
 		
+		int L, R, U, D; // neighbor indexes
+		
+		L = flat(i-1,j,Nx);
+		R = flat(i+1,j,Nx);
+		U = flat(i,j+1,Nx);
+		D = flat(i,j-1,Nx);
+		
+		float pM, pP, uM, uP, vM, vP;
+		
 		// (1)
 		
 		// compute WENO values V_i+, V_i-
@@ -1180,6 +1222,8 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		compute_Vs_x(u_V, u0, dd, c_rl, i, j, Nx, eps);
 		compute_Vs_x(v_V, v0, dd, c_rl, i, j, Nx, eps);
 		
+		// --------------------------------------------------------------------------		
+		/*
 		// compute flux F_p+
 		F_pP = F_p_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c, j);
 		// compute flux F_p-
@@ -1188,12 +1232,38 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		F_uP = F_u_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c, j);
 		// compute flux F_u-
 		F_uM = F_u_Godunov(p_V[2], p_V[3], u_V[2], u_V[3], rho, c, j);
+		*/
+		// ---------------------------------------------------------------------------
+		
+		pM = p_V[0];
+		uM = u_V[0];
+		pP = (1.0f - tst(oid[R])) * p_V[1] + tst(oid[R]) * p_BC[Cij];
+		uP = (1.0f - tst(oid[R])) * u_V[1] + tst(oid[R]) * u_BC[Cij];
+		
+		// compute flux F_p+
+		F_pP = F_p_Godunov(pM, pP, uM, uP, rho, c, j);
+		// compute flux F_u+
+		F_uP = F_u_Godunov(pM, pP, uM, uP, rho, c, j);
+		
+		pM = (1.0f - tst(oid[L])) * p_V[2] + tst(oid[L]) * p_BC[Cij];
+		uM = (1.0f - tst(oid[L])) * u_V[2] + tst(oid[L]) * u_BC[Cij];
+		pP = p_V[3];
+		uP = u_V[3];
+		
+		// compute flux F_p+
+		F_pM = F_p_Godunov(pM, pP, uM, uP, rho, c, j);
+		// compute flux F_u+
+		F_uM = F_u_Godunov(pM, pP, uM, uP, rho, c, j);
+		
+		// ---------------------------------------------------------------------------
 		
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_y(p_V, p0, dd, c_rl, i, j, Nx, eps);
 		compute_Vs_y(u_V, u0, dd, c_rl, i, j, Nx, eps);
 		compute_Vs_y(v_V, v0, dd, c_rl, i, j, Nx, eps);
 		
+		// ---------------------------------------------------------------------------
+		/*
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c, j);
 		// compute flux G_p-
@@ -1202,11 +1272,35 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		G_vP = G_v_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c, j);
 		// compute flux G_v-
 		G_vM = G_v_Godunov(p_V[2], p_V[3], v_V[2], v_V[3], rho, c, j-1);
+		*/
+		// ---------------------------------------------------------------------------
+		
+		pM = p_V[0];
+		vM = v_V[0];
+		pP = (1.0f - tst(oid[U])) * p_V[1] + tst(oid[U]) * p_BC[Cij];
+		vP = (1.0f - tst(oid[U])) * v_V[1] + tst(oid[U]) * v_BC[Cij];
+		
+		// compute flux F_p+
+		G_pP = G_p_Godunov(pM, pP, vM, vP, rho, c, j);
+		// compute flux F_u+
+		G_vP = G_v_Godunov(pM, pP, vM, vP, rho, c, j);
+		
+		pM = (1.0f - tst(oid[D])) * p_V[2] + tst(oid[D]) * p_BC[Cij];
+		vM = (1.0f - tst(oid[D])) * v_V[2] + tst(oid[D]) * v_BC[Cij];
+		pP = p_V[3];
+		vP = v_V[3];
+		
+		// compute flux F_p+
+		G_pM = G_p_Godunov(pM, pP, vM, vP, rho, c, j-1);
+		// compute flux F_u+
+		G_vM = G_v_Godunov(pM, pP, vM, vP, rho, c, j-1);
+
+		
+		// ---------------------------------------------------------------------------
 		
 		u1[Cij] = u0[Cij] + dt*((-F_uP + F_uM)/h);
 		v1[Cij] = v0[Cij] + dt*((-G_vP + G_vM)/h);
 		p1[Cij] = p0[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h);
-
 		
 		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
@@ -1218,7 +1312,7 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 }
 
 // WENO3 SSP-RK3 step 1
-__global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip){
+__global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *p_BC, float *u_BC, float *v_BC){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
@@ -1283,7 +1377,7 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 }
 
 // WENO3 SSP-RK3 step 2
-__global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip){
+__global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *p_BC, float *u_BC, float *v_BC){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;

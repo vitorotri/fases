@@ -443,7 +443,7 @@ int main(int argc, char *argv[]){
             		u0[flat(i_src, j, Nx)] = val_s;
             	}
             	*/
-            	// for plane wave (raised cosine), see below
+            	// for raised cosine, see below
             	src_x = val_x;
             	
         	}
@@ -693,7 +693,7 @@ int main(int argc, char *argv[]){
     	exit(1);
 	}
 	
-	int skip = 1; // cells to skip inside the WENO kernel (dealt by the BC kernel
+	int skip = 2; // cells to skip inside the WENO kernel (dealt by the BC kernel)
 	
 	//Nt = 100; // for testing
 	
@@ -794,16 +794,16 @@ int main(int argc, char *argv[]){
 			// Launch WENO3 kernel + SSP-RK3
 				
 			// (0)
-			kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip);	
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old, skip); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+			kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, d_u2, d_v2, d_p2, d_oid);	
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old, skip, d_u2, d_v2, d_p2); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 				
 			// (1)
-			kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip);	
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2, skip);
+			kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, d_u0, d_v0, d_p0);	
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2, skip, d_u0, d_v0, d_p0);
 				
 			// (2)
-			kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip);
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu, skip);
+			kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, d_u0, d_v0, d_p0);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu, skip, d_u0, d_v0, d_p0);
 
 			// exchange state arrays
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
