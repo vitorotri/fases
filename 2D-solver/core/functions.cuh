@@ -281,6 +281,9 @@ __host__ __device__ void periodic_BC(float *p, float *u, float *v, int i, int j,
     // for WENO3
     p[flat(i,Ny-(max_idx-1),Nx)] = p[flat(i,Ny-(max_idx+1),Nx)];
     v[flat(i,Ny-(max_idx-1),Nx)] = v[flat(i,Ny-(max_idx+1),Nx)];
+    // for WENO5
+    p[flat(i,Ny-(max_idx-2),Nx)] = p[flat(i,Ny-(max_idx+2),Nx)];
+    v[flat(i,Ny-(max_idx-2),Nx)] = v[flat(i,Ny-(max_idx+2),Nx)];
         
     // Bottom boundary
     p[flat(i,max_idx-1,Nx)] = p[flat(i,max_idx,Nx)];
@@ -288,6 +291,9 @@ __host__ __device__ void periodic_BC(float *p, float *u, float *v, int i, int j,
     // for WENO3
     p[flat(i,max_idx-2,Nx)] = p[flat(i,max_idx,Nx)];
     v[flat(i,max_idx-2,Nx)] = v[flat(i,max_idx,Nx)];
+    // for WENO5
+    p[flat(i,max_idx-3,Nx)] = p[flat(i,max_idx,Nx)];
+    v[flat(i,max_idx-3,Nx)] = v[flat(i,max_idx,Nx)];
     
 }
 
@@ -427,8 +433,7 @@ float cubic_interp_1d(float fm1, float f0, float f1, float f2, float s)
 }
 
 
-__device__ inline float bicubic_interp(float *f, int Nx, float Dx, float Dy, float h)
-{
+__device__ inline float bicubic_interp(float *f, int Nx, float Dx, float Dy, float h){
     // Convert physical position to grid coordinates
     float gx = Dx / h;                // grid coord in x
     float gy = Dy / h;                // grid coord in y
@@ -642,11 +647,11 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right, int skip, float *u_BC, float *v_BC, float *p_BC){
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right, int skip){
 
-	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
-	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
-    if ((i < Nx-2) && (j < Ny-2)){
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
+    if ((i < Nx-3) && (j < Ny-3)){
 		
     	int Cij = flat(i,j,Nx);
     	
@@ -655,9 +660,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	// only act on immersed cells (fluid-side band from your OID map), provided
     	// those values are only on positive s, which is the case here
     	// oid[] ranges from 1 to nMat, 255 elsewhere
-		const uint8_t o_ID = oid[Cij]; // object's material ID
+		uint8_t o_ID = oid[Cij]; // object's material ID
 		if (o_ID == 0 || o_ID == 0xFF) return;
-		if (s < h) return; // for WENO3 stencil, leave last boundary element as zero?
+		
+		//if (s >= 3*h) return; // essential for WENO3 stencil: actually matched by condition above
 		
 		int b_ID = bmap[Cij];
 		//if (b_ID < 0) return; // safety; should match oid[] logic
@@ -668,22 +674,22 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	float gn = sqrtf(gx*gx + gy*gy);
     	gn = fmaxf(gn, 1e-12f); //safety
 	
-		// points from boundary to fluid (expected convention)
-    	float nx = gx/gn;
-    	float ny = gy/gn;
+		// points from boundary to fluid if positive sign (opposite to Hornikx's DG FEM)
+    	float nx = -gx/gn;
+    	float ny = -gy/gn;
 	
     	// cell center
     	float Cx = i * h;
     	float Cy = j * h;
 		
     	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid) 
-    	float Wx = Cx - s * nx;
-    	float Wy = Cy - s * ny;
+    	float Wx = Cx + s * nx;
+    	float Wy = Cy + s * ny;
 	
     	// interpolation point slightly inside the fluid along n
-    	float l = s + h;
-    	float Dx = Wx + l * nx;
-    	float Dy = Wy + l * ny;
+    	float l = s + 2.0f * h; // floating
+    	float Dx = Wx - l * nx;
+    	float Dy = Wy - l * ny;
 		
 		// "old" stands only for previous SSP stage, not time-step (avoid race conditions, since not all
 		// were currently updated)
@@ -695,19 +701,19 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     	// ---------------------------------------------------------------------------------------------
 
         // --- local side normal/tangential velocities ---
-        const float un =  uD*nx + vD*ny;
-        const float ut = -uD*ny + vD*nx;
+        float un =  uD*nx + vD*ny;
+        float ut = -uD*ny + vD*nx;
 
-        const float Z0 = rho * c;
+        float Z0 = rho * c;
 
         // -------------------------------------- characteristics --------------------------------------
-        //const float w_in_local = pD - Z0 * un; // incoming into the cell
-        const float w_out_local = pD + Z0 * un; // outgoing from the cell
+        //float w_in_local = pD - Z0 * un; // incoming into the boundary cell
+        float w_out_local = pD + Z0 * un; // outgoing from the boundary cell
         
         int m_ID = o_ID - 1; // material ID
-        /*
-        const float w_out_local = ADE_solver(
-    		b_ID, m_ID, w_in_local, dt,
+        
+        float w_in_local = ADE_solver(
+    		b_ID, m_ID, w_out_local, dt,
     		Ak, zeta,
     		Bl, Cl, alpha, beta,
     		Rinf,
@@ -717,75 +723,27 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
     		psi_1_left, psi_1_middle, psi_1_right,
     		psi_2_left, psi_2_middle, psi_2_right
 		);
-		*/
-		
-		float R = 0.05f;
+		/*
+		float R = -1.0f;
 		// convolution of constant R is just multiplication
 		//float w_out_local = R * w_in_local;
-		float w_in_local = R * w_out_local; 
-		//float w_out_local = w_in_local / R;
-		
+		float w_in_local = R * w_out_local;
+		*/
         // boundary state on THIS side (same as before when T_obj = 0)
-        const float p_b  = 0.5f * (w_in_local + w_out_local);
-       	const float un_b = (w_out_local - w_in_local) / (2.0f * Z0);
+        float p_b  = 0.5f * (w_in_local + w_out_local);
+       	float un_b = (w_out_local - w_in_local) / (2.0f * Z0);
 
-        const float ut_b = ut; // still free-slip (or add tangential model)
+        float ut_b = ut; // still free-slip (or add tangential model)
 
         // back to Cartesian
-        const float u_b = un_b*nx - ut_b*ny;
-        const float v_b = un_b*ny + ut_b*nx;
+        float u_b = un_b*nx - ut_b*ny;
+        float v_b = un_b*ny + ut_b*nx;
     	
     	// -------------------------------------------------------------------------------------
-    	
-    	//const float chi = chi_layered(s, h, tol, skip);
-    	
-		/*
-		// immersed boundary smoothing / blending (Brinkman penalization)
-		// this is effectivelly some type of low-pass filtering
-		// uses "new" values cause WENO3 was already called at this time-step
-		// using tol = 3*h, the first cell is completelly u[Cij] = u_b (no blending), so
-		// it is skept in the WENO3 kernel with the conditional (s < h) return;´
-		u[Cij] = (1.0f - chi) * u[Cij] + chi * u_b;
-    	v[Cij] = (1.0f - chi) * v[Cij] + chi * v_b;
-    	p[Cij] = (1.0f - chi) * p[Cij] + chi * p_b;
-    	*/
-    	// -------------------------------------------------------------------------------------
-    	/*
-    	// immersed boundary smoothing / blending (Brinkman penalization): tuned to different resolutions
-    	float kappa = 0.5f; // once tuned for a test case, no more need to change (for a given tol and chi)
-    	float eta = kappa * h / c;
-    	float lam = 1.0f - expf(-chi * dt / eta); // dimensionless
-		lam = fminf(lam, 1.0f); // clamp for explicit stability + no overshoot
 		
-		u[Cij] = (1.0f - lam) * u[Cij] + lam * u_b;
-    	v[Cij] = (1.0f - lam) * v[Cij] + lam * v_b;
-    	p[Cij] = (1.0f - lam) * p[Cij] + lam * p_b;
-    	*/
-    	// -------------------------------------------------------------------------------------
-    	// test without layering (check kernel_WENO stages and comment section above)
-    	/*
-    	float R = 0.99f;
-    	float Z = R_to_Zb(R, Z0);
-    
-    	p[Cij] = Z * un;
-    	*/
-    	/*
-    	// mirror extrapolation to ghost cell center
-    	float pG  = 2.0f*p_b  - pD;
-    	float unG = 2.0f*un_b - un;
-    	float utG = ut_b; // slip
-	
-    	float uG = unG*nx - utG*ny;
-    	float vG = unG*ny + utG*nx;
-		
-    	p[Cij] = pG;
-    	u[Cij] = uG;
-    	v[Cij] = vG;
-		*/
-		
-		p_BC[Cij] = p_b;
-    	u_BC[Cij] = u_b;
-    	v_BC[Cij] = v_b;
+		p[Cij] = p_b;
+    	u[Cij] = u_b;
+    	v[Cij] = v_b;
     	
     }
 }
@@ -1034,91 +992,97 @@ __global__ void kernel_Euler(int Nx, int Ny, float *p0, float *u0, float *v0, fl
 
 // --- WENO3 functions ---
 
-// reconstruct in x, for k = 2
+// reconstruct in x, for k = 3
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_{i-1/2} instead of V_{i+1/2})
 __device__ float construct_Vi_12(float *u, int i, int j, int Nx, float *c_rl, int r, int idx){
 	float retval = 0.0;
-	for (int l = 0; l <= 1; l++){
+	for (int l = 0; l <= 2; l++){
 		//if (r+idx > 3) printf("[!] Violation");
-		retval += c_rl[flat(r+idx,l,3)]*u[flat(i-r+l,j,Nx)];
+		retval += c_rl[flat(r+idx,l,12)]*u[flat(i-r+l,j,Nx)];
 	}
 	return retval;
 }
 
-// reconstruct in y, for k = 2
+// reconstruct in y, for k = 3
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_{j-1/2} instead of V_{j+1/2})
 __device__ float construct_Vj_12(float *u, int i, int j, int Nx, float *c_rl, int r, int idx){
 	float retval = 0.0;
-	for (int l = 0; l <= 1; l++){
-		retval += c_rl[flat(r+idx,l,3)]*u[flat(i,j-r+l,Nx)];
+	for (int l = 0; l <= 2; l++){
+		retval += c_rl[flat(r+idx,l,12)]*u[flat(i,j-r+l,Nx)];
 	}
 	return retval;
 }
 
 // compute smoothness indicators in x
-__device__ float compute_beta_x(float *u, int r, int i, int j, int Nx){
-	float b;
+__device__ float compute_beta_x(float *u, int r, int i, int j, int Nx, float *beta_rl){
+	float b1, b2;
 	
-	b = u[flat(i-r+1,j,Nx)] - u[flat(i-r,j,Nx)];
+	b1 = u[flat(i-r,j,Nx)] - 2*u[flat(i-r+1,j,Nx)] + u[flat(i-r+2,j,Nx)];
 	
-	return b*b;
+	b2 = beta_rl[flat(r,0,9)]*u[flat(i-r,j,Nx)] + beta_rl[flat(r,1,9)]*u[flat(i-r+1,j,Nx)]
+			+ beta_rl[flat(r,2,9)]*u[flat(i-r+2,j,Nx)];
+	
+	return (13.0*b1*b1/12.0) + (0.25*b2*b2);
 }
 
 // compute smoothness indicators in y
-__device__ float compute_beta_y(float *u, int r, int i, int j, int Nx){
-	float b;
+__device__ float compute_beta_y(float *u, int r, int i, int j, int Nx, float *beta_rl){
+	float b1, b2;
 	
-	b = u[flat(i,j-r+1,Nx)] - u[flat(i,j-r,Nx)];
+	b1 = u[flat(i,j-r,Nx)] - 2*u[flat(i,j-r+1,Nx)] + u[flat(i,j-r+2,Nx)];
 	
-	return b*b;
+	b2 = beta_rl[flat(r,0,9)]*u[flat(i,j-r,Nx)] + beta_rl[flat(r,1,9)]*u[flat(i,j-r+1,Nx)]
+			+ beta_rl[flat(r,2,9)]*u[flat(i,j-r+2,Nx)];
+	
+	return (13.0*b1*b1/12.0) + (0.25*b2*b2);
 }
 
 // compute alpha[r]
-// if auxiliar S = 0, compute alpha, if 1, compute alpha~
+// if S = 0, compute alpha, if 1, compute alpha~
 __device__ float compute_alpha(float *dd, float *beta, float eps, int r, int S){
 	//if (beta[r] != 0.0) printf("beta = %.17f\n", beta[r]);
 	float aux = beta[r] + eps;
-	int rr = S - r;
+	int rr = S*3 - S*1 - r;
 	return dd[(int)abs(rr)]/(aux*aux);
 }
 
 // compute omega[r]
 __device__ float compute_w(float *alpha, int r){
 	float sum;
-	sum = alpha[0] + alpha[1];
+	sum = alpha[0] + alpha[1] + alpha[2];
 	return alpha[r]/sum;
 }
 
 // WENO algorithm in x
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_i- instead of V_i+)
-__device__ float WENO_x(float *V, float *dd, float *c_rl, int i, int j, int Nx, int idx, float eps){
+__device__ float WENO_x(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int Nx, int idx, float eps){
 	
 	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
-	float Vi_12[2];
-	for (int r = 0; r < 2; r++){
+	float Vi_12[3];
+	for (int r = 0; r < 3; r++){
 		Vi_12[r] = construct_Vi_12(V, i, j, Nx, c_rl, r, idx);
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
 	
 	// 3) Compute smoothness indicators beta[r]
-	float beta[2];
-	for (int r = 0; r < 2; r++){
-		beta[r] = compute_beta_x(V, r, i, j, Nx);
+	float beta[3];
+	for (int r = 0; r < 3; r++){
+		beta[r] = compute_beta_x(V, r, i, j, Nx, beta_rl);
 	}
 	
 	// 4) Define omega[r]
-	float alpha[2], w[2];
-	for (int r = 0; r < 2; r++){
+	float alpha[3], w[3];
+	for (int r = 0; r < 3; r++){
 		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
 	}
-	for (int r = 0; r < 2; r++){
+	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
 	}
 
 	// 5) Compute V_i+ / V_i-, depending on the value of idx
 	float V_i = 0.0;
-	for (int r = 0; r < 2; r++){
+	for (int r = 0; r < 3; r++){
 		V_i += w[r]*Vi_12[r];
 	}
 	
@@ -1127,34 +1091,34 @@ __device__ float WENO_x(float *V, float *dd, float *c_rl, int i, int j, int Nx, 
 
 // WENO algorithm in y
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_j- instead of V_j+)
-__device__ float WENO_y(float *V, float *dd, float *c_rl, int i, int j, int Nx, int idx, float eps){
+__device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int Nx, int idx, float eps){
 	
 	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
-	float Vj_12[2];
-	for (int r = 0; r < 2; r++){
+	float Vj_12[3];
+	for (int r = 0; r < 3; r++){
 		Vj_12[r] = construct_Vj_12(V, i, j, Nx, c_rl, r, idx);
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
 	
 	// 3) Compute smoothness indicators beta[r]
-	float beta[2];
-	for (int r = 0; r < 2; r++){
-		beta[r] = compute_beta_y(V, r, i, j, Nx);
+	float beta[3];
+	for (int r = 0; r < 3; r++){
+		beta[r] = compute_beta_y(V, r, i, j, Nx, beta_rl);
 	}
 	
 	// 4) Define omega[r]
-	float alpha[2], w[2];
-	for (int r = 0; r < 2; r++){
+	float alpha[3], w[3];
+	for (int r = 0; r < 3; r++){
 		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
 	}
-	for (int r = 0; r < 2; r++){
+	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
 	}
 	
 	// 5) Compute V_j+ / V_j-, depending on the value of idx
 	float V_j = 0.0;
-	for (int r = 0; r < 2; r++){
+	for (int r = 0; r < 3; r++){
 		V_j += w[r]*Vj_12[r];
 	}
 	
@@ -1162,35 +1126,32 @@ __device__ float WENO_y(float *V, float *dd, float *c_rl, int i, int j, int Nx, 
 }
 
 // Compute final 4 V's for pluging WENO reconstructions in x flux
-__device__ void compute_Vs_x(float *Q_V, float *V, float *dd, float *c_rl, int i, int j, int Nx, float eps){
-	Q_V[0] = WENO_x(V, dd, c_rl, i, j, Nx, 1, eps);
-	Q_V[1] = WENO_x(V, dd, c_rl, i+1, j, Nx, 0, eps);
-	Q_V[2] = WENO_x(V, dd, c_rl, i-1, j, Nx, 1, eps);
-	Q_V[3] = WENO_x(V, dd, c_rl, i, j, Nx, 0, eps);
+__device__ void compute_Vs_x(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int Nx, float eps){
+	Q_V[0] = WENO_x(V, dd, c_rl, beta_rl, i, j, Nx, 1, eps);
+	Q_V[1] = WENO_x(V, dd, c_rl, beta_rl, i+1, j, Nx, 0, eps);
+	Q_V[2] = WENO_x(V, dd, c_rl, beta_rl, i-1, j, Nx, 1, eps);
+	Q_V[3] = WENO_x(V, dd, c_rl, beta_rl, i, j, Nx, 0, eps);
 }
 
 // Compute final 4 V's for pluging WENO reconstructions in y flux
-__device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, int i, int j, int Nx, float eps){
-	Q_V[0] = WENO_y(V, dd, c_rl, i, j, Nx, 1, eps);
-	Q_V[1] = WENO_y(V, dd, c_rl, i, j+1, Nx, 0, eps);
-	Q_V[2] = WENO_y(V, dd, c_rl, i, j-1, Nx, 1, eps);
-	Q_V[3] = WENO_y(V, dd, c_rl, i, j, Nx, 0, eps);
+__device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int Nx, float eps){
+	Q_V[0] = WENO_y(V, dd, c_rl, beta_rl, i, j, Nx, 1, eps);
+	Q_V[1] = WENO_y(V, dd, c_rl, beta_rl, i, j+1, Nx, 0, eps);
+	Q_V[2] = WENO_y(V, dd, c_rl, beta_rl, i, j-1, Nx, 1, eps);
+	Q_V[3] = WENO_y(V, dd, c_rl, beta_rl, i, j, Nx, 0, eps);
 }
 
-// test if cell is oid (excluding bounding box), returns float as convenience
-__device__ float tst(uint8_t val){
-	if (val != 0 && val != 0xFF){
-		return 1.0f;
-	}
-	return 0.0f;
+// test if S[] is smaller than h
+__device__ float tst(float S_val, float h){
+	return (float)(S_val < 0.0f);
 }
 
 // WENO3 SSP-RK3 step 0
-__global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *p_BC, float *u_BC, float *v_BC, uint8_t *oid){
+__global__ void kernel_WENO_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *beta_rl){
 	
-	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
-	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
-    if ((i < Nx-2) && (j < Ny-2)){
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
+    if ((i < Nx-3) && (j < Ny-3)){
     	
     	// central index
 		int Cij = flat(i,j,Nx);
@@ -1206,24 +1167,15 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		// final reconstructed WENO values V+, V-
 		float p_V[4], u_V[4], v_V[4];
 		
-		int L, R, U, D; // neighbor indexes
-		
-		L = flat(i-1,j,Nx);
-		R = flat(i+1,j,Nx);
-		U = flat(i,j+1,Nx);
-		D = flat(i,j-1,Nx);
-		
-		float pM, pP, uM, uP, vM, vP;
-		
-		// (1)
-		
-		// compute WENO values V_i+, V_i-
-		compute_Vs_x(p_V, p0, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_x(u_V, u0, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_x(v_V, v0, dd, c_rl, i, j, Nx, eps);
+		// (0)
 		
 		// --------------------------------------------------------------------------		
-		/*
+		
+		// compute WENO values V_i+, V_i-
+		compute_Vs_x(p_V, p0, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_x(u_V, u0, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_x(v_V, v0, dd, c_rl, beta_rl, i, j, Nx, eps);
+		
 		// compute flux F_p+
 		F_pP = F_p_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c, j);
 		// compute flux F_p-
@@ -1232,38 +1184,14 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		F_uP = F_u_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c, j);
 		// compute flux F_u-
 		F_uM = F_u_Godunov(p_V[2], p_V[3], u_V[2], u_V[3], rho, c, j);
-		*/
-		// ---------------------------------------------------------------------------
-		
-		pM = p_V[0];
-		uM = u_V[0];
-		pP = (1.0f - tst(oid[R])) * p_V[1] + tst(oid[R]) * p_BC[Cij];
-		uP = (1.0f - tst(oid[R])) * u_V[1] + tst(oid[R]) * u_BC[Cij];
-		
-		// compute flux F_p+
-		F_pP = F_p_Godunov(pM, pP, uM, uP, rho, c, j);
-		// compute flux F_u+
-		F_uP = F_u_Godunov(pM, pP, uM, uP, rho, c, j);
-		
-		pM = (1.0f - tst(oid[L])) * p_V[2] + tst(oid[L]) * p_BC[Cij];
-		uM = (1.0f - tst(oid[L])) * u_V[2] + tst(oid[L]) * u_BC[Cij];
-		pP = p_V[3];
-		uP = u_V[3];
-		
-		// compute flux F_p+
-		F_pM = F_p_Godunov(pM, pP, uM, uP, rho, c, j);
-		// compute flux F_u+
-		F_uM = F_u_Godunov(pM, pP, uM, uP, rho, c, j);
 		
 		// ---------------------------------------------------------------------------
 		
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
-		compute_Vs_y(p_V, p0, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_y(u_V, u0, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_y(v_V, v0, dd, c_rl, i, j, Nx, eps);
+		compute_Vs_y(p_V, p0, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_y(u_V, u0, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_y(v_V, v0, dd, c_rl, beta_rl, i, j, Nx, eps);
 		
-		// ---------------------------------------------------------------------------
-		/*
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c, j);
 		// compute flux G_p-
@@ -1272,30 +1200,7 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		G_vP = G_v_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c, j);
 		// compute flux G_v-
 		G_vM = G_v_Godunov(p_V[2], p_V[3], v_V[2], v_V[3], rho, c, j-1);
-		*/
-		// ---------------------------------------------------------------------------
-		
-		pM = p_V[0];
-		vM = v_V[0];
-		pP = (1.0f - tst(oid[U])) * p_V[1] + tst(oid[U]) * p_BC[Cij];
-		vP = (1.0f - tst(oid[U])) * v_V[1] + tst(oid[U]) * v_BC[Cij];
-		
-		// compute flux F_p+
-		G_pP = G_p_Godunov(pM, pP, vM, vP, rho, c, j);
-		// compute flux F_u+
-		G_vP = G_v_Godunov(pM, pP, vM, vP, rho, c, j);
-		
-		pM = (1.0f - tst(oid[D])) * p_V[2] + tst(oid[D]) * p_BC[Cij];
-		vM = (1.0f - tst(oid[D])) * v_V[2] + tst(oid[D]) * v_BC[Cij];
-		pP = p_V[3];
-		vP = v_V[3];
-		
-		// compute flux F_p+
-		G_pM = G_p_Godunov(pM, pP, vM, vP, rho, c, j-1);
-		// compute flux F_u+
-		G_vM = G_v_Godunov(pM, pP, vM, vP, rho, c, j-1);
 
-		
 		// ---------------------------------------------------------------------------
 		
 		u1[Cij] = u0[Cij] + dt*((-F_uP + F_uM)/h);
@@ -1306,17 +1211,17 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, float *p0, float *u0, float *
 		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		
-		periodic_BC(p1, u1, v1, i, j, Nx, Ny, 2);
+		periodic_BC(p1, u1, v1, i, j, Nx, Ny, 3);
 		
 	}
 }
 
 // WENO3 SSP-RK3 step 1
-__global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *p_BC, float *u_BC, float *v_BC){
+__global__ void kernel_WENO_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *beta_rl){
 	
-	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
-	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
-    if ((i < Nx-2) && (j < Ny-2)){
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
+    if ((i < Nx-3) && (j < Ny-3)){
     	
     	// central index
 		int Cij = flat(i,j,Nx);
@@ -1332,12 +1237,14 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		// final reconstructed WENO values V+, V-
 		float p_V[4], u_V[4], v_V[4];
 		
-		// (2)
+		// (1)
+		
+		// ---------------------------------------------------------------------------
 		
 		// compute WENO values V_i+, V_i-
-		compute_Vs_x(p_V, p1, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_x(u_V, u1, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_x(v_V, v1, dd, c_rl, i, j, Nx, eps);
+		compute_Vs_x(p_V, p1, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_x(u_V, u1, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_x(v_V, v1, dd, c_rl, beta_rl, i, j, Nx, eps);
 		
 		// compute flux F_p+
 		F_pP = F_p_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c, j);
@@ -1347,11 +1254,13 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		F_uP = F_u_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c, j);
 		// compute flux F_u-
 		F_uM = F_u_Godunov(p_V[2], p_V[3], u_V[2], u_V[3], rho, c, j);
+
+		// ---------------------------------------------------------------------------
 		
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
-		compute_Vs_y(p_V, p1, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_y(u_V, u1, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_y(v_V, v1, dd, c_rl, i, j, Nx, eps);
+		compute_Vs_y(p_V, p1, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_y(u_V, u1, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_y(v_V, v1, dd, c_rl, beta_rl, i, j, Nx, eps);
 		
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c, j);
@@ -1362,26 +1271,27 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, float *p0, float *u0, float *
 		// compute flux G_v-
 		G_vM = G_v_Godunov(p_V[2], p_V[3], v_V[2], v_V[3], rho, c, j-1);
 		
+		// ---------------------------------------------------------------------------
+		
 		u2[Cij] = 0.75f*u0[Cij] + 0.25f*(u1[Cij] + dt*((-F_uP + F_uM)/h));
 		v2[Cij] = 0.75f*v0[Cij] + 0.25f*(v1[Cij] + dt*((-G_vP + G_vM)/h));
 		p2[Cij] = 0.75f*p0[Cij] + 0.25f*(p1[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h));
-
 		
 		sPML(u2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(v2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(p2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		
-		periodic_BC(p2, u2, v2, i, j, Nx, Ny, 2);
+		periodic_BC(p2, u2, v2, i, j, Nx, Ny, 3);
 		
 	}
 }
 
 // WENO3 SSP-RK3 step 2
-__global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *p_BC, float *u_BC, float *v_BC){
+__global__ void kernel_WENO_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *beta_rl){
 	
-	int i = blockIdx.x*blockDim.x + threadIdx.x + 2;
-	int j = blockIdx.y*blockDim.y + threadIdx.y + 2;
-    if ((i < Nx-2) && (j < Ny-2)){
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
+    if ((i < Nx-3) && (j < Ny-3)){
 		
 		// central index
 		int Cij = flat(i,j,Nx);
@@ -1399,10 +1309,12 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		
 		// (2)
 		
+		// ---------------------------------------------------------------------------
+		
 		// compute WENO values V_i+, V_i-
-		compute_Vs_x(p_V, p2, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_x(u_V, u2, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_x(v_V, v2, dd, c_rl, i, j, Nx, eps);
+		compute_Vs_x(p_V, p2, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_x(u_V, u2, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_x(v_V, v2, dd, c_rl, beta_rl, i, j, Nx, eps);
 		
 		// compute flux F_p+
 		F_pP = F_p_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c, j);
@@ -1413,10 +1325,12 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		// compute flux F_u-
 		F_uM = F_u_Godunov(p_V[2], p_V[3], u_V[2], u_V[3], rho, c, j);
 		
+		// ---------------------------------------------------------------------------
+		
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
-		compute_Vs_y(p_V, p2, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_y(u_V, u2, dd, c_rl, i, j, Nx, eps);
-		compute_Vs_y(v_V, v2, dd, c_rl, i, j, Nx, eps);
+		compute_Vs_y(p_V, p2, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_y(u_V, u2, dd, c_rl, beta_rl, i, j, Nx, eps);
+		compute_Vs_y(v_V, v2, dd, c_rl, beta_rl, i, j, Nx, eps);
 		
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c, j);
@@ -1426,18 +1340,19 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, float *p0, float *u0, float *
 		G_vP = G_v_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c, j);
 		// compute flux G_v-
 		G_vM = G_v_Godunov(p_V[2], p_V[3], v_V[2], v_V[3], rho, c, j-1);
+
+		// ---------------------------------------------------------------------------
 		
 		// trick to avoid yet another array for each field U is to use U1 input as final u here, since not used
 		u1[Cij] = (u0[Cij] + 2.0f*(u2[Cij] + dt*((-F_uP + F_uM)/h)))/3.0f;
 		v1[Cij] = (v0[Cij] + 2.0f*(v2[Cij] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		p1[Cij] = (p0[Cij] + 2.0f*(p2[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h)))/3.0f;
-
 		
 		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		
-		periodic_BC(p1, u1, v1, i, j, Nx, Ny, 2);
+		periodic_BC(p1, u1, v1, i, j, Nx, Ny, 3);
 		
 	}
 }

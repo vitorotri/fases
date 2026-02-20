@@ -25,7 +25,7 @@ int main(int argc, char *argv[]){
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
 	float *p0, *u0, *v0, *p1, *u1, *v1, *p2, *u2, *v2; // host arrays
-	float *d_p0, *d_u0, *d_v0, *d_p1, *d_u1, *d_v1, *d_p2, *d_u2, *d_v2, *c_rl, *dd; // device arrays
+	float *d_p0, *d_u0, *d_v0, *d_p1, *d_u1, *d_v1, *d_p2, *d_u2, *d_v2, *c_rl, *beta_rl, *dd; // device arrays
 	float rho, c, Temp; // density, speed of sound, temperature
 	float Lx, Ly; // domain dimensions
 	float N_PML, S_PML, E_PML, W_PML; // Perfectly Matched Layer activation keys
@@ -79,7 +79,7 @@ int main(int argc, char *argv[]){
     //int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
-    float tol = 3.0f*h; // tolerance
+    const float tol = 2.0f*h; // tolerance
 
 	/*
     float *R = NULL; // surfaces reflection coefficient
@@ -618,7 +618,8 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(d_p2, p2, N*sizeof(float), cudaMemcpyHostToDevice);
 		cudaMemcpy(d_u2, u2, N*sizeof(float), cudaMemcpyHostToDevice);
 		cudaMemcpy(d_v2, v2, N*sizeof(float), cudaMemcpyHostToDevice);
-			
+		/*
+		//WENO3
 		cudaMallocManaged(&c_rl, 6*sizeof(float)); // coefficients
 		cudaMallocManaged(&dd, 2*sizeof(float)); // array
 			
@@ -631,7 +632,27 @@ int main(int argc, char *argv[]){
 		cudaDeviceSynchronize();
 		
 		dm = (6*N + 6 + 2)*sizeof(float);
-
+		*/
+		
+		//WENO5
+		cudaMallocManaged(&c_rl, 12*sizeof(float)); // coefficients
+		cudaMallocManaged(&beta_rl, 9*sizeof(float)); // coefficients for second term of beta_r
+		cudaMallocManaged(&dd, 3*sizeof(float)); // array
+			
+		c_rl[flat(0,0,12)] = 11.0/6.0; c_rl[flat(0,1,12)] = -7.0/6.0; c_rl[flat(0,2,12)] = 1.0/3.0;
+		c_rl[flat(1,0,12)] = 1.0/3.0; c_rl[flat(1,1,12)] = 5.0/6.0; c_rl[flat(1,2,12)] = -1.0/6.0;
+		c_rl[flat(2,0,12)] = -1.0/6.0; c_rl[flat(2,1,12)] = 5.0/6.0; c_rl[flat(2,2,12)] = 1.0/3.0;
+		c_rl[flat(3,0,12)] = 1.0/3.0; c_rl[flat(3,1,12)] = -7.0/6.0; c_rl[flat(3,2,12)] = 11.0/6.0;
+			
+		beta_rl[flat(0,0,9)] = 3.0; beta_rl[flat(0,1,9)] = -4.0; beta_rl[flat(0,2,9)] = 1.0;
+		beta_rl[flat(1,0,9)] = 1.0; beta_rl[flat(1,1,9)] = 0.0; beta_rl[flat(1,2,9)] = -1.0;
+		beta_rl[flat(2,0,9)] = 1.0; beta_rl[flat(2,1,9)] = -4.0; beta_rl[flat(2,2,9)] = 3.0;
+			
+		dd[0] = 3.0/10.0; dd[1] = 3.0/5.0; dd[2] = 1.0/10.0;
+		
+		dm = (10*N + 3*Ny + 12+9+3)*sizeof(float);
+		
+		cudaDeviceSynchronize();
 	}
 	
 	// ---------------------------------------------------------------------------------------
@@ -794,16 +815,19 @@ int main(int argc, char *argv[]){
 			// Launch WENO3 kernel + SSP-RK3
 				
 			// (0)
-			kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, d_u2, d_v2, d_p2, d_oid);	
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old, skip, d_u2, d_v2, d_p2); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old, skip); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, beta_rl);	
+			
 				
 			// (1)
-			kernel_WENO3_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, d_u0, d_v0, d_p0);	
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2, skip, d_u0, d_v0, d_p0);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_p2, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2, skip);
+			kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, beta_rl);	
+			
 				
 			// (2)
-			kernel_WENO3_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, d_u0, d_v0, d_p0);
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu, skip, d_u0, d_v0, d_p0);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu, skip);
+			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, beta_rl);
+			
 
 			// exchange state arrays
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
