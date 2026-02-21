@@ -551,13 +551,22 @@ __host__ bool check_energy_coeffs(float R, float T){
 	return 0;
 }
 
-/*
+// Raised-cosine bump: full width = 2*w (Smits: 0.04 m => w=0.02 m)
+__host__ __device__ float raised_cosine(float x, float x0, float w){
+    float xi = (x - x0) / w;
+    if (fabsf(xi) > 1.0f) return 0.0f;
+    return 0.5f * (1.0f + cosf((float)M_PI * xi));
+}
+
+// implicit right-hand side for phi
+__device__ float L_phi(float phi, float w_out, float zeta, float gamma_rk){
+	return w_out - zeta * phi;
+}
+
 // implicit solver for the ADE (Auxiliary Differential Equations)
-// implicitness come from the analytical solving of the equations, still need SSP-RK3 if main solver uses that
-// substituted in the SSP stages is the implicit Euler method at the place of the standard U[n] + dt*L(U[n]),
-// so the 'right' value is this operator, 'middle' is the U[n] at stages (2) and (n+1), and 'left' the receiving
-// arrays 
-__device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+// implicitness come from the analytical solving of the equations, still need IMEX if main solver uses SSP3
+__device__ float ADE_solver_implicit(int b_ID, uint8_t m_ID, float w_out, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi, float *psi1, float *psi2, float *L_phi_0, float *L_psi1_0, float *L_psi2_0, float *Y_phi, float *Y_psi1, float *Y_psi2, float lam, float gamma_rk){
+
     float sum_A  = 0.0f;
     float sum_BC = 0.0f;
 
@@ -565,14 +574,8 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
         int m = m_ID*K + k;	// flattened material coeff idx
         int s = b_ID*K + k; // flattened compact state idx
 
-		// -------------------------------------------------
-
-		float phi_BE = (phi_right[s] + dt*w_in) / (1.0f + zeta[m]*dt); // backwards (implicit) Euler solver
-		
-		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*phi_BE;
-		phi_left[s] /= c_SSP;
-		sum_A += A[m] * phi_left[s];
-
+		float phi_s = phi[s] + dt * (lam * L_phi(phi_0[s], w_out, zeta[m], gamma_rk) + gamma_rk * w_out);
+ 
     }
 
     for (int l = 0; l < L; l++){
@@ -583,7 +586,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
         float d = beta[m]*dt;
         float D = g*g + d*d;
 
-        float r1 = psi_1_right[s] + dt*w_in;
+        float r1 = psi_1_right[s] + dt*w_out;
         float r2 = psi_2_right[s];
         
         float psi_1_BE = (g*r1 - d*r2)/D; // backwards (implicit) Euler solver
@@ -597,20 +600,12 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
         sum_BC += B[m]*psi_1_left[s] + C[m]*psi_2_left[s];
     }
 
-    return R_inf[m_ID]*w_in + sum_A + sum_BC;
-}
-*/
-
-// Raised-cosine bump: full width = 2*w (Smits: 0.04 m => w=0.02 m)
-__host__ __device__ float raised_cosine(float x, float x0, float w){
-    float xi = (x - x0) / w;
-    if (fabsf(xi) > 1.0f) return 0.0f;
-    return 0.5f * (1.0f + cosf((float)M_PI * xi));
+    return R_inf[m_ID]*w_out + sum_A + sum_BC;
 }
 
 // non-implicit, solved with regular SSP-RK3, but coefficients alpha, beta and zeta are restricted in terms
 // of time-step dt in the fitting script
-__device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+__device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_out, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
     float sum_A  = 0.0f;
     float sum_BC = 0.0f;
 
@@ -620,7 +615,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 
 		// -------------------------------------------------
 		
-		float L_phi = w_in - zeta[m]*phi_right[s];
+		float L_phi = w_out - zeta[m]*phi_right[s];
 		
 		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*(phi_right[s] + dt*L_phi);
 		phi_left[s] /= c_SSP;
@@ -632,7 +627,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
         int m = m_ID*L + l;	// flattened material coeff idx
         int s = b_ID*L + l;	// flattened compact state idx
         
-        float L_psi_1 = w_in - (alpha[m]*psi_1_right[s] + beta[m]*psi_2_right[s]);
+        float L_psi_1 = w_out - (alpha[m]*psi_1_right[s] + beta[m]*psi_2_right[s]);
         float L_psi_2 = beta[m]*psi_1_right[s] - alpha[m]*psi_2_right[s];
 
 		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*(psi_1_right[s] + dt*L_psi_1);
@@ -643,11 +638,11 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
         sum_BC += B[m]*psi_1_left[s] + C[m]*psi_2_left[s];
     }
 
-    return R_inf[m_ID]*w_in + sum_A + sum_BC;
+    return R_inf[m_ID]*w_out + sum_A + sum_BC;
 }
 
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right, int skip){
+__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int Nx, int Ny, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right, int skip, float lam){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -665,7 +660,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 		
 		//if (s >= 3*h) return; // essential for WENO3 stencil: actually matched by condition above
 		
-		int b_ID = bmap[Cij];
+		int b_ID = bmap[Cij]; // access element number in boundary node
 		//if (b_ID < 0) return; // safety; should match oid[] logic
 		
 		// gradients from S[] for detecting normals   
@@ -712,7 +707,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
         
         int m_ID = o_ID - 1; // material ID
         
-        float w_in_local = ADE_solver(
+        float w_in_local = ADE_solver_implicit(
     		b_ID, m_ID, w_out_local, dt,
     		Ak, zeta,
     		Bl, Cl, alpha, beta,
