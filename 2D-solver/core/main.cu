@@ -841,9 +841,6 @@ int main(int argc, char *argv[]){
 			cudaMemcpy(psi2_1, psi2, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
 			*/
 			// zeroes implicit RK accumulators
-			cudaMalloc(&Y_phi,  nB * K_m * sizeof(float));
-			cudaMalloc(&Y_psi1, nB * L_m * sizeof(float));
-			cudaMalloc(&Y_psi2, nB * L_m * sizeof(float));
 			
 			cudaMemset(&Y_phi,  0, nB * K_m * sizeof(float));
 			cudaMemset(&Y_psi1, 0, nB * L_m * sizeof(float));
