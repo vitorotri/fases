@@ -559,13 +559,13 @@ __host__ __device__ float raised_cosine(float x, float x0, float w){
 }
 
 // implicit right-hand side for phi
-__device__ float L_phi(float phi, float w_out, float zeta, float gamma_rk){
+__device__ float L_phi(float phi, float w_out, float zeta){
 	return w_out - zeta * phi;
 }
 
 // implicit solver for the ADE (Auxiliary Differential Equations)
 // implicitness come from the analytical solving of the equations, still need IMEX if main solver uses SSP3
-__device__ float ADE_solver_implicit(int b_ID, uint8_t m_ID, float w_out, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi, float *psi1, float *psi2, float *L_phi_0, float *L_psi1_0, float *L_psi2_0, float *Y_phi, float *Y_psi1, float *Y_psi2, float lam, float gamma_rk){
+__device__ float ADE_solver_implicit(int b_ID, uint8_t m_ID, float w_out, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi, float *psi1, float *psi2, float *L_phi_0, float *L_psi1_0, float *L_psi2_0, float *Y_phi, float *Y_psi1, float *Y_psi2, float lam, float gamma_rk, float weight, int stage){
 
     float sum_A  = 0.0f;
     float sum_BC = 0.0f;
@@ -574,28 +574,28 @@ __device__ float ADE_solver_implicit(int b_ID, uint8_t m_ID, float w_out, float 
         int m = m_ID*K + k;	// flattened material coeff idx
         int s = b_ID*K + k; // flattened compact state idx
 
-		float phi_s = phi[s] + dt * (lam * L_phi(phi_0[s], w_out, zeta[m], gamma_rk) + gamma_rk * w_out);
- 
+		// stage 0 // avoid floating point in this case
+		if (stage == 0){
+			float phi_0 = phi[s] + gamma_rk * dt * w_out;
+			phi_0 /= 1.0f + dt * gamma_rk * zeta[m];
+			L_phi_0[s] = L_phi(phi_0, w_out, zeta[m]);
+			Y_phi[s] += weight * L_phi_0[s];
+			sum_A += A[m] * phi_0;
+		}
+		//stages 1 and 2
+		else {
+			float phi_c = phi[s] + dt * (lam * L_phi_0[s] + gamma_rk * w_out); // phi on current stage
+			phi_c = /= 1.0f + dt * gamma_rk * zeta[m];
+			Y_phi[s] += weight * L_phi(phi_c, w_out, zeta[m]);
+			sum_A += A[m] * phi_c;
+ 		}
     }
 
     for (int l = 0; l < L; l++){
         int m = m_ID*L + l;	// flattened material coeff idx
         int s = b_ID*L + l;	// flattened compact state idx
 
-        float g = 1.0f + alpha[m]*dt;
-        float d = beta[m]*dt;
-        float D = g*g + d*d;
-
-        float r1 = psi_1_right[s] + dt*w_out;
-        float r2 = psi_2_right[s];
-        
-        float psi_1_BE = (g*r1 - d*r2)/D; // backwards (implicit) Euler solver
-        float psi_2_BE = (d*r1 + g*r2)/D; // backwards (implicit) Euler solver
-
-		psi_1_left[s] = a_SSP*psi_1_middle[s] + b_SSP*psi_1_BE;
-		psi_1_left[s] /= c_SSP;
-		psi_2_left[s] = a_SSP*psi_2_middle[s] + b_SSP*psi_2_BE;
-		psi_2_left[s] /= c_SSP;
+     	...
 
         sum_BC += B[m]*psi_1_left[s] + C[m]*psi_2_left[s];
     }

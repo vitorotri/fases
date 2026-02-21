@@ -835,10 +835,20 @@ int main(int argc, char *argv[]){
 			cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 				
 			// exchange ADE state arrays
+			/*
 			cudaMemcpy(phi_1, phi, nB * K_m * sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(psi1_1, psi1, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(psi2_1, psi2, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
-				
+			*/
+			// zeroes implicit RK accumulators
+			cudaMalloc(&Y_phi,  nB * K_m * sizeof(float));
+			cudaMalloc(&Y_psi1, nB * L_m * sizeof(float));
+			cudaMalloc(&Y_psi2, nB * L_m * sizeof(float));
+			
+			cudaMemset(&Y_phi,  0, nB * K_m * sizeof(float));
+			cudaMemset(&Y_psi1, 0, nB * L_m * sizeof(float));
+			cudaMemset(&Y_psi2, 0, nB * L_m * sizeof(float));
+			
 			// sync
 			cudaDeviceSynchronize();
 				
