@@ -1375,7 +1375,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, float *p0, float *u0, float *v
 		u1[Cij] = (u0[Cij] + 2.0f*(u2[Cij] + dt*((-F_uP + F_uM)/h)))/3.0f;
 		v1[Cij] = (v0[Cij] + 2.0f*(v2[Cij] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		p1[Cij] = (p0[Cij] + 2.0f*(p2[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h)))/3.0f;
-		
+		/*
 		int b_ID = bmap[Cij];
 		
 		// update ADE state arrays with implicit accumulators
@@ -1388,7 +1388,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, float *p0, float *u0, float *v
        		psi1[s] += dt * Y_psi1[s];
 			psi2[s] += dt * Y_psi2[s];
        	}
-		
+		*/
 		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
@@ -1396,6 +1396,31 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, float *p0, float *u0, float *v
 		periodic_BC(p1, u1, v1, i, j, Nx, Ny, 3);
 		
 	}
+}
+
+__global__ void kernel_compute_ADE_last(int *bmap, float *phi, float *psi1, float *psi2, float *Y_phi, float *Y_psi1, float *Y_psi2, int K, int L, float dt, uint8_t *oid, int Nx, int Ny){
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
+    if ((i < Nx-3) && (j < Ny-3)){
+    	
+    	int Cij = flat(i,j,Nx);
+    	uint8_t o_ID = oid[Cij]; // object's material ID
+		
+		if (o_ID == 0 || o_ID == 0xFF) return; // safety
+
+    	int b_ID = bmap[Cij];
+		
+		// update ADE state arrays with implicit accumulators
+		for (int kk = 0; kk < K; kk++){
+       		int s = b_ID*K + kk;
+       		phi[s] += dt * Y_phi[s];
+       	}
+       	for (int ll = 0; ll < L; ll++){
+       		int s = b_ID*L + ll;
+       		psi1[s] += dt * Y_psi1[s];
+			psi2[s] += dt * Y_psi2[s];
+       	}
+    }
 }
 
 __global__ void kernel_zero_boundaries(int Nx, int Ny, float *p, float *u, float *v, float *S){

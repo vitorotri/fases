@@ -348,17 +348,17 @@ int main(int argc, char *argv[]){
 	cudaMalloc(&L_psi1_0, nB * L_m * sizeof(float));
 	cudaMalloc(&L_psi2_0, nB * L_m * sizeof(float));
 	
-	cudaMemset(&L_phi_0,  0, nB * K_m * sizeof(float));
-	cudaMemset(&L_psi1_0, 0, nB * L_m * sizeof(float));
-	cudaMemset(&L_psi2_0, 0, nB * L_m * sizeof(float));
+	cudaMemset(L_phi_0,  0, nB * K_m * sizeof(float));
+	cudaMemset(L_psi1_0, 0, nB * L_m * sizeof(float));
+	cudaMemset(L_psi2_0, 0, nB * L_m * sizeof(float));
 	
 	cudaMalloc(&Y_phi,  nB * K_m * sizeof(float));
 	cudaMalloc(&Y_psi1, nB * L_m * sizeof(float));
 	cudaMalloc(&Y_psi2, nB * L_m * sizeof(float));
 	
-	cudaMemset(&Y_phi,  0, nB * K_m * sizeof(float));
-	cudaMemset(&Y_psi1, 0, nB * L_m * sizeof(float));
-	cudaMemset(&Y_psi2, 0, nB * L_m * sizeof(float));
+	cudaMemset(Y_phi,  0, nB * K_m * sizeof(float));
+	cudaMemset(Y_psi1, 0, nB * L_m * sizeof(float));
+	cudaMemset(Y_psi2, 0, nB * L_m * sizeof(float));
 	
 	const float gamma_rk = 1.0f - 1.0f / sqrtf(2.0f); // constant for implicit part of IMEX (computed only once)
 	
@@ -827,6 +827,7 @@ int main(int argc, char *argv[]){
 			// (2)
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi1, psi2, L_phi_0, L_psi1_0, L_psi2_0, Y_phi, Y_psi1, Y_psi2, 0.5f - gamma_rk, gamma_rk, 2.0f/3.0f, 2);
 			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, d_p2, d_u2, d_v2, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML, skip, beta_rl, phi, psi1, psi2, Y_phi, Y_psi1, Y_psi2, K_m, L_m, d_bmap);
+			kernel_compute_ADE_last<<<BP, TP>>>(d_bmap, phi, psi1, psi2, Y_phi, Y_psi1, Y_psi2, K_m, L_m, dt, d_oid, Nx, Ny);
 			
 
 			// exchange state arrays
@@ -842,9 +843,9 @@ int main(int argc, char *argv[]){
 			*/
 			// zeroes implicit RK accumulators
 			
-			cudaMemset(&Y_phi,  0, nB * K_m * sizeof(float));
-			cudaMemset(&Y_psi1, 0, nB * L_m * sizeof(float));
-			cudaMemset(&Y_psi2, 0, nB * L_m * sizeof(float));
+			cudaMemset(Y_phi,  0, nB * K_m * sizeof(float));
+			cudaMemset(Y_psi1, 0, nB * L_m * sizeof(float));
+			cudaMemset(Y_psi2, 0, nB * L_m * sizeof(float));
 			
 			// sync
 			cudaDeviceSynchronize();
