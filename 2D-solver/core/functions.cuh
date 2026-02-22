@@ -323,15 +323,6 @@ __host__ void is_TVD(float TV_0, float TV_1){
 	else printf("\n[!] Scheme is not TVD\n\n");
 }
 
-__global__ void exchange(int Nx, int Ny, float *p, float *p_old, float *p_new){
-	int i = blockIdx.x*blockDim.x + threadIdx.x + 1;
-	int j = blockIdx.y*blockDim.y + threadIdx.y + 1;
-	if ((i < Nx-1) && (j < Ny-1)){
-		p_old[flat(i,j,Nx)] = p[flat(i,j,Nx)];
-		p[flat(i,j,Nx)] = p_new[flat(i,j,Nx)];
-	}
-}
-
 // reconstruct slope limited values in x
 __device__ void compute_Us_x(float *U, float *u, int i, int j, int Nx, int limiter_IDx){
 	U[0] = u[flat(i,j,Nx)] + 0.5*limiter_functions[limiter_IDx](u, i, j, Nx);
@@ -558,14 +549,24 @@ __host__ __device__ float raised_cosine(float x, float x0, float w){
     return 0.5f * (1.0f + cosf((float)M_PI * xi));
 }
 
-// implicit right-hand side for phi
+// right-hand side for phi
 __device__ float L_phi(float phi, float w_out, float zeta){
 	return w_out - zeta * phi;
 }
 
+// right-hand side for psi1
+__device__ float L_psi1(float psi1, float psi2, float w_out, float alpha, float beta){
+	return w_out - alpha * psi1 - beta * psi2;
+}
+
+// right-hand side for psi2
+__device__ float L_psi2(float psi1, float psi2, float alpha, float beta){
+	return beta * psi1 - alpha * psi2;
+}
+
 // implicit solver for the ADE (Auxiliary Differential Equations)
 // implicitness come from the analytical solving of the equations, still need IMEX if main solver uses SSP3
-__device__ float ADE_solver_implicit(int b_ID, uint8_t m_ID, float w_out, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi, float *psi1, float *psi2, float *L_phi_0, float *L_psi1_0, float *L_psi2_0, float *Y_phi, float *Y_psi1, float *Y_psi2, float lam, float gamma_rk, float weight, int stage){
+__device__ float ADE_solver_implicit(int b_ID, uint8_t m_ID, float w_out, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi, float *psi1, float *psi2, float *L_phi_0, float *L_psi1_0, float *L_psi2_0, float *Y_phi, float *Y_psi1, float *Y_psi2, float lam, float gamma_rk, float stage_weight, int stage){
 
     float sum_A  = 0.0f;
     float sum_BC = 0.0f;
@@ -574,19 +575,24 @@ __device__ float ADE_solver_implicit(int b_ID, uint8_t m_ID, float w_out, float 
         int m = m_ID*K + k;	// flattened material coeff idx
         int s = b_ID*K + k; // flattened compact state idx
 
-		// stage 0 // avoid floating point in this case
+		// stage 0, avoid floating point in this case
 		if (stage == 0){
-			float phi_0 = phi[s] + gamma_rk * dt * w_out;
+			float phi_0 = phi[s] + dt * gamma_rk * w_out;
 			phi_0 /= 1.0f + dt * gamma_rk * zeta[m];
+			
 			L_phi_0[s] = L_phi(phi_0, w_out, zeta[m]);
-			Y_phi[s] += weight * L_phi_0[s];
+			
+			Y_phi[s] += stage_weight * L_phi_0[s];
+			
 			sum_A += A[m] * phi_0;
 		}
 		//stages 1 and 2
 		else {
 			float phi_c = phi[s] + dt * (lam * L_phi_0[s] + gamma_rk * w_out); // phi on current stage
-			phi_c = /= 1.0f + dt * gamma_rk * zeta[m];
-			Y_phi[s] += weight * L_phi(phi_c, w_out, zeta[m]);
+			phi_c /= 1.0f + dt * gamma_rk * zeta[m];
+			
+			Y_phi[s] += stage_weight * L_phi(phi_c, w_out, zeta[m]);
+			
 			sum_A += A[m] * phi_c;
  		}
     }
@@ -595,12 +601,42 @@ __device__ float ADE_solver_implicit(int b_ID, uint8_t m_ID, float w_out, float 
         int m = m_ID*L + l;	// flattened material coeff idx
         int s = b_ID*L + l;	// flattened compact state idx
 
-     	...
+		float AA = 1.0f + dt * gamma_rk * alpha[m]; // != A[]
+		float BB = dt * gamma_rk * beta[m]; // != B[]
+		float D = AA * AA + BB * BB;
 
-        sum_BC += B[m]*psi_1_left[s] + C[m]*psi_2_left[s];
+		if (stage == 0){
+			float r1 = psi1[s] + dt * gamma_rk * w_out;
+			float r2 = psi2[s];
+			
+			float psi1_0 = (AA * r1 - BB * r2) / D;
+			float psi2_0 = (BB * r1 + AA * r2) / D;
+			
+			L_psi1_0[s] = L_psi1(psi1_0, psi2_0, w_out, alpha[m], beta[m]);
+			L_psi2_0[s] = L_psi2(psi1_0, psi2_0, alpha[m], beta[m]);
+			
+			Y_psi1[s] += stage_weight * L_psi1_0[s];
+			Y_psi2[s] += stage_weight * L_psi2_0[s];
+			
+			sum_BC += B[m]*psi1_0 + C[m]*psi2_0;
+		}
+		else {
+			float r1 = psi1[s] + dt * (lam * L_psi1_0[s] + gamma_rk * w_out);
+			float r2 = psi2[s] + dt * lam * L_psi2_0[s];
+			
+			float psi1_c = (AA * r1 - BB * r2) / D;
+			float psi2_c = (BB * r1 + AA * r2) / D;
+			
+			Y_psi1[s] += stage_weight * L_psi1(psi1_c, psi2_c, w_out, alpha[m], beta[m]);
+			Y_psi2[s] += stage_weight * L_psi2(psi1_c, psi2_c, alpha[m], beta[m]);
+			
+			sum_BC += B[m]*psi1_c + C[m]*psi2_c;
+		}
     }
-
     return R_inf[m_ID]*w_out + sum_A + sum_BC;
+}
+
+__global__ kernel_final_update_ADE(float ){
 }
 
 // non-implicit, solved with regular SSP-RK3, but coefficients alpha, beta and zeta are restricted in terms
@@ -701,7 +737,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *p, int N
 
         float Z0 = rho * c;
 
-        // -------------------------------------- characteristics --------------------------------------
+        // ---------------------------------- characteristics ------------------------------------------
         //float w_in_local = pD - Z0 * un; // incoming into the boundary cell
         float w_out_local = pD + Z0 * un; // outgoing from the boundary cell
         
@@ -985,7 +1021,7 @@ __global__ void kernel_Euler(int Nx, int Ny, float *p0, float *u0, float *v0, fl
 	}
 }
 
-// --- WENO3 functions ---
+// --- WENO5 functions ---
 
 // reconstruct in x, for k = 3
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_{i-1/2} instead of V_{i+1/2})
@@ -1141,7 +1177,7 @@ __device__ float tst(float S_val, float h){
 	return (float)(S_val < 0.0f);
 }
 
-// WENO3 SSP-RK3 step 0
+// WENO5 SSP-RK3 step 0
 __global__ void kernel_WENO_step0(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *beta_rl){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
@@ -1211,7 +1247,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, float *p0, float *u0, float *v
 	}
 }
 
-// WENO3 SSP-RK3 step 1
+// WENO5 SSP-RK3 step 1
 __global__ void kernel_WENO_step1(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *beta_rl){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
@@ -1281,7 +1317,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, float *p0, float *u0, float *v
 	}
 }
 
-// WENO3 SSP-RK3 step 2
+// WENO5 SSP-RK3 step 2
 __global__ void kernel_WENO_step2(int Nx, int Ny, float *p0, float *u0, float *v0, float *p1, float *u1, float *v1, float *p2, float *u2, float *v2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML, int skip, float *beta_rl){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
@@ -1342,6 +1378,11 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, float *p0, float *u0, float *v
 		u1[Cij] = (u0[Cij] + 2.0f*(u2[Cij] + dt*((-F_uP + F_uM)/h)))/3.0f;
 		v1[Cij] = (v0[Cij] + 2.0f*(v2[Cij] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		p1[Cij] = (p0[Cij] + 2.0f*(p2[Cij] + dt*((-F_pP + F_pM - G_pP + G_pM)/h)))/3.0f;
+		
+		// update ADE state arrays with implicit accumulators
+		phi[s]  += dt * Y_phi[s];
+		psi1[s] += dt * Y_psi1[s];
+		psi2[s] += dt * Y_psi2[s];
 		
 		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
 		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
