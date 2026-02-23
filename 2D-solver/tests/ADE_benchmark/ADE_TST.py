@@ -14,12 +14,12 @@ def dB_SPL(p):
 def R_model(w, Rinf, A, zeta, B, C, alpha, beta):
     s = 1j*w
     R = Rinf + 0j
-    eps = 1e-7
+    #eps = 1e-7
     for Ak, zk in zip(A, zeta):
         R += Ak / (zk + s)
     for Bl, Cl, al, bl in zip(B, C, alpha, beta):
         num = (Bl*s + Cl*bl + al*Bl)
-        den = (al + s)**2 + bl**2 + eps
+        den = (al + s)**2 + bl**2 # + eps
         R += num / den
     return R
 
@@ -91,55 +91,104 @@ def extract_window(x, center, half_width, alpha=0.20):
     win = tukey(len(seg), alpha) if alpha > 0 else np.ones(len(seg))
     return seg * win
 
-# simulation parameters (should automate this with config file logic)
-f_cutoff = 1000
-C_CFL = 0.3
-h = 0.005
-t_max = 0.05
+def lowpass_mask_rfft(freq, fc, frac=0.90):
+    """
+    Raised-cosine lowpass mask for rfft frequencies.
+    frac=0.90 means roll-off starts at 0.9*fc and reaches 0 at fc.
+    """
+    fp = frac * fc
+    fs = fc
 
+    M = np.ones_like(freq, dtype=float)
+
+    # stopband
+    M[freq >= fs] = 0.0
+
+    # transition band
+    trans = (freq > fp) & (freq < fs)
+    # map freq in (fp, fs) to theta in (0, pi)
+    theta = np.pi * (freq[trans] - fp) / (fs - fp)
+    M[trans] = 0.5 * (1.0 + np.cos(theta))   # 1 -> 0 smoothly
+
+    return M
+
+def lowpass_filter_fft(x, dt, fc, Nfft=None, frac=0.90):
+    """
+    Zero-phase lowpass by FFT masking. Returns filtered time signal (length = len(x)).
+    """
+    x = np.asarray(x)
+    N = len(x)
+    if Nfft is None:
+        Nfft = 1 << int(np.ceil(np.log2(N)))  # next pow2
+
+    X = np.fft.rfft(x, n=Nfft)
+    freq = np.fft.rfftfreq(Nfft, d=dt)
+
+    M = lowpass_mask_rfft(freq, fc, frac=frac)
+    Xf = X * M
+
+    xf = np.fft.irfft(Xf, n=Nfft)[:N]
+    return xf
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, "../..", "config", "config.txt")
+
+v = np.loadtxt(config_path)
+
+h = float(v[0])
+C_CFL = float(v[4])
+f_cutoff = v[2] #balance with N_poles for stability and better distribution of poles
+Temp = v[3] + 273.15
 R_spec = 287.05
 gamma = 1.4
-rho = 1.225
-Temp = 22 + 273.15
 
-c = np.sqrt(gamma*R_spec*Temp) # speed of sound [m/s]
-dt = C_CFL*h/c # time-step size [s]
+omega_cutoff = 2 * np.pi * f_cutoff
+
+c = np.sqrt(gamma * R_spec * Temp)         # speed of sound (m/s)
+rho0 = 1.225                                # air density
+z0 = c * rho0                             # characteristic impedance of air
+
+dt = C_CFL * h / c
+print(C_CFL)
+print(h)
+print(c)
+print(dt)
 fs = 1/dt # temporal sampling frequency [Hz]
 
 script_dir = os.path.dirname(os.path.abspath(__file__)) # tests/
 print("\nRename [outputs].bin if necessary so it can be used right below this line...\n")
-data_path_noise = os.path.join(script_dir, "..", "output", "IRnoise.bin") # noise signal
-data_path_0 = os.path.join(script_dir, "..", "output", "IR0.bin") # full reflection signal
-data_path_1 = os.path.join(script_dir, "..", "output", "IR1.bin") # absorbed signal
+data_path_noise = os.path.join(script_dir, "IRnoise.bin") # noise signal
+data_path_0 = os.path.join(script_dir, "IR0.bin") # full reflection signal
+data_path_1 = os.path.join(script_dir, "IR1.bin") # absorbed signal
 
 p_d = np.fromfile(data_path_noise, dtype=np.float32) # direct pulse
 p_f = np.fromfile(data_path_0, dtype=np.float32) # in-phase signal with full reflection
 p_r = np.fromfile(data_path_1, dtype=np.float32) # signal with partial reflection
 
+'''
+# filtering (?)
+p_d = lowpass_filter_fft(np.copy(p_d), dt, f_cutoff, frac=0.90)
+p_r = lowpass_filter_fft(np.copy(p_r), dt, f_cutoff, frac=0.90)
+p_f = lowpass_filter_fft(np.copy(p_f), dt, f_cutoff, frac=0.90)
+'''
+
 p_f = np.copy(p_f) - np.copy(p_d)
 p_r = np.copy(p_r) - np.copy(p_d)
 
-'''
-# slice for computing second peak
-print("\nPlease check slice values if necessary\n")
+#p_d = np.roll(p_d,1862-603)
 
-slice_start = 5500
-slice_end = 23800
-
-x0_s = np.copy(x0[slice_start:slice_end])
-x1_s = np.copy(x1[slice_start:slice_end])
 '''
-'''
-# proper windowing ?
-alpha_win = 0.20
-win = tukey(len(x0_s), alpha=alpha_win) if alpha_win > 0 else np.ones(len(x0_s))
-x0_s *= win
-x1_s *= win
+# gating ?
+g_start = 1000
+g_end = 3500
+p_f = np.copy(p_f[g_start:g_end])
+p_r = np.copy(p_r[g_start:g_end])
+p_d = np.copy(p_d[g_start:g_end])
 '''
 '''
 # remove DC offsets ? Better to remove with PCS in simulation
-x0_s -= np.mean(x0_s)
-x1_s -= np.mean(x1_s)
+p_f -= np.mean(p_f)
+p_r -= np.mean(p_r)
 '''
 
 N = len(p_r)
@@ -148,6 +197,8 @@ N = len(p_r)
 
 Pr = np.fft.rfft(p_r)
 Pf = np.fft.rfft(p_f)
+Pd = np.fft.rfft(p_d)
+
 freq = np.fft.rfftfreq(N, d=dt)
 
 # masking for spectrrum plot
@@ -161,7 +212,7 @@ mask = (
 
 # Loads expected reflection coefficients
 script_dir = os.path.dirname(os.path.abspath(__file__)) # tests/
-coef_path = os.path.join(script_dir, "..", "input", "fit", "Material1.fit")
+coef_path = os.path.join(script_dir, "../..", "input", "fit", "Material1.fit")
 
 R_inf, A, zeta, B, Cc, alpha, beta = load_R(coef_path)
 
@@ -171,22 +222,26 @@ w = 2*np.pi*freq  # freq in Hz
 # compute analytical R
 R_ana = R_model(w, R_inf, A, zeta, B, Cc, alpha, beta)
 
-# distances
-Lx = 4.006073
-Ly = 4.066619
-r1 = 3.0 - 2.0 # receiver -> source
-r2 = 1.9304 + 0.9360 # image-source -> receiver
-
 # angular frequencies
 w = 2*np.pi*freq  # freq in Hz
 
 # wavenumbers
 k = w / c
 
-eps = 1e-6
+R1 = 1.0 # d source -> receiver [m]
+R2 = 3.0 # d receiver -> image-source [m]
+
+eps = 1e-12
 R_num = Pr / (Pf + eps)
-#R_num = Pr * G2D(k, r1) / (Pf * G2D(k, r2) + eps)
+#R_num = Pr / (Pd + eps)
+#R_num = (Pr * np.exp(1j * k * R1)) / (Pd * np.exp(1j * k * R2) + eps)
 Rmag_num = np.abs(R_num)
+
+# compute Fourier of p_expected
+P_expected = R_ana * Pf
+
+# Bring back to time domain (match original length N)
+p_expected = np.fft.irfft(P_expected, n=N)
 
 # single period for given frequency f is just T = 1/f
 # in order to properly capture a given frequency in the FFT analysis, it is necessary to simulate at least
@@ -202,7 +257,8 @@ err = 20*np.log10(np.abs(R_ana)/np.abs(R_num))
 
 plt.figure(1)
 plt.plot(p_d, 'b', label='Direct signal')
-plt.plot(p_r, 'r', linestyle='--', label='Pure reflection')
+plt.plot(p_f, 'r', linestyle='--', label='Full reflection')
+plt.plot(p_r, color='lime', linestyle='--', label='Absorbed reflection')
 plt.xlabel('Samples (n)')
 plt.ylabel('Sound Pressure (Pa)')
 plt.grid(True)
@@ -229,7 +285,7 @@ plt.legend()
 plt.title("Error |R_ana / R_num| in dB")
 
 plt.figure(4)
-plt.semilogx(freq, 20*np.log10(np.abs(Pr) + 1e-30), 'k')
+plt.semilogx(freq, 20*np.log10(np.abs(Pd) + 1e-30), 'k')
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("|X0(f)| [dB]")
 plt.axvline(x=f_cutoff, linestyle='--', color='red')
@@ -237,20 +293,40 @@ plt.grid(True, which="both")
 plt.title(r"Sanity test: is spectrum 'flat'below f_cutoff?")
 
 plt.figure(5)
-plt.plot(freq[mask], np.real(R_num[mask]), 'r', label='re(R_num(f))')
-plt.plot(freq[mask], np.real(R_ana[mask]), 'k--', label='re(R_ana(f))')
+plt.semilogx(freq[mask], np.real(R_num[mask]), 'r', label='re(R_num(f))')
+plt.semilogx(freq[mask], np.real(R_ana[mask]), 'k--', label='re(R_ana(f))')
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("R(f)")
 plt.grid(True, which="both")
 plt.legend()
 
 plt.figure(6)
-plt.plot(freq[mask], np.imag(R_num[mask]), 'r', label='im(R_num(f))')
-plt.plot(freq[mask], np.imag(R_ana[mask]), 'k--', label='im(R_ana(f))')
+plt.semilogx(freq[mask], np.imag(R_num[mask]), 'r', label='im(R_num(f))')
+plt.semilogx(freq[mask], np.imag(R_ana[mask]), 'k--', label='im(R_ana(f))')
 plt.xlabel("Frequency [Hz]")
 plt.ylabel("R(f)")
 plt.grid(True, which="both")
 plt.legend()
+
+plt.figure(7)
+plt.plot(p_expected, 'k', label='Predicted reflection (p_expected)')
+plt.plot(p_r, color='r', linestyle='--', label='Measured absorbed reflection (p_r)')
+plt.xlabel('Samples (n)')
+plt.ylabel('Sound Pressure (Pa)')
+plt.grid(True)
+plt.legend()
+plt.title("Time-domain check: measured vs predicted reflected waveform")
+
+phi = np.unwrap(np.angle(R_num[mask]))
+phi_ana = np.unwrap(np.angle(R_ana[mask]))
+dphi = phi - phi_ana
+
+plt.figure(8)
+plt.semilogx(freq[mask], dphi)
+plt.grid(True, which="both")
+plt.title("Phase difference: angle(R_num) - angle(R_ana)")
+plt.xlabel("Hz")
+plt.ylabel("rad")
 
 plt.show()
 
