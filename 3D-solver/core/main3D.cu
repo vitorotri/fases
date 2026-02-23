@@ -29,7 +29,7 @@ int main(int argc, char *argv[]){
 	float rho, c, Temp; // density, speed of sound, temperature
 	float Lx, Ly; // domain dimensions
 	float N_PML, S_PML, E_PML, W_PML; // Perfectly Matched Layer activation keys
-    int Nx, Ny, n; // number of points in x, y, time step
+    int Nx, Ny, Nz, n; // number of points in x, y, time step
     
     // timing variables
     clock_t tic, toc;
@@ -220,7 +220,7 @@ int main(int argc, char *argv[]){
     
     // --------------------------------------------------------------------------------------------------
     
-    int N = Nx*Ny; // number of grid cells
+    int N = Nx*Ny*Nz; // number of grid cells
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
     
@@ -595,14 +595,22 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(d_u2, u2, N*sizeof(float), cudaMemcpyHostToDevice);
 		cudaMemcpy(d_v2, v2, N*sizeof(float), cudaMemcpyHostToDevice);
 			
-		cudaMallocManaged(&c_rl, 6*sizeof(float)); // coefficients
-		cudaMallocManaged(&dd, 2*sizeof(float)); // array
+		cudaMallocManaged(&c_rl, 12*sizeof(float)); // coefficients
+		cudaMallocManaged(&beta_rl, 9*sizeof(float)); // coefficients for second term of beta_r
+		cudaMallocManaged(&dd, 3*sizeof(float)); // array
 			
-		c_rl[flat(0,0,3)] = 1.5; c_rl[flat(0,1,3)] = -0.5;
-		c_rl[flat(1,0,3)] = 0.5; c_rl[flat(1,1,3)] = 0.5;
-		c_rl[flat(2,0,3)] = -0.5; c_rl[flat(2,1,3)] = 1.5;
+		c_rl[flat(0,0,12)] = 11.0/6.0; c_rl[flat(0,1,12)] = -7.0/6.0; c_rl[flat(0,2,12)] = 1.0/3.0;
+		c_rl[flat(1,0,12)] = 1.0/3.0; c_rl[flat(1,1,12)] = 5.0/6.0; c_rl[flat(1,2,12)] = -1.0/6.0;
+		c_rl[flat(2,0,12)] = -1.0/6.0; c_rl[flat(2,1,12)] = 5.0/6.0; c_rl[flat(2,2,12)] = 1.0/3.0;
+		c_rl[flat(3,0,12)] = 1.0/3.0; c_rl[flat(3,1,12)] = -7.0/6.0; c_rl[flat(3,2,12)] = 11.0/6.0;
 			
-		dd[0] = 2.0/3.0; dd[1] = 1.0/3.0;
+		beta_rl[flat(0,0,9)] = 3.0; beta_rl[flat(0,1,9)] = -4.0; beta_rl[flat(0,2,9)] = 1.0;
+		beta_rl[flat(1,0,9)] = 1.0; beta_rl[flat(1,1,9)] = 0.0; beta_rl[flat(1,2,9)] = -1.0;
+		beta_rl[flat(2,0,9)] = 1.0; beta_rl[flat(2,1,9)] = -4.0; beta_rl[flat(2,2,9)] = 3.0;
+			
+		dd[0] = 3.0/10.0; dd[1] = 3.0/5.0; dd[2] = 1.0/10.0;
+		
+		dm = (10*N + 3*Ny + 12+9+3)*sizeof(float);
 		
 		cudaDeviceSynchronize();
 		
