@@ -95,12 +95,13 @@ void read_fit_file(
 
 
 // build bmap and return nB
-// re-implement on GPU if slow
+// re-implement on GPU if too low
 int build_boundary_map(uint8_t *oid, int N, int *bmap){
     int nB = 0; // number of boundary cells
-    // bmap has size N
+    // bmap has size N, as well as oid
+    // loop around every cell
     for (int c = 0; c < N; c++) {
-        if (oid[c] != 0xFF){
+        if (oid[c] != 0xFF && oid[c] != 0){
             bmap[c] = nB++;
         } else {
             bmap[c] = -1;
