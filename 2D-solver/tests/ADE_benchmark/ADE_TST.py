@@ -149,10 +149,6 @@ rho0 = 1.225                                # air density
 z0 = c * rho0                             # characteristic impedance of air
 
 dt = C_CFL * h / c
-print(C_CFL)
-print(h)
-print(c)
-print(dt)
 fs = 1/dt # temporal sampling frequency [Hz]
 
 script_dir = os.path.dirname(os.path.abspath(__file__)) # tests/
@@ -174,8 +170,6 @@ p_f = lowpass_filter_fft(np.copy(p_f), dt, f_cutoff, frac=0.90)
 
 p_f = np.copy(p_f) - np.copy(p_d)
 p_r = np.copy(p_r) - np.copy(p_d)
-
-#p_d = np.roll(p_d,1862-603)
 
 '''
 # gating ?
@@ -233,8 +227,6 @@ R2 = 3.0 # d receiver -> image-source [m]
 
 eps = 1e-12
 R_num = Pr / (Pf + eps)
-#R_num = Pr / (Pd + eps)
-#R_num = (Pr * np.exp(1j * k * R1)) / (Pd * np.exp(1j * k * R2) + eps)
 Rmag_num = np.abs(R_num)
 
 # compute Fourier of p_expected
@@ -316,17 +308,6 @@ plt.ylabel('Sound Pressure (Pa)')
 plt.grid(True)
 plt.legend()
 plt.title("Time-domain check: measured vs predicted reflected waveform")
-
-phi = np.unwrap(np.angle(R_num[mask]))
-phi_ana = np.unwrap(np.angle(R_ana[mask]))
-dphi = phi - phi_ana
-
-plt.figure(8)
-plt.semilogx(freq[mask], dphi)
-plt.grid(True, which="both")
-plt.title("Phase difference: angle(R_num) - angle(R_ana)")
-plt.xlabel("Hz")
-plt.ylabel("rad")
 
 plt.show()
 
