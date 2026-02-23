@@ -23,6 +23,9 @@ h = 0.005
 tol = 3 * h
 s = np.linspace(0, 5 * h, 100)
 
-plt.plot(s, chi_layered(s, tol, h), 'b')
+plt.plot(s / h, chi_layered(s, tol, h), 'b')
+plt.xlabel("s / h")
+plt.ylabel(r"$\chi$")
+plt.grid(True)
 plt.show()
 
