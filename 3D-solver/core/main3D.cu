@@ -24,11 +24,11 @@ int main(int argc, char *argv[]){
 	printf("\n[!] Is poles.txt consistent?\n");
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
-	float *p0, *u0, *v0, *p1, *u1, *v1, *p2, *u2, *v2; // host arrays
-	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2, *c_rl, *dd; // device arrays
+	float *p0, *u0, *v0, *w0, *p1, *u1, *v1, *w1, *p2, *u2, *v2, *w2; // host arrays
+	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2, *c_rl, *dd, *beta_rl; // device arrays
 	float rho, c, Temp; // density, speed of sound, temperature
-	float Lx, Ly; // domain dimensions
-	float N_PML, S_PML, E_PML, W_PML, F_ML, B_PML; // Perfectly Matched Layer activation keys
+	float Lx, Ly, Lz; // domain dimensions
+	float N_PML, S_PML, E_PML, W_PML, F_PML, B_PML; // Perfectly Matched Layer activation keys
     int Nx, Ny, Nz, n; // number of points in x, y, time step
     
     // timing variables
@@ -468,7 +468,7 @@ int main(int argc, char *argv[]){
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_w0, w0, N*sizeof(float), cudaMemcpyHosttoDeivce) != cudaSucess){
+    	|| cudaMemcpy(d_w0, w0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
@@ -502,10 +502,12 @@ int main(int argc, char *argv[]){
 	// WENO5 option
 	
 	if (kern == 2){
+	
 		
     	p2 = new float[N](); // sound pressure
     	u2 = new float[N](); // x component of particle velocity 
     	v2 = new float[N](); // y component of particle velocity
+		w2 = new float[N](); // z component of particle velocity
 		
     	cudaMalloc(&d_p2, N*sizeof(float));
 		cudaMalloc(&d_u2, N*sizeof(float));

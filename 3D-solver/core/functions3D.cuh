@@ -689,9 +689,9 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, int Nz, float *p0, float *u0,
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
 	
 		// PML BCs
-		sPML(u1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
@@ -773,9 +773,9 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, int Nz, float *p0, float *u0,
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
 
 		// PML BCs
-		sPML(u2, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v2, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p2, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(u2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
@@ -858,9 +858,9 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, int Nz, float *p0, float *u0,
 		p1[Cijk] = (p0[Cijk] + 2.0f*(p2[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h)))/3.0f;
 
 		
-		sPML(u1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
