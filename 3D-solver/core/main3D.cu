@@ -342,14 +342,15 @@ int main(int argc, char *argv[]){
 	}
 	while (std::getline(file, line)) {
     	if (line.empty() || line[0] == '#') continue;
-    	float val_x, val_y, val_s;
+    	float val_x, val_y, val_z, val_s;
     	std::istringstream iss(line);
-    	if (iss >> val_x >> val_y >> val_s) {
+    	if (iss >> val_x >> val_y >> val_z >> val_s) {
         	int i_src = int(val_x / h);
         	int j_src = int(val_y / h);
-        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny){
+        	int k_src = int(val_z / h);
+        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
         		// point source
-            	p0[flat(i_src, j_src, Nx)] = val_s;
+            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	// plane wave
             	/*
             	for (int j = 0; j < Ny; j++){
@@ -365,7 +366,7 @@ int main(int argc, char *argv[]){
     
     // parse single receiver (for now), use array later
     
-    int rec_x = Nx/2, rec_y = Ny/2; // safe default
+    int rec_x = Nx/2, rec_y = Ny/2, rec_z = Nz/2; // safe default
     file.open(argv[4]);
 	if (!file.is_open()){
     	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
@@ -375,12 +376,14 @@ int main(int argc, char *argv[]){
     	if (line.empty() || line[0] == '#') continue;
     	float val_x, val_y, val_z;
     	std::istringstream iss(line);
-    	if (iss >> val_x >> val_y) {
+    	if (iss >> val_x >> val_y >> val_z) {
         	int i_rec = int(val_x / h);
         	int j_rec = int(val_y / h);
-        	if (i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny) {
+        	int k_rec = int(val_z / h);
+        	if (i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny && k_rec >= 0 && k_rec < Nz){
             	rec_x = i_rec;
             	rec_y = j_rec;
+            	rec_z = k_rec;
         	}
     	}
 	}
@@ -657,8 +660,9 @@ int main(int argc, char *argv[]){
 	TV_p_ = TV(p1, Nx, Ny, Nz, h);
 	TV_u_ = TV(u1, Nx, Ny, Nz, h);
 	TV_v_ = TV(v1, Nx, Ny, Nz, h);
+	TV_w_ = TV(w1, Nx, Ny, Nz, h);
 		
-	TV_1 = TV_p_ + TV_u_ + TV_v_;
+	TV_1 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
 	printf("\n\nTV_0 = %f\n", TV_0);
 	printf("\nTV_1 = %f\n", TV_1);
 		
@@ -738,7 +742,7 @@ int main(int argc, char *argv[]){
         	}
         		
         	// write to file for single receiver
-			fwrite(&p1[flat(rec_x, rec_y, Nx)], sizeof(float), 1, f_rec);
+			fwrite(&p1[flat3(rec_x, rec_y, rec_z, Nx, Ny)], sizeof(float), 1, f_rec);
         	fflush(f_rec);  // Ensure data is written to disk
         		
 			n += 1; // update time-step
@@ -752,8 +756,9 @@ int main(int argc, char *argv[]){
 		TV_p_ = TV(p1, Nx, Ny, Nz, h);
 		TV_u_ = TV(u1, Nx, Ny, Nz, h);
 		TV_v_ = TV(v1, Nx, Ny, Nz, h);
+		TV_w_ = TV(w1, Nx, Ny, Nz, h);
 		
-		TV_1 = TV_p_ + TV_u_ + TV_v_;
+		TV_1 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
 		printf("\n\nTV_0 = %f\n", TV_0);
 		printf("\nTV_1 = %f\n", TV_1);
 		
