@@ -25,5 +25,3 @@ $(BUILD_DIR):
 
 clean:
 	rm -f $(OUT)
-
-
