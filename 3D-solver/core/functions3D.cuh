@@ -262,10 +262,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	// only act on immersed cells (fluid-side band from your OID map), provided
     	// those values are only on positive s, which is the case here
     	// oid[] ranges from 1 to nMat, 255 elsewhere
-		const uint8_t o_ID = oid[Cij]; // object's material ID
+		const uint8_t o_ID = oid[Cijk]; // object's material ID
 		if (o_ID == 0 || o_ID == 0xFF) return;
 		
-		int b_ID = bmap[Cij];
+		int b_ID = bmap[Cijk];
 		//if (b_ID < 0) return; // safety; should match oid test
 		
 		// gradients from S[] for detecting normals   
@@ -282,7 +282,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	// cell center
     	float Cx = i * h;
     	float Cy = j * h;
-    	float Cz = k * h
+    	float Cz = k * h;
 		
     	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid) 
     	float Wx = Cx + s * nx;
@@ -329,8 +329,6 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
         const float p_b  = 0.5f * (w_in_local + w_out_local);
         const float un_b = (w_out_local - w_in_local) / (2.0f * Z0);
 
-        const float ut_b = ut; // still free-slip (or add tangential model)
-
         // back to Cartesian
         const float u_b = un_b*nx + utx;
 		const float v_b = un_b*ny + uty;
@@ -364,7 +362,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
 // https://reference.wolfram.com/language/PDEModels/tutorial/Acoustics/AcousticsTimeDomain.html
 // 
 // 
-__host__ __device__ void sPML(float *q, int i, int j, k, int Nx, int Ny, int Nz, float h, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+__host__ __device__ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
     float s_max = 0.018f; // Maximum absorption factor
     int max_idx = (int)(0.15f*min(Nx, min(Ny, Nz))); // halfwidth
     float half   = (float)max_idx;
@@ -383,7 +381,7 @@ __host__ __device__ void sPML(float *q, int i, int j, k, int Nx, int Ny, int Nz,
 	// per-axis combined strengths (L/R, U/D and F/B are mutually exclusive)
 	float sx = s_max * (rx3 + lx3);
 	float sy = s_max * (uy3 + ly3);
-	float sz = s_max * (fz3 + bz3);
+	float sz = s_max * (fz3 + sz3);
 	
 	// exact corner composition
 	//float s = 1.0f - (1.0f - sx) * (1.0f - sy);
@@ -607,7 +605,7 @@ __device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float
 }
 
 // Compute final 4 V's for pluging WENO reconstructions in z flux
-__device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
+__device__ void compute_Vs_z(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
 	Q_V[0] = WENO_z(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 1, eps);
 	Q_V[1] = WENO_z(V, dd, c_rl, beta_rl, i, j, k+1, Nx, Ny, 0, eps);
 	Q_V[2] = WENO_z(V, dd, c_rl, beta_rl, i, j, k-1, Nx, Ny, 1, eps);
@@ -615,7 +613,7 @@ __device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO3_step0(int Nx, int Ny int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
+__global__ void kernel_WENO3_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -671,9 +669,9 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny int Nz, float *p0, float *u0, 
 		p1[Cijk] = p0[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM)/h);
 
 		
-		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
-		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
-		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
@@ -734,9 +732,9 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, int Nz, float *p0, float *u0,
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM)/h));
 
 		
-		sPML(u2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
-		sPML(v2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
-		sPML(p2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(u2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
@@ -798,9 +796,9 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, int Nz, float *p0, float *u0,
 		p1[Cijk] = (p0[Cijk] + 2.0f*(p2[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM)/h)))/3.0f;
 
 		
-		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
-		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
-		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML);
+		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
