@@ -25,10 +25,10 @@ int main(int argc, char *argv[]){
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
 	float *p0, *u0, *v0, *p1, *u1, *v1, *p2, *u2, *v2; // host arrays
-	float *d_p0, *d_u0, *d_v0, *d_p1, *d_u1, *d_v1, *d_p2, *d_u2, *d_v2, *c_rl, *dd; // device arrays
+	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2, *c_rl, *dd; // device arrays
 	float rho, c, Temp; // density, speed of sound, temperature
 	float Lx, Ly; // domain dimensions
-	float N_PML, S_PML, E_PML, W_PML; // Perfectly Matched Layer activation keys
+	float N_PML, S_PML, E_PML, W_PML, F_ML, B_PML; // Perfectly Matched Layer activation keys
     int Nx, Ny, Nz, n; // number of points in x, y, time step
     
     // timing variables
@@ -62,6 +62,8 @@ int main(int argc, char *argv[]){
     S_PML = (float)conf_arr[7];
     E_PML = (float)conf_arr[8];
     W_PML = (float)conf_arr[9];
+    F_PML = (float)conf_arr[10];
+    B_PML = (float)conf_arr[11];
     
     n = 0; // initial time-step
     
@@ -97,113 +99,39 @@ int main(int argc, char *argv[]){
     std::vector<std::string> names; // global naming
     
    	if (ends_with_dotobj(path)){
-    	//const char *path = "TST2.obj";  // your 2D OBJ like in the prompt
-    	Scene2D sc;
-    	if(!parse_obj2d(path, &sc)) return 1;
-    	build_sdf(&sc, h, &Nx, &Ny, &Lx, &Ly, &S);
+    	Scene3D sc;
 
+		if(!parse_obj3d(path, &sc)) return 1;
 		
-		FILE *file_S = fopen("output/S.bin", "wb");  // Open file for writing in binary mode
-    	if (file_S) {
-        	fwrite(S, sizeof(float), Nx*Ny, file_S); // Write array to file
-        	fclose(file_S);
-    	}
-		/*
-		// sanity test for S
-		for (int i = 0; i < Nx*Ny; i++){
-			if (isnan(S[i])) {
-            	printf("[!] WARNING: S[%d] is NaN\n", i);
-            }
+		build_sdf(&sc, h, &Nx, &Ny, &Nz, &Lx, &Ly, &Lz, &S);
+		
+		FILE *file_S = fopen("output/S.bin", "wb");
+		if (file_S) {
+    		fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
+    		fclose(file_S);
 		}
-		*/
-		if(!build_oid_dense_cpu(sc, S, Nx, Ny, h, tol, &oid)){
+		
+		if(!build_oid_dense_cpu(sc, S, Nx, Ny, Nz, h, tol, &oid)){
     		fprintf(stderr,"Failed to build OID map\n");
     		return 1;
 		}
-		/*
-		// sanity test for oid
-		for (int i = 0; i < Nx*Ny; i++){
-            printf("oid[%d] = %u\n", i, oid[i]);
+		
+		FILE *file_oid = fopen("output/oid.bin", "wb");
+		if (file_oid){
+    		fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
+    		fclose(file_oid);
 		}
-		*/
-		// oid[] have values ranging from 1...nObj, with 255 in the other cells
-		FILE *file_oid = fopen("output/oid.bin", "wb");  // Open file for writing in binary mode
-    	if (file_oid) {
-        	fwrite(oid, sizeof(uint8_t), Nx*Ny, file_oid); // Write array to file
-        	fclose(file_oid);
-    	}
 		
-		// copy oid[] to device
-		cudaMalloc(&d_oid, (size_t)Nx*Ny*sizeof(uint8_t));
-		cudaMemcpy(d_oid, oid, (size_t)Nx*Ny, cudaMemcpyHostToDevice);
-    	
-		// get nObj from scene
-    	nObj = scene_layer_count(sc); // number of layers/materials including Boundary
-    	//printf("\n\nnObj = %d\n\n", nObj);
-		scene_layer_names(sc, names);
-		std::sort(names.begin() + 1, names.end()); // ordering
+		cudaMalloc(&d_oid, (size_t)Nx*Ny*Nz*sizeof(uint8_t));
+		cudaMemcpy(d_oid, oid, (size_t)Nx*Ny*Nz, cudaMemcpyHostToDevice);
 		
-		//allocate single R, T, thickness arrays
-		/*
-		// allocate array of reflection coefficients per material/obj
-		R = new float[nObj-1]; // exclude boundary
+		nObj = scene_layer_count_3d(sc);
+		scene_layer_names_3d(sc, names);
 		
-		// allocate array of transmission coefficients per material/obj
-		T = new float[nObj-1]; // exclude boundary
+		cudaMalloc(&d_S, (size_t)Nx*Ny*Nz*sizeof(float));
+		cudaMemcpy(d_S, S, (size_t)Nx*Ny*Nz*sizeof(float), cudaMemcpyHostToDevice);
 		
-		// allocate array of thickness per barrier
-		th = new float[nObj-1]; // exclude boundary
-    	*/
-    	printf("\n[OK] Scene processing\n");
-    	printf("\nDomain info:\n\nLx = %.6f m Ly = %.6f m\nNx = %d Ny = %d\n", Lx, Ly, Nx, Ny);
-    	
-    	/*
-    	int counter_mat = 0; // 0 is boundary in "names"
-    	float R_val, T_val, th_val;
-    	int obj_typ;
-    	while(counter_mat < nObj-1){
-    		printf("\nAttribute object's type for %s\n", names[counter_mat+1].c_str());
-    		printf("\n(1) Regular obstacle\n(2) Barrier\n(3) Medium interface\n\n");
-    		scanf("%d", &obj_typ);
-    		switch(obj_typ){
-    			case 1:
-    				printf("\nEnter with the R value for the obstacle %s\n\n", names[counter_mat+1].c_str());
-    				scanf("%f", &R_val);
-    				R[counter_mat] = R_val;
-    				T[counter_mat] = 0.0f;
-    				th[counter_mat] = 0.0f;
-    				break;
-    			case 2:
-    				printf("\nEnter with the R value for object %s\n\n", names[counter_mat+1].c_str());
-    				scanf("%f", &R_val);
-    				R[counter_mat] = R_val;
-    				printf("\nEnter with the T value for the object %s\n\n", names[counter_mat+1].c_str());
-    				scanf("%f", &T_val);
-    				T[counter_mat] = T_val;
-    				check_energy_coeffs(R_val,T_val); // warning
-    				printf("\nEnter the thickness value for the object %s\n\n", names[counter_mat+1].c_str());
-    				scanf("%f", &th_val);
-    				th[counter_mat] = th_val;
-    				break;
-    			case 3:
-    				//
-    				break;
-    		}
-    		counter_mat += 1;
-    	}
-    	*/
-     	// allocate on device and then copy, signed distance field, Reflection, Transmission, barrier thickness
-    	cudaMalloc(&d_S, (size_t)Nx*Ny*sizeof(float));
-    	cudaMemcpy(d_S, S, (size_t)Nx*Ny*sizeof(float), cudaMemcpyHostToDevice);
-    	/*
-		cudaMalloc(&d_R, (nObj-1)*sizeof(float));
-		cudaMemcpy(d_R, R, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMalloc(&d_T, (nObj-1)*sizeof(float));
-		cudaMemcpy(d_T, T, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMalloc(&d_th, (nObj-1)*sizeof(float));
-		cudaMemcpy(d_th, th, (nObj-1)*sizeof(float), cudaMemcpyHostToDevice);
-		*/
-    	scene_free(&sc);
+		scene_free(&sc);
     }
     // process PLY/VOX test
     else {
@@ -238,9 +166,6 @@ int main(int argc, char *argv[]){
     
     int K_m, L_m; // k_max and L_max from all the fits
     
-    //K_m = int(conf_arr[5]);
-    //L_m = int(conf_arr[6]);
-    
     // read poles.txt file
     file.open("config/poles.txt");
     if (!file.is_open()) {
@@ -271,19 +196,8 @@ int main(int argc, char *argv[]){
     
     for (int m = 0; m < nMat; ++m) {
     	std::string filename = "input/fit/" + names[m+1] + ".fit"; // names[0] = Boundary
-    	std::cout << "\nReading: " << filename << "\n";
-	
+    	std::cout << "\nReading: " << filename << "\n";	
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
-		/*
-		// simple print test
-    	std::printf("Rinf[%d] = %.15f\n", m, (float)Rinf[m]);
-    	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
-                	m, (float)Ak[flat(0, m, K_m)],
-                	m, (float)zeta[flat(0, m, K_m)]);
-    	std::printf("Ak(1,%d)  = %.15f   zeta(1,%d) = %.15f\n\n",
-                	m, (float)Ak[flat(1, m, K_m)],
-                	m, (float)zeta[flat(1, m, K_m)]);
-        */
 	}
 
 	// ----- device arrays for materials -----
@@ -361,7 +275,6 @@ int main(int argc, char *argv[]){
 	cudaMemset(psi_2_nu, 0, nB * L_m * sizeof(float));
 
 
-
     // ------------------------------------- atmospheric values ------------------------------------------------
 	
 	// should to to config later
@@ -382,6 +295,7 @@ int main(int argc, char *argv[]){
     p0 = new float[N](); // pressure deviations from p0
     u0 = new float[N](); // x component of particle velocity 
     v0 = new float[N](); // y component of particle velocity 
+    w0 = new float[N](); // z component of particle velocity
 
 	float C_CFL = conf_arr[4]; // Courant number: pick values < 0.5 (not equal to)
 	dt = C_CFL*h/c; // Courant-Friedrichs-Lewy condition
@@ -410,8 +324,9 @@ int main(int argc, char *argv[]){
     // Allocate device memory
     if (cudaMalloc(&d_p0, N*sizeof(float)) != cudaSuccess
 		|| cudaMalloc(&d_u0, N*sizeof(float)) != cudaSuccess
-		|| cudaMalloc(&d_v0, N*sizeof(float)) != cudaSuccess){
-    	printf("[!] CUDA error allocating device memory\n");
+		|| cudaMalloc(&d_v0, N*sizeof(float)) != cudaSuccess
+		|| cudaMalloc(&d_w0, N*sizeof(float))){
+    		printf("[!] CUDA error allocating device memory\n");
     	return -1;
 	}
 	
@@ -458,7 +373,7 @@ int main(int argc, char *argv[]){
 	}
 	while (std::getline(file, line)) {
     	if (line.empty() || line[0] == '#') continue;
-    	float val_x, val_y;
+    	float val_x, val_y, val_z;
     	std::istringstream iss(line);
     	if (iss >> val_x >> val_y) {
         	int i_rec = int(val_x / h);
@@ -546,14 +461,15 @@ int main(int argc, char *argv[]){
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
 	// Kernel launch parameters
-	dim3 TP(8,8); // multiples of 32, max is 1024 (TP.x * TP.y <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
-	dim3 BP((Nx + TP.x - 1)/TP.x,(Ny + TP.y - 1)/TP.y); // BLOCKS Per Grid
+	dim3 TP(8,8,8); // multiples of 32, max is 1024 (TP.x * TP.y * TP.z <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
+	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z); // BLOCKS Per Grid
 	
 	// Copy initial data to device
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
-    	printf("[!] CUDA error allocating device memory\n");
+    	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_w0, w0, N*sizeof(float), cudaMemcpyHosttoDeivce) != cudaSucess){
+    		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
 	
@@ -569,19 +485,23 @@ int main(int argc, char *argv[]){
 	p1 = new float[N](); // sound pressure
     u1 = new float[N](); // x component of particle velocity 
     v1 = new float[N](); // y component of particle velocity
+    w1 = new float[n](); // z component of particle velocity
 	
 	cudaMalloc(&d_p1, N*sizeof(float));
 	cudaMalloc(&d_u1, N*sizeof(float));
 	cudaMalloc(&d_v1, N*sizeof(float));
+	cudaMalloc(&d_w1, N*sizeof(float));
 		
 	cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_v1, v1, N*sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_w1, w1, N*sizeof(float), cudaMemcpyHostToDevice);
 	
-	dm = 6*N*sizeof(float);
+	dm = 8*N*sizeof(float);
+	
+	// WENO5 option
 	
 	if (kern == 2){
-		// auxiliar memory arrays (for SSP-RK2)
 		
     	p2 = new float[N](); // sound pressure
     	u2 = new float[N](); // x component of particle velocity 
@@ -590,10 +510,12 @@ int main(int argc, char *argv[]){
     	cudaMalloc(&d_p2, N*sizeof(float));
 		cudaMalloc(&d_u2, N*sizeof(float));
 		cudaMalloc(&d_v2, N*sizeof(float));
+		cudaMalloc(&d_w2, N*sizeof(float));
 		
 		cudaMemcpy(d_p2, p2, N*sizeof(float), cudaMemcpyHostToDevice);
 		cudaMemcpy(d_u2, u2, N*sizeof(float), cudaMemcpyHostToDevice);
 		cudaMemcpy(d_v2, v2, N*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMemcpy(d_w2, w2, N*sizeof(float), cudaMemcpyHostToDevice);
 			
 		cudaMallocManaged(&c_rl, 12*sizeof(float)); // coefficients
 		cudaMallocManaged(&beta_rl, 9*sizeof(float)); // coefficients for second term of beta_r
@@ -610,15 +532,13 @@ int main(int argc, char *argv[]){
 			
 		dd[0] = 3.0/10.0; dd[1] = 3.0/5.0; dd[2] = 1.0/10.0;
 		
-		dm = (10*N + 3*Ny + 12+9+3)*sizeof(float);
+		//dm = (12*N + 3*Ny + 12+9+3)*sizeof(float); // if using atmospheric gradients
+		dm = (12*N + 12+9+3)*sizeof(float);
 		
 		cudaDeviceSynchronize();
-		
-		dm = (6*N + 6 + 2)*sizeof(float);
-
 	}
 	
-	// ---------------------------------------------------------------------------------------
+	// --------------------------------- Memory assessment ---------------------------------
 	
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -649,13 +569,16 @@ int main(int argc, char *argv[]){
 		scanf("%d", &lim_ID);
 	}
 	
-	float TV_p_, TV_u_, TV_v_, TV_0, TV_1;
+	// -------------------------------------------------------------------------------------
+	
+	float TV_p_, TV_u_, TV_v_, TV_w_, TV_0, TV_1;
 	
 	// compute initial TVs
 	
-	TV_p_ = TV(p0, Nx, Ny, h);
-	TV_u_ = TV(u0, Nx, Ny, h);
-	TV_v_ = TV(v0, Nx, Ny, h);
+	TV_p_ = TV(p0, Nx, Ny, Nz, h);
+	TV_u_ = TV(u0, Nx, Ny, Nz, h);
+	TV_v_ = TV(v0, Nx, Ny, Nz, h);
+	TV_w_ = TV(w0, Nx, Ny, Nz, h);
 	
 	TV_0 = TV_p_ + TV_u_ + TV_v_;
 	
@@ -697,7 +620,7 @@ int main(int argc, char *argv[]){
 		while(n < Nt){
 		// Launch Euler kernel
 			
-		kernel_Euler<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S, N_PML, S_PML, E_PML, W_PML);
+		//kernel_Euler<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 			
 		//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 			
@@ -729,9 +652,9 @@ int main(int argc, char *argv[]){
 	cudaMemcpy(u1, d_u1, N*sizeof(float), cudaMemcpyDeviceToHost);
 	cudaMemcpy(v1, d_v1, N*sizeof(float), cudaMemcpyDeviceToHost);
 		
-	TV_p_ = TV(p1, Nx, Ny, h);
-	TV_u_ = TV(u1, Nx, Ny, h);
-	TV_v_ = TV(v1, Nx, Ny, h);
+	TV_p_ = TV(p1, Nx, Ny, Nz, h);
+	TV_u_ = TV(u1, Nx, Ny, Nz, h);
+	TV_v_ = TV(v1, Nx, Ny, Nz, h);
 		
 	TV_1 = TV_p_ + TV_u_ + TV_v_;
 	printf("\n\nTV_0 = %f\n", TV_0);
@@ -742,11 +665,11 @@ int main(int argc, char *argv[]){
     // Free memory
     delete[] p0, delete[] u0, delete[] v0;
     delete[] p1, delete[] u1, delete[] v1;
-    cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1);
-    cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2);
+    cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1); cudaFree(d_w1);
+    cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2); cudaFree(d_w2);
     	
     }
-    // WENO3 + SSP-RK3
+    // WENO5 + SSP-RK3
     else{
 		while(n < Nt){
 			/*
@@ -776,7 +699,7 @@ int main(int argc, char *argv[]){
 			// Launch WENO3 kernel + SSP-RK3
 				
 			// (0)
-			kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, d_p0, d_u0, d_v0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);	
+			kernel_WENO3_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, rho, c, h, dt, c_rl, eps, dd, d_S, N_PML, S_PML, E_PML, W_PML);	
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 				
 			// (1)
@@ -824,9 +747,9 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(u1, d_u1, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(v1, d_v1, N*sizeof(float), cudaMemcpyDeviceToHost);
 		
-		TV_p_ = TV(p1, Nx, Ny, h);
-		TV_u_ = TV(u1, Nx, Ny, h);
-		TV_v_ = TV(v1, Nx, Ny, h);
+		TV_p_ = TV(p1, Nx, Ny, Nz, h);
+		TV_u_ = TV(u1, Nx, Ny, Nz, h);
+		TV_v_ = TV(v1, Nx, Ny, Nz, h);
 		
 		TV_1 = TV_p_ + TV_u_ + TV_v_;
 		printf("\n\nTV_0 = %f\n", TV_0);
@@ -835,14 +758,14 @@ int main(int argc, char *argv[]){
 		is_TVD(TV_0, TV_1);
 	
     	// Free host memory
-    	delete[] p0, delete[] u0, delete[] v0;
-    	delete[] p1, delete[] u1, delete[] v1;
-    	delete[] p2, delete[] u2, delete[] v2;
+    	delete[] p0, delete[] u0, delete[] v0; delete[] w0;
+    	delete[] p1, delete[] u1, delete[] v1; delete[] w1;
+    	delete[] p2, delete[] u2, delete[] v2; delete[] w2;
     	
     	// Free device memory
-    	cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0);
-    	cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1);
-    	cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2);
+    	cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0); cudaFree(d_w0);
+    	cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1); cudaFree(d_w1);
+    	cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2); cudaFree(d_w2);
     	cudaFree(c_rl); cudaFree(dd);
     	
     }
@@ -879,11 +802,9 @@ int main(int argc, char *argv[]){
     
     delete[] S;
     delete[] oid;
-    //delete[] R;
     
     cudaFree(d_S);
     cudaFree(d_oid);
-    //cudaFree(d_R);
     
     printf("\n[OK] Freed arrays\n");  
     

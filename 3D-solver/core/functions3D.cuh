@@ -3,11 +3,9 @@
 #include "parsing3D.h"
 #include "filterABC.h"
 
-__host__ __device__ inline int flat3D(int i, int j, int k, int Nx, int Ny){
+__host__ __device__ inline int flat3(int i, int j, int k, int Nx, int Ny){
     return (k*Ny + j)*Nx + i;
 }
-
-// no Euler option, WENO3 only (better for 3D fields)
 
 // Godunov and Roe fluxes (for WENO, no simple substitutions)
 
@@ -45,7 +43,7 @@ __host__ float SPL(float p){
 
 // compute on regular variables
 // Total Variation of variable Q
-__host__ __device__ float TV(float *Q, int Nx, int Ny, float h){
+__host__ __device__ float TV(float *Q, int Nx, int Ny, int Nz, float h){
 	float retval = 0.0;
 	for (int i = 0; i < Nx-1; i++){
 		for (int j = 0; j < Ny-1; j++){
@@ -229,7 +227,6 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 		phi_left[s] = a_SSP*phi_middle[s] + b_SSP*(phi_right[s] + dt*L_phi);
 		phi_left[s] /= c_SSP;
 		sum_A += A[m] * phi_left[s];
-
     }
 
     for (int l = 0; l < L; l++){
@@ -348,7 +345,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	p[Cijk] = (1.0f - chi) * p[Cijk] + chi * p_b;
     	
     	/*
-    	// immersed boundary smoothing / blending (Brinkman penalization): tuned to different resolutions
+    	// immersed boundary smoothing / blending (Brinkman penalization): tuned to different resolutions (?)
     	float kappa = 0.5f; // once tuned for a test case, no more need to change (for a given tol and chi)
     	float eta = kappa * h / c;
     	float lam = 1.0f - expf(-chi * dt / eta); // dimensionless
@@ -396,7 +393,7 @@ __host__ __device__ void sPML(float *q, int i, int j, k, int Nx, int Ny, int Nz,
 	s = fminf(s, 0.999f);
 	
 	// apply once
-	int Cijk = flatk(i, j, k, Nx, Ny);
+	int Cijk = flat3(i, j, k, Nx, Ny);
 	q[Cijk] -= s * q[Cijk];
     
 }
@@ -405,55 +402,76 @@ __host__ __device__ void sPML(float *q, int i, int j, k, int Nx, int Ny, int Nz,
 
 // reconstruct in x, for k = 3
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_{i-1/2} instead of V_{i+1/2})
-__device__ float construct_Vi_12(float *u, int i, int j, int Nx, float *c_rl, int r, int idx){
+__device__ float construct_Vi_12(float *u, int i, int j, int k, int Nx, int Ny, float *c_rl, int r, int idx){
 	float retval = 0.0;
 	for (int l = 0; l <= 2; l++){
 		//if (r+idx > 3) printf("[!] Violation");
-		retval += c_rl[flat(r+idx,l,12)]*u[flat(i-r+l,j,Nx)];
+		retval += c_rl[flat(r+idx,l,12)]*u[flat3(i-r+l,j,k,Nx,Ny)];
 	}
 	return retval;
 }
 
 // reconstruct in y, for k = 3
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_{j-1/2} instead of V_{j+1/2})
-__device__ float construct_Vj_12(float *u, int i, int j, int Nx, float *c_rl, int r, int idx){
+__device__ float construct_Vj_12(float *u, int i, int j, int k, int Nx, int Ny, float *c_rl, int r, int idx){
 	float retval = 0.0;
 	for (int l = 0; l <= 2; l++){
-		retval += c_rl[flat(r+idx,l,12)]*u[flat(i,j-r+l,Nx)];
+		retval += c_rl[flat(r+idx,l,12)]*u[flat3(i,j-r+l,k,Nx,Ny)];
+	}
+	return retval;
+}
+
+// reconstruct in z, for k = 3
+// idx = 0 or idx = 1 (default is 1, if 0, will compute V_{k-1/2} instead of V_{k+1/2})
+__device__ float construct_Vk_12(float *u, int i, int j, int k, int Nx, int Ny, float *c_rl, int r, int idx){
+	float retval = 0.0;
+	for (int l = 0; l <= 2; l++){
+		retval += c_rl[flat(r+idx,l,12)]*u[flat3(i,j,k-r+l,Nx,Ny)];
 	}
 	return retval;
 }
 
 // compute smoothness indicators in x
-__device__ float compute_beta_x(float *u, int r, int i, int j, int Nx, float *beta_rl){
+__device__ float compute_beta_x(float *u, int r, int i, int j, int k, int Nx, int Ny, float *beta_rl){
 	float b1, b2;
 	
-	b1 = u[flat(i-r,j,Nx)] - 2*u[flat(i-r+1,j,Nx)] + u[flat(i-r+2,j,Nx)];
+	b1 = u[flat3(i-r,j,k,Nx,Ny)] - 2*u[flat3(i-r+1,j,k,Nx,Ny)] + u[flat3(i-r+2,j,k,Nx,Ny)];
 	
-	b2 = beta_rl[flat(r,0,9)]*u[flat(i-r,j,Nx)] + beta_rl[flat(r,1,9)]*u[flat(i-r+1,j,Nx)]
-			+ beta_rl[flat(r,2,9)]*u[flat(i-r+2,j,Nx)];
+	b2 = beta_rl[flat(r,0,9)]*u[flat3(i-r,j,k,Nx,Ny)] + beta_rl[flat(r,1,9)]*u[flat3(i-r+1,j,k,Nx,Ny)]
+			+ beta_rl[flat(r,2,9)]*u[flat3(i-r+2,j,k,Nx,Ny)];
 	
 	return (13.0*b1*b1/12.0) + (0.25*b2*b2);
 }
 
 // compute smoothness indicators in y
-__device__ float compute_beta_y(float *u, int r, int i, int j, int Nx, float *beta_rl){
+__device__ float compute_beta_y(float *u, int r, int i, int j, int k, int Nx, int Ny, float *beta_rl){
 	float b1, b2;
 	
-	b1 = u[flat(i,j-r,Nx)] - 2*u[flat(i,j-r+1,Nx)] + u[flat(i,j-r+2,Nx)];
+	b1 = u[flat3(i,j-r,k,Nx,Ny)] - 2*u[flat3(i,j-r+1,k,Nx,Ny)] + u[flat3(i,j-r+2,k,Nx,Ny)];
 	
-	b2 = beta_rl[flat(r,0,9)]*u[flat(i,j-r,Nx)] + beta_rl[flat(r,1,9)]*u[flat(i,j-r+1,Nx)]
-			+ beta_rl[flat(r,2,9)]*u[flat(i,j-r+2,Nx)];
+	b2 = beta_rl[flat(r,0,9)]*u[flat3(i,j-r,k,Nx,Ny)] + beta_rl[flat(r,1,9)]*u[flat3(i,j-r+1,k,Nx,Ny)]
+			+ beta_rl[flat(r,2,9)]*u[flat3(i,j-r+2,k,Nx,Ny)];
+	
+	return (13.0*b1*b1/12.0) + (0.25*b2*b2);
+}
+
+__device__ float compute_beta_z(float *u, int r, int i, int j, int k, int Nx, int Ny, float *beta_rl){
+	float b1, b2;
+	
+	b1 = u[flat3(i,j,k-r,Nx,Ny)] - 2*u[flat3(i,j,k-r+1,Nx,Ny)] + u[flat3(i,j,k-r+2,Nx,Ny)];
+	
+	b2 = beta_rl[flat(r,0,9)]*u[flat3(i,j,k-r,Nx,Ny)] + beta_rl[flat(r,1,9)]*u[flat3(i,j,k-r+1,Nx,Ny)]
+			+ beta_rl[flat(r,2,9)]*u[flat3(i,j,k-r+2,Nx,Ny)];
 	
 	return (13.0*b1*b1/12.0) + (0.25*b2*b2);
 }
 
 // compute alpha[r]
 // if S = 0, compute alpha, if 1, compute alpha~
-__device__ float compute_alpha(float *dd, float *beta, float eps, int r, int S){
+__device__ float compute_alpha(float *dd, float *beta, float eps, int r, int SS){
 	//if (beta[r] != 0.0) printf("beta = %.17f\n", beta[r]);
 	float aux = beta[r] + eps;
-	int rr = S*3 - S*1 - r;
+	int rr = SS*3 - SS*1 - r;
 	return dd[(int)abs(rr)]/(aux*aux);
 }
 
@@ -466,12 +484,12 @@ __device__ float compute_w(float *alpha, int r){
 
 // WENO algorithm in x
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_i- instead of V_i+)
-__device__ float WENO_x(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int Nx, int idx, float eps){
+__device__ float WENO_x(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
 	
 	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
 	float Vi_12[3];
 	for (int r = 0; r < 3; r++){
-		Vi_12[r] = construct_Vi_12(V, i, j, Nx, c_rl, r, idx);
+		Vi_12[r] = construct_Vi_12(V, i, j, k, Nx, Ny, c_rl, r, idx);
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
@@ -479,7 +497,7 @@ __device__ float WENO_x(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 	// 3) Compute smoothness indicators beta[r]
 	float beta[3];
 	for (int r = 0; r < 3; r++){
-		beta[r] = compute_beta_x(V, r, i, j, Nx, beta_rl);
+		beta[r] = compute_beta_x(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
 	
 	// 4) Define omega[r]
@@ -502,12 +520,12 @@ __device__ float WENO_x(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 
 // WENO algorithm in y
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_j- instead of V_j+)
-__device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int Nx, int idx, float eps){
+__device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
 	
 	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
 	float Vj_12[3];
 	for (int r = 0; r < 3; r++){
-		Vj_12[r] = construct_Vj_12(V, i, j, Nx, c_rl, r, idx);
+		Vj_12[r] = construct_Vj_12(V, i, j, k, Nx, Ny, c_rl, r, idx);
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
@@ -515,7 +533,7 @@ __device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 	// 3) Compute smoothness indicators beta[r]
 	float beta[3];
 	for (int r = 0; r < 3; r++){
-		beta[r] = compute_beta_y(V, r, i, j, Nx, beta_rl);
+		beta[r] = compute_beta_y(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
 	
 	// 4) Define omega[r]
@@ -536,20 +554,64 @@ __device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 	return V_j;
 }
 
+// WENO algorithm in y
+// idx = 0 or idx = 1 (default is 1, if 0, will compute V_j- instead of V_j+)
+__device__ float WENO_z(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
+	
+	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
+	float Vk_12[3];
+	for (int r = 0; r < 3; r++){
+		Vk_12[r] = construct_Vk_12(V, i, j, k, Nx, Ny, c_rl, r, idx);
+	}
+	
+	// 2) Compute coefficients d_r: computed on array dd
+	
+	// 3) Compute smoothness indicators beta[r]
+	float beta[3];
+	for (int r = 0; r < 3; r++){
+		beta[r] = compute_beta_y(V, r, i, j, k, Nx, Ny, beta_rl);
+	}
+	
+	// 4) Define omega[r]
+	float alpha[3], w[3];
+	for (int r = 0; r < 3; r++){
+		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+	}
+	for (int r = 0; r < 3; r++){
+		w[r] = compute_w(alpha, r);
+	}
+	
+	// 5) Compute V_j+ / V_j-, depending on the value of idx
+	float V_k = 0.0;
+	for (int r = 0; r < 3; r++){
+		V_k += w[r]*Vk_12[r];
+	}
+	
+	return V_k;
+}
+
 // Compute final 4 V's for pluging WENO reconstructions in x flux
-__device__ void compute_Vs_x(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int Nx, float eps){
-	Q_V[0] = WENO_x(V, dd, c_rl, beta_rl, i, j, Nx, 1, eps);
-	Q_V[1] = WENO_x(V, dd, c_rl, beta_rl, i+1, j, Nx, 0, eps);
-	Q_V[2] = WENO_x(V, dd, c_rl, beta_rl, i-1, j, Nx, 1, eps);
-	Q_V[3] = WENO_x(V, dd, c_rl, beta_rl, i, j, Nx, 0, eps);
+__device__ void compute_Vs_x(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
+	Q_V[0] = WENO_x(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 1, eps);
+	Q_V[1] = WENO_x(V, dd, c_rl, beta_rl, i+1, j, k, Nx, Ny, 0, eps);
+	Q_V[2] = WENO_x(V, dd, c_rl, beta_rl, i-1, j, k, Nx, Ny, 1, eps);
+	Q_V[3] = WENO_x(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 0, eps);
 }
 
 // Compute final 4 V's for pluging WENO reconstructions in y flux
-__device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int Nx, float eps){
-	Q_V[0] = WENO_y(V, dd, c_rl, beta_rl, i, j, Nx, 1, eps);
-	Q_V[1] = WENO_y(V, dd, c_rl, beta_rl, i, j+1, Nx, 0, eps);
-	Q_V[2] = WENO_y(V, dd, c_rl, beta_rl, i, j-1, Nx, 1, eps);
-	Q_V[3] = WENO_y(V, dd, c_rl, beta_rl, i, j, Nx, 0, eps);
+__device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
+	Q_V[0] = WENO_y(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 1, eps);
+	Q_V[1] = WENO_y(V, dd, c_rl, beta_rl, i, j+1, k, Nx, Ny, 0, eps);
+	Q_V[2] = WENO_y(V, dd, c_rl, beta_rl, i, j-1, k, Nx, Ny, 1, eps);
+	Q_V[3] = WENO_y(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 0, eps);
+}
+
+// Compute final 4 V's for pluging WENO reconstructions in z flux
+__device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
+	Q_V[0] = WENO_z(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 1, eps);
+	Q_V[1] = WENO_z(V, dd, c_rl, beta_rl, i, j, k+1, Nx, Ny, 0, eps);
+	Q_V[2] = WENO_z(V, dd, c_rl, beta_rl, i, j, k-1, Nx, Ny, 1, eps);
+	Q_V[3] = WENO_z(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 0, eps);
 }
 
 // WENO5 SSP-RK3 step 0
