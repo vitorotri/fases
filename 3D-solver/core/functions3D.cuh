@@ -613,7 +613,7 @@ __device__ void compute_Vs_z(float *Q_V, float *V, float *dd, float *c_rl, float
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO3_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
+__global__ void kernel_WENO3_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -654,8 +654,8 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, int Nz, float *p0, float *u0,
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_y(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_y(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
-		compute_Vs_y(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
+		compute_Vs_y(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
+		compute_Vs_y(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c);
@@ -669,17 +669,17 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, int Nz, float *p0, float *u0,
 		// compute WENO values V_k+, V_k- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_z(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_z(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
-		compute_Vs_z(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
+		compute_Vs_z(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
+		compute_Vs_z(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux H_p+
 		H_pP = H_p_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
 		// compute flux H_p-
 		H_pM = H_p_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
 		// compute flux H_w+
-		H_wP = H_v_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
+		H_wP = H_w_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
 		// compute flux H_w-
-		H_wM = H_v_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
+		H_wM = H_w_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
 		
 		
 		// stage updates
@@ -689,9 +689,9 @@ __global__ void kernel_WENO3_step0(int Nx, int Ny, int Nz, float *p0, float *u0,
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
 	
 		// PML BCs
-		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(u1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
@@ -738,8 +738,8 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, int Nz, float *p0, float *u0,
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_y(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_y(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
-		compute_Vs_y(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
+		compute_Vs_y(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
+		compute_Vs_y(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c);
@@ -753,17 +753,17 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, int Nz, float *p0, float *u0,
 		// compute WENO values V_k+, V_k- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_z(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_z(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
-		compute_Vs_z(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
+		compute_Vs_z(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
+		compute_Vs_z(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux H_p+
 		H_pP = H_p_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
 		// compute flux H_p-
 		H_pM = H_p_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
 		// compute flux H_w+
-		H_wP = H_v_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
+		H_wP = H_w_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
 		// compute flux H_w-
-		H_wM = H_v_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
+		H_wM = H_w_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
 		
 		
 		// stage updates
@@ -773,15 +773,15 @@ __global__ void kernel_WENO3_step1(int Nx, int Ny, int Nz, float *p0, float *u0,
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
 
 		// PML BCs
-		sPML(u2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p2, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(u2, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v2, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p2, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO3_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML){
+__global__ void kernel_WENO3_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -822,8 +822,8 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, int Nz, float *p0, float *u0,
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_y(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_y(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
-		compute_Vs_y(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
+		compute_Vs_y(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
+		compute_Vs_y(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c);
@@ -837,17 +837,17 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, int Nz, float *p0, float *u0,
 		// compute WENO values V_k+, V_k- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_z(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_z(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
-		compute_Vs_z(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, NY, eps);
+		compute_Vs_z(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
+		compute_Vs_z(w_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux H_p+
 		H_pP = H_p_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
 		// compute flux H_p-
 		H_pM = H_p_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
 		// compute flux H_w+
-		H_wP = H_v_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
+		H_wP = H_w_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
 		// compute flux H_w-
-		H_wM = H_v_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
+		H_wM = H_w_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
 		
 		
 		// stage update
@@ -858,9 +858,9 @@ __global__ void kernel_WENO3_step2(int Nx, int Ny, int Nz, float *p0, float *u0,
 		p1[Cijk] = (p0[Cijk] + 2.0f*(p2[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h)))/3.0f;
 
 		
-		sPML(u1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p1, i, j, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(u1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(v1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p1, i, j, k, Nx, Ny, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
 	}
 }
