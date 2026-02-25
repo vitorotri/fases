@@ -116,7 +116,6 @@ inline static bool parse_obj_index_token(const std::string& tok, int nverts, int
 
 // Loads OBJ into Mesh3D triangle soup.
 // Records o/g names into mesh.group_names.
-// Ensures group_id is never -1 by creating "default" group at start.
 inline static bool load_obj_mesh3d(const std::string& path, Mesh3D& mesh, std::string* err=nullptr){
     std::ifstream in(path);
     if(!in){
@@ -129,8 +128,9 @@ inline static bool load_obj_mesh3d(const std::string& path, Mesh3D& mesh, std::s
     mesh.group_names.clear();
 
     // Default group
-    mesh.group_names.push_back("default");
-    int current_group = 0;
+    //mesh.group_names.push_back("default");
+    //int current_group = 0;
+    int current_group = -1;
 
     std::string line;
     while(std::getline(in, line)){
@@ -144,17 +144,23 @@ inline static bool load_obj_mesh3d(const std::string& path, Mesh3D& mesh, std::s
             if(!ss.fail()) mesh.vertices.push_back(v3(x,y,z));
         }
         else if(starts_with(line, "o ") || starts_with(line, "g ")){
-            std::istringstream ss(line);
-            std::string tag, name;
-            ss >> tag;
-            std::getline(ss, name);
-            trim(name);
-            if(name.empty()){
-                name = "group_" + std::to_string(mesh.group_names.size());
-            }
-            current_group = (int)mesh.group_names.size();
-            mesh.group_names.push_back(name);
-        }
+    		std::istringstream ss(line);
+		
+    		std::string tag, t1, t2;
+    		ss >> tag >> t1 >> t2;   // read up to 2 tokens after tag
+		
+    		std::string name;
+    		if(!t2.empty()) {
+        		name = t2;           // take 2nd token (ceiling/walls/floor)
+    		} else if(!t1.empty()) {
+        		name = t1;           // fallback: only one token provided
+    		} else {
+        		name = "group_" + std::to_string(mesh.group_names.size());
+    		}
+		
+    		current_group = (int)mesh.group_names.size();
+    		mesh.group_names.push_back(name);
+		}
         else if(starts_with(line, "f ")){
             std::istringstream ss(line);
             char fch; ss >> fch;
@@ -170,6 +176,12 @@ inline static bool load_obj_mesh3d(const std::string& path, Mesh3D& mesh, std::s
                 face.push_back(vi);
             }
             if(face.size() < 3) continue;
+
+			if(current_group < 0){
+    			// Faces without any preceding 'g'/'o' go into an auto group (rare but legal OBJ).
+    			mesh.group_names.push_back("unnamed");
+    			current_group = 0;
+			}
 
             // Triangulate fan (KEEP THIS)
             const int v0 = face[0];
@@ -633,7 +645,7 @@ inline static int build_oid_dense_cpu(const Scene3D& Sc, const float* S,
         bool appears=false;
         for(const auto& t: Sc.tris){ if(t.group_id==gid){ appears=true; break; } }
         if(!appears) continue;
-        if(lid_counter <= 254) gid2lid[(size_t)gid] = lid_counter++;
+        if(lid_counter <= 254) gid2lid[(size_t)gid] = lid_counter++ + 1;
     }
 
     vec3 bmin,bmax;
@@ -680,9 +692,11 @@ inline static int build_oid_dense_cpu(const Scene3D& Sc, const float* S,
 inline static int scene_layer_count_3d(const Scene3D& sc){
     return (int)sc.group_names.size() + 1; // Boundary + groups
 }
+
+// compatibility with 2D case
 inline static void scene_layer_names_3d(const Scene3D& sc, std::vector<std::string>& names){
     names.clear();
-    names.push_back("Boundary");
+    names.push_back("BoundingBox");
     for(const auto& g : sc.group_names) names.push_back(g);
 }
 inline static void scene_free(Scene3D* sc){

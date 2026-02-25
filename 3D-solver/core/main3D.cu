@@ -170,7 +170,7 @@ int main(int argc, char *argv[]){
     // read poles.txt file
     file.open("config/poles.txt");
     if (!file.is_open()) {
-        std::cerr << "[!] Cannot open config/file.txt" << std::endl;
+        std::cerr << "[!] Cannot open config/poles.txt" << std::endl;
         return EXIT_FAILURE;
     }
     file >> K_m >> L_m;
