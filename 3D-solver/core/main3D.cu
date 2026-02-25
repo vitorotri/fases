@@ -25,7 +25,7 @@ int main(int argc, char *argv[]){
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
 	float *p0, *u0, *v0, *w0, *p1, *u1, *v1, *w1, *p2, *u2, *v2, *w2; // host field arrays
-	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2, // device arrays
+	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2; // device arrays
 	float *c_rl, *dd, *beta_rl; // WENO5 arrays
 	float rho, c, Temp; // density, speed of sound, temperature
 	float Lx, Ly, Lz; // domain dimensions
@@ -575,6 +575,20 @@ int main(int argc, char *argv[]){
 		scanf("%d", &lim_ID);
 	}
 	
+	// ---------------------------------- animation arrays ---------------------------------
+	
+	int i0 = Nx / 2;
+	size_t stride_X = (size_t)Ny * (size_t)Nz;
+	std::vector<float> p_X(stride_X); // reuse each frame
+	
+	int j0 = Ny / 2;
+	size_t stride_Y = (size_t)Nx * (size_t)Nz;
+	std::vector<float> p_Y(stride_Y); // reuse each frame
+	
+	int k0 = Nz / 2;
+	size_t stride_Z = (size_t)Nx * (size_t)Ny;
+	std::vector<float> p_Z(stride_Z); // reuse each frame
+	
 	// -------------------------------------------------------------------------------------
 	
 	float TV_p_, TV_u_, TV_v_, TV_w_, TV_0, TV_1;
@@ -632,8 +646,10 @@ int main(int argc, char *argv[]){
 	tic = clock();
 
 	// Godunov + Euler
-	if (kern == 1){ 
+	if (kern == 1){
+		/*
 		while(n < Nt){
+		
 		// Launch Euler kernel
 			
 		//kernel_Euler<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
@@ -686,7 +702,7 @@ int main(int argc, char *argv[]){
     delete[] p1, delete[] u1, delete[] v1;
     cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1); cudaFree(d_w1);
     cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2); cudaFree(d_w2);
-    	
+    */
     }
     // WENO5 + SSP-RK3
     else{
@@ -747,28 +763,42 @@ int main(int argc, char *argv[]){
 			// Copy result back to host
 			cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
 			
-			// YZ slice at i = i0
-			int i0 = Nx / 2;
-			size_t stride = (size_t)Ny * (size_t)Nz;
-			std::vector<float> p_X(stride);
-			#pragma omp parallel for collapse(2) schedule(static)
-			for (int k = 0; k < Nz; k++){
-    			for (int j = 0; j < Ny; j++){
-        			size_t dst_id = (size_t)j + (size_t)Ny * (size_t)k;
-        			size_t src_id = (size_t)i0 + (size_t)Nx * dst_id;
-        			p_X[dst_id] = p1[src_id];
+			// write animation slices
+			if (n % anim_step == 0){
+				
+				// YZ slice at i = i0
+    			#pragma omp parallel for collapse(2) schedule(static)
+    			for (int k = 0; k < Nz; k++){
+        			for (int j = 0; j < Ny; j++){
+            			size_t dst_id = (size_t)j + (size_t)Ny * (size_t)k;
+            			size_t src_id = (size_t)i0 + (size_t)Nx * dst_id;
+            			p_X[dst_id] = p1[src_id];
+        			}
     			}
-			}
-			
-			if (n % anim_step == 0) {
-    			fwrite(p_X.data(), sizeof(float), stride, file_pX);
-    			fflush(file_pX);
+    			fwrite(p_X.data(), sizeof(float), stride_X, file_pX);
+    			
+    			// XZ slice in j0
+    			#pragma omp parallel for collapse(2) schedule(static)
+				for (int k = 0; k < Nz; ++k) {
+    				for (int i = 0; i < Nx; ++i) {
+        				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;                  // i + Nx*k
+        				size_t src = (size_t)i + (size_t)Nx * ((size_t)j0 + (size_t)Ny * (size_t)k);
+        				p_Y[dst] = p1[src];
+    				}
+				}
+				fwrite(p_Y.data(), sizeof(float), stride_Y, file_pY);
+				
+				// XY slice in k0 (for z axis, contiguous in row-major order), faster the way below
+				size_t start = (size_t)Nx * (size_t)Ny * (size_t)k0;
+				std::memcpy(p_Z.data(), p1 + start, stride_Z * sizeof(float));
+				fwrite(p_Z.data(), sizeof(float), stride_Z, file_pZ);
+    			
+    			// increment real size of binnaries
     			pbin_size += 1;
 			}
         		
         	// write to file for single receiver
 			fwrite(&p1[flat3(rec_x, rec_y, rec_z, Nx, Ny)], sizeof(float), 1, f_rec);
-        	fflush(f_rec);  // Ensure data is written to disk
         		
 			n += 1; // update time-step
 		}
@@ -802,12 +832,17 @@ int main(int argc, char *argv[]){
     	
     }
     
+    fflush(file_pX); fflush(file_pY); fflush(file_pY);
+	fflush(f_rec);
+    
     toc = clock();
     
     elapsed_time = ((double)(toc - tic)/60.0)/CLOCKS_PER_SEC; // in minutes
     printf("\n[OK] Simulation time: %f min \n\n", elapsed_time); 
     
+    fclose(file_pX); fclose(file_pY); fclose(file_pZ);
     fclose(f_rec);
+    
     printf("[OK] Wrote to file for single receiver\n\n");
     
     FILE *header; // file for data output
@@ -829,7 +864,6 @@ int main(int argc, char *argv[]){
     cudaFree(phi_old); cudaFree(psi_1_old); cudaFree(psi_2_old);
     cudaFree(phi_nu); cudaFree(psi_1_nu); cudaFree(psi_2_nu);
     
-    fclose(file_pX);
     fclose(fp);
     
     delete[] S;
