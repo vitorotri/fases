@@ -269,9 +269,9 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	float nz = -gz/gn;
 	
     	// cell center
-    	float Cx = i * h;
-    	float Cy = j * h;
-    	float Cz = k * h;
+    	float Cx = (i + 0.5) * h;
+    	float Cy = (j + 0.5) * h;
+    	float Cz = (k + 0.5) * h;
 		
     	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid) 
     	float Wx = Cx + s * nx;
@@ -365,12 +365,12 @@ __host__ __device__ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int
 	float bz = B_PML*fmaxf(0.0f, fminf((half - k) / half, 1.0f)); // back boundary map
 	
 	// cubic (faster than powf)
-	float rx3 = rx*rx*rx, lx3 = lx*lx*lx, ly3 = ly*ly*ly, uy3 = uy*uy*uy, fz3 = fz*fz*fz, sz3 = bz*bz*bz;
+	float rx3 = rx*rx*rx, lx3 = lx*lx*lx, ly3 = ly*ly*ly, uy3 = uy*uy*uy, fz3 = fz*fz*fz, bz3 = bz*bz*bz;
 	
 	// per-axis combined strengths (L/R, U/D and F/B are mutually exclusive)
 	float sx = s_max * (rx3 + lx3);
 	float sy = s_max * (uy3 + ly3);
-	float sz = s_max * (fz3 + sz3);
+	float sz = s_max * (fz3 + bz3);
 	
 	// exact corner composition
 	//float s = 1.0f - (1.0f - sx) * (1.0f - sy);
@@ -462,7 +462,7 @@ __device__ float compute_alpha(float *dd, float *beta, float eps, int r, int SS)
 	return dd[(int)abs(rr)]/(aux*aux);
 }
 
-// compute omega[r]
+// compute omega[r] - w here is distinct from velocity in z!
 __device__ float compute_w(float *alpha, int r){
 	float sum;
 	sum = alpha[0] + alpha[1] + alpha[2];
@@ -541,8 +541,8 @@ __device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 	return V_j;
 }
 
-// WENO algorithm in y
-// idx = 0 or idx = 1 (default is 1, if 0, will compute V_j- instead of V_j+)
+// WENO algorithm in z
+// idx = 0 or idx = 1 (default is 1, if 0, will compute V_k- instead of V_k+)
 __device__ float WENO_z(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
 	
 	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
@@ -556,11 +556,11 @@ __device__ float WENO_z(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 	// 3) Compute smoothness indicators beta[r]
 	float beta[3];
 	for (int r = 0; r < 3; r++){
-		beta[r] = compute_beta_y(V, r, i, j, k, Nx, Ny, beta_rl);
+		beta[r] = compute_beta_z(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
 	
 	// 4) Define omega[r]
-	float alpha[3], w[3];
+	float alpha[3], w[3]; // != velocity in z!
 	for (int r = 0; r < 3; r++){
 		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
 	}

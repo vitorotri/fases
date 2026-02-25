@@ -603,7 +603,7 @@ int main(int argc, char *argv[]){
 	TV_v_ = TV(v0, Nx, Ny, Nz, h);
 	TV_w_ = TV(w0, Nx, Ny, Nz, h);
 	
-	TV_0 = TV_p_ + TV_u_ + TV_v_;
+	TV_0 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
 	
 	printf("\n[OK] Will now start %d iterations. Proceed?\n\n1) Yes\n2) No\n\n", Nt);
 	scanf("%d", &opt);
