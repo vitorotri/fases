@@ -70,7 +70,7 @@ int main(int argc, char *argv[]){
     
     // ---------------------- load OBJ/PLY/XYZ/etc file and create scene ---------------------
     
-    system("rm output/pressure.bin output/oid.bin output/S.bin output/header.txt");
+    system("rm output/pressureX.bin output/pressureY.bin output/pressureZ.bin output/oid.bin output/S.bin output/header.txt");
         
     char *path = argv[1];
     FILE *fp = fopen(path, "r");
@@ -609,24 +609,24 @@ int main(int argc, char *argv[]){
 	// open BIN file for writing pressure fields
 	FILE *file_pX = fopen("output/pressureX.bin", "ab");
 	if (file_pX == NULL) {
-    	printf("[!] Error opening pressureX.bin file!\n");
+    	printf("[!] Error opening output/pressureX.bin file!\n");
     	exit(1);
 	}
 	FILE *file_pY = fopen("output/pressureY.bin", "ab");
 	if (file_pY == NULL) {
-    	printf("[!] Error opening pressureY.bin file!\n");
+    	printf("[!] Error opening output/pressureY.bin file!\n");
     	exit(1);
 	}
 	FILE *file_pZ = fopen("output/pressureZ.bin", "ab");
 	if (file_pZ == NULL) {
-    	printf("[!] Error opening pressureZ.bin file!\n");
+    	printf("[!] Error opening output/pressureZ.bin file!\n");
     	exit(1);
 	}
 	
 	// open BIN file for writing pressure at single receiver
 	FILE *f_rec = fopen("output/IR.bin", "ab");
 	if (f_rec == NULL) {
-    	printf("[!] Error opening pressure.bin file!\n");
+    	printf("[!] Error opening output/IR.bin file!\n");
     	exit(1);
 	}
 	
@@ -749,6 +749,7 @@ int main(int argc, char *argv[]){
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+			cudaMemcpy(d_w0, d_w1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 				
 			// exchange ADE state arrays
 			cudaMemcpy(phi_old, phi, nB * K_m * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -807,6 +808,7 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(u1, d_u1, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(v1, d_v1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(w1, d_w1, N*sizeof(float), cudaMemcpyDeviceToHost);
 		
 		TV_p_ = TV(p1, Nx, Ny, Nz, h);
 		TV_u_ = TV(u1, Nx, Ny, Nz, h);
@@ -848,7 +850,7 @@ int main(int argc, char *argv[]){
     FILE *header; // file for data output
 	header = fopen("output/header.txt", "w");
 	if (header != NULL){
-    	fprintf(header, "%d %d %d %f %f %d %d %f %s %f %d\n", Nx, Ny, Nt, Lx, Ly, pbin_size, anim_step, dt, argv[1], h, (int)(tol/h));
+    	fprintf(header, "%d %d %d %d %f %f %f %d %d %f %s %f %d\n", Nx, Ny, Nz, Nt, Lx, Ly, Lz, pbin_size, anim_step, dt, argv[1], h, (int)(tol/h));
     	fclose(header);
     }
     
