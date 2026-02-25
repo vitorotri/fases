@@ -785,7 +785,7 @@ int main(int argc, char *argv[]){
     			#pragma omp parallel for collapse(2) schedule(static)
 				for (int k = 0; k < Nz; ++k) {
     				for (int i = 0; i < Nx; ++i) {
-        				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;                  // i + Nx*k
+        				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;
         				size_t src = (size_t)i + (size_t)Nx * ((size_t)j0 + (size_t)Ny * (size_t)k);
         				p_Y[dst] = p1[src];
     				}
