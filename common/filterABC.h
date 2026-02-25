@@ -4,7 +4,7 @@
 #include <string>
 #include <cstdlib>
 
-__host__ __device__ int flat(int i, int j, int Nx){
+__host__ __device__ size_t flat(int i, int j, int Nx){
     return (j * Nx) + i;
 }
 

@@ -3,7 +3,7 @@
 #include "parsing3D.h"
 #include "filterABC.h"
 
-__host__ __device__ inline int flat3(int i, int j, int k, int Nx, int Ny){
+__host__ __device__ inline size_t flat3(int i, int j, int k, int Nx, int Ny){
     return (k*Ny + j)*Nx + i;
 }
 

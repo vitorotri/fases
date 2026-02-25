@@ -24,8 +24,9 @@ int main(int argc, char *argv[]){
 	printf("\n[!] Is poles.txt consistent?\n");
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
-	float *p0, *u0, *v0, *w0, *p1, *u1, *v1, *w1, *p2, *u2, *v2, *w2; // host arrays
-	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2, *c_rl, *dd, *beta_rl; // device arrays
+	float *p0, *u0, *v0, *w0, *p1, *u1, *v1, *w1, *p2, *u2, *v2, *w2; // host field arrays
+	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2, // device arrays
+	float *c_rl, *dd, *beta_rl; // WENO5 arrays
 	float rho, c, Temp; // density, speed of sound, temperature
 	float Lx, Ly, Lz; // domain dimensions
 	float N_PML, S_PML, E_PML, W_PML, F_PML, B_PML; // Perfectly Matched Layer activation keys
@@ -148,7 +149,7 @@ int main(int argc, char *argv[]){
     
     // --------------------------------------------------------------------------------------------------
     
-    int N = Nx*Ny*Nz; // number of grid cells
+    size_t N = Nx*Ny*Nz; // number of grid cells
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
     
@@ -319,7 +320,7 @@ int main(int argc, char *argv[]){
 		return -1;
 	}
 	
-	int Nt = (int) (t_max/dt) + 1; // number of iterations
+	size_t Nt = (size_t) (t_max/dt) + 1; // number of iterations
 
     // Allocate device memory
     if (cudaMalloc(&d_p0, N*sizeof(float)) != cudaSuccess
@@ -552,10 +553,10 @@ int main(int argc, char *argv[]){
 	printf("\n[OK] Memory to allocate in device is %f GB\n", dm/(1000000000));
 	
 	//printf("float is %zu", sizeof(float));
-	int anim_step = (int)(0.008*Nt);
-	int frames = Nt/anim_step; // make denominator smaller for more frames
+	size_t anim_step = (int)(0.008*Nt);
+	size_t frames = Nt/anim_step; // make denominator smaller for more frames
 	printf("\n[OK] anim_step = %d\n\n",anim_step);
-	float anim_s = (float)frames*N*sizeof(float); // animation size in bytess
+	size_t anim_s = frames*N*sizeof(float); // animation size in bytess
 	
 	if ((anim_s/1000000000.0) > 5.2){
 		printf("\n[!] Memory to animate is %f, larger than 5.2 GB, exiting...\n\n\n",anim_s/1000000000.0);
@@ -591,10 +592,20 @@ int main(int argc, char *argv[]){
 	scanf("%d", &opt);
 	if (opt != 1) return -1;
 	
-	// open BIN file for writing pressure field
-	FILE *fptr = fopen("output/pressure.bin", "ab");
-	if (fptr == NULL) {
-    	printf("[!] Error opening pressure.bin file!\n");
+	// open BIN file for writing pressure fields
+	FILE *file_pX = fopen("output/pressureX.bin", "ab");
+	if (file_pX == NULL) {
+    	printf("[!] Error opening pressureX.bin file!\n");
+    	exit(1);
+	}
+	FILE *file_pY = fopen("output/pressureY.bin", "ab");
+	if (file_pY == NULL) {
+    	printf("[!] Error opening pressureY.bin file!\n");
+    	exit(1);
+	}
+	FILE *file_pZ = fopen("output/pressureZ.bin", "ab");
+	if (file_pZ == NULL) {
+    	printf("[!] Error opening pressureZ.bin file!\n");
     	exit(1);
 	}
 	
@@ -607,7 +618,7 @@ int main(int argc, char *argv[]){
 	
 	//Nt = 100; // for testing
 	
-	int pbin_size = 0; // for plotting animation correctly
+	size_t pbin_size = 0; // for plotting animation correctly
 	
 	/*
 	 *
@@ -643,9 +654,11 @@ int main(int argc, char *argv[]){
 			
 		// write to file
 		if (n % anim_step == 0){
-			fwrite(p1, sizeof(float), N, fptr);
-        	fflush(fptr);  // Ensure data is written to disk
+			fwrite(p1, sizeof(float), N, file_pX);
+        	fflush(file_pX);  // Ensure data is written to disk
+        	
         	pbin_size += 1;
+        	
         }
 		
 		n += 1; // update time-step
@@ -733,13 +746,25 @@ int main(int argc, char *argv[]){
 		
 			// Copy result back to host
 			cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
-				
-			// write to file for animation (full pressure of size Nx * Nx * pbin)
-			if (n % anim_step == 0){
-				fwrite(p1, sizeof(float), N, fptr);
-        		fflush(fptr);  // Ensure data is written to disk
-        		pbin_size += 1;
-        	}
+			
+			// YZ slice at i = i0
+			int i0 = Nx / 2;
+			size_t stride = (size_t)Ny * (size_t)Nz;
+			std::vector<float> p_X(stride);
+			#pragma omp parallel for collapse(2) schedule(static)
+			for (int k = 0; k < Nz; k++){
+    			for (int j = 0; j < Ny; j++){
+        			size_t dst_id = (size_t)j + (size_t)Ny * (size_t)k;
+        			size_t src_id = (size_t)i0 + (size_t)Nx * dst_id;
+        			p_X[dst_id] = p1[src_id];
+    			}
+			}
+			
+			if (n % anim_step == 0) {
+    			fwrite(p_X.data(), sizeof(float), stride, file_pX);
+    			fflush(file_pX);
+    			pbin_size += 1;
+			}
         		
         	// write to file for single receiver
 			fwrite(&p1[flat3(rec_x, rec_y, rec_z, Nx, Ny)], sizeof(float), 1, f_rec);
@@ -804,7 +829,7 @@ int main(int argc, char *argv[]){
     cudaFree(phi_old); cudaFree(psi_1_old); cudaFree(psi_2_old);
     cudaFree(phi_nu); cudaFree(psi_1_nu); cudaFree(psi_2_nu);
     
-    fclose(fptr);
+    fclose(file_pX);
     fclose(fp);
     
     delete[] S;
