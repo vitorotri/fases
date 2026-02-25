@@ -12,7 +12,7 @@
 #include "functions3D.cuh"
 
 int main(int argc, char *argv[]){
-	if (argc < 4) {
+	if (argc < 5) {
         printf("Usage: %s <scene> <config> <src> <rec>\n", argv[0]);
         return 1;
     }
@@ -489,7 +489,7 @@ int main(int argc, char *argv[]){
 	p1 = new float[N](); // sound pressure
     u1 = new float[N](); // x component of particle velocity 
     v1 = new float[N](); // y component of particle velocity
-    w1 = new float[n](); // z component of particle velocity
+    w1 = new float[N](); // z component of particle velocity
 	
 	cudaMalloc(&d_p1, N*sizeof(float));
 	cudaMalloc(&d_u1, N*sizeof(float));
@@ -822,9 +822,9 @@ int main(int argc, char *argv[]){
 		is_TVD(TV_0, TV_1);
 	
     	// Free host memory
-    	delete[] p0, delete[] u0, delete[] v0; delete[] w0;
-    	delete[] p1, delete[] u1, delete[] v1; delete[] w1;
-    	delete[] p2, delete[] u2, delete[] v2; delete[] w2;
+    	delete[] p0; delete[] u0; delete[] v0; delete[] w0;
+    	delete[] p1; delete[] u1; delete[] v1; delete[] w1;
+    	delete[] p2; delete[] u2; delete[] v2; delete[] w2;
     	
     	// Free device memory
     	cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0); cudaFree(d_w0);
@@ -834,7 +834,7 @@ int main(int argc, char *argv[]){
     	
     }
     
-    fflush(file_pX); fflush(file_pY); fflush(file_pY);
+    fflush(file_pX); fflush(file_pY); fflush(file_pZ);
 	fflush(f_rec);
     
     toc = clock();
@@ -844,6 +844,7 @@ int main(int argc, char *argv[]){
     
     fclose(file_pX); fclose(file_pY); fclose(file_pZ);
     fclose(f_rec);
+    fclose(fp);
     
     printf("[OK] Wrote to file for single receiver\n\n");
     
@@ -866,10 +867,12 @@ int main(int argc, char *argv[]){
     cudaFree(phi_old); cudaFree(psi_1_old); cudaFree(psi_2_old);
     cudaFree(phi_nu); cudaFree(psi_1_nu); cudaFree(psi_2_nu);
     
-    fclose(fp);
+    cudaFree(beta_rl);
+    cudaFree(d_bmap);
     
-    delete[] S;
-    delete[] oid;
+    free(S);
+    free(oid);
+    free(h_bmap);
     
     cudaFree(d_S);
     cudaFree(d_oid);
