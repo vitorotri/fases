@@ -324,15 +324,19 @@ inline static void compute_sdf_cpu(const Mesh3D& mesh, const Grid3D& grid, std::
                 int hits = 0;
 
                 for(const auto& t : mesh.tris){
-                    const vec3 a = mesh.vertex_transformed(t.v0);
-                    const vec3 b = mesh.vertex_transformed(t.v1);
-                    const vec3 c = mesh.vertex_transformed(t.v2);
 
-                    mind2 = std::min(mind2, point_triangle_dist2(p,a,b,c));
-
-                    float tt;
-                    if(ray_triangle_intersect(p, rd, a,b,c, tmin, tt)) hits++;
-                }
+    				// Skip BoundingBox triangles (group 0)
+    				if(t.group_id == 0) continue;
+				
+    				const vec3 a = mesh.vertex_transformed(t.v0);
+    				const vec3 b = mesh.vertex_transformed(t.v1);
+    				const vec3 c = mesh.vertex_transformed(t.v2);
+				
+    				mind2 = std::min(mind2, point_triangle_dist2(p,a,b,c));
+				
+    				float tt;
+    				if(ray_triangle_intersect(p, rd, a,b,c, tmin, tt)) hits++;
+				}
 
                 float sd = std::sqrt(mind2);
                 if(hits & 1) sd = -sd;
@@ -394,7 +398,7 @@ __global__ void sdf3d_kernel_naive(float* __restrict__ sdf, Grid3D grid, dMesh3D
     }
 
     float sd = sqrtf(mind2);
-    if(hits & 1) sd = -sd;
+    if(!(hits & 1)) sd = -sd;
     sdf[(size_t)k*Ny*Nx + (size_t)j*Nx + (size_t)i] = sd;
 }
 

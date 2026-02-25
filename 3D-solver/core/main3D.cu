@@ -147,9 +147,12 @@ int main(int argc, char *argv[]){
     }
     
     
-    // --------------------------------------------------------------------------------------------------
+    // ----------------------------- Print scene parameters ---------------------------------------
     
-    size_t N = Nx*Ny*Nz; // number of grid cells
+    size_t N = Nx * Ny * Nz; // number of grid cells
+    
+    printf("\n[OK] Nx = %zu  Ny = %zu  Nz %zu\n", Nx, Ny, Nz);
+    printf("\n[Ok] Lx = %f  Ly = %f  Lz = %f\n", Lx, Ly, Lz);
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
     
