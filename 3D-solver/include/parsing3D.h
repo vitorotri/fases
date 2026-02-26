@@ -326,7 +326,7 @@ inline static void compute_sdf_cpu(const Mesh3D& mesh, const Grid3D& grid, std::
                 for(const auto& t : mesh.tris){
                 
                 	// Skip BoundingBox triangles (group 0)
-    				if(t.group_id == 0) continue;
+    				//if(t.group_id == 0) continue;
 
                     const vec3 a = mesh.vertex_transformed(t.v0);
                     const vec3 b = mesh.vertex_transformed(t.v1);
@@ -466,17 +466,27 @@ inline static void free_mesh_device(vec3*& d_vertices, Tri*& d_tris){
 static constexpr uint8_t OID_NONE_U8 = 0xFF;
 using Scene3D = Mesh3D;
 
-inline static bool parse_obj_3d(const std::string& path, Scene3D& Sc){
+inline static bool parse_obj_3d(const std::string& path, Scene3D& Sc, float h){
     std::string err;
     if(!load_obj_mesh3d(path, Sc, &err)){
         std::fprintf(stderr, "[OBJ3D] %s\n", err.c_str());
         return false;
     }
+    // Force scene min corner to (0,0,0) in transformed space
+    //Sc.shift = v3(-Sc.bmin.x, -Sc.bmin.y, -Sc.bmin.z);
+    // Force scene min corner to (0,0,0) in transformed space, padded
+    const int ng = 3;
+	const float pad = ng * h;
+	// 1) shift so transformed bbox min becomes 0
+	// 2) then inset the whole scene by +3h
+	Sc.shift = v3(-Sc.bmin.x + pad, -Sc.bmin.y + pad, -Sc.bmin.z + pad);
+	
     return true;
 }
-inline static int parse_obj3d(const char* path, Scene3D* sc){
+
+inline static int parse_obj3d(const char* path, Scene3D* sc, float h){
     if(!path || !sc) return 0;
-    return parse_obj_3d(std::string(path), *sc) ? 1 : 0;
+    return parse_obj_3d(std::string(path), *sc, h) ? 1 : 0;
 }
 
 inline static void mesh_bbox_transformed(const Mesh3D& mesh, vec3& out_min, vec3& out_max){
@@ -523,16 +533,23 @@ inline static void build_sdf(Scene3D* sc, float h,
 {
     if(!sc||!Nx||!Ny||!Nz||!Lx||!Ly||!Lz||!S) return;
 
-    vec3 bmin,bmax;
-    mesh_bbox_transformed(*sc, bmin, bmax);
+    const int ng = 3;
+	const float pad = ng * h;
 
-    *Lx = bmax.x - bmin.x;
-    *Ly = bmax.y - bmin.y;
-    *Lz = bmax.z - bmin.z;
+	vec3 bmin, bmax;
+	mesh_bbox_transformed(*sc, bmin, bmax);
 
-    *Nx = (int)std::ceil((*Lx)/h) + 1;
-    *Ny = (int)std::ceil((*Ly)/h) + 1;
-    *Nz = (int)std::ceil((*Lz)/h) + 1;
+	// Domain is [0, (object_max + 3h)]
+	vec3 dom_min = v3(0,0,0);
+	vec3 dom_max = v3(bmax.x + pad, bmax.y + pad, bmax.z + pad);
+	
+	*Lx = dom_max.x - dom_min.x;   // = size_x + 6h
+	*Ly = dom_max.y - dom_min.y;
+	*Lz = dom_max.z - dom_min.z;
+	
+	*Nx = (int)std::ceil(*Lx/h) + 1;  // cell centers at 0.5h etc.
+	*Ny = (int)std::ceil(*Ly/h) + 1;
+	*Nz = (int)std::ceil(*Lz/h) + 1;
 
     // Always compute CPU first
     (void)build_sdf_cpu(*sc, *Nx,*Ny,*Nz, h, S);
@@ -558,7 +575,7 @@ inline static void build_sdf(Scene3D* sc, float h,
     Grid3D grid;
     grid.Nx=*Nx; grid.Ny=*Ny; grid.Nz=*Nz;
     grid.h=v3(h,h,h);
-    grid.origin=bmin;
+    grid.origin=dom_min;
 
     dim3 TP(8,8,8);
     dim3 BP((grid.Nx + TP.x - 1)/TP.x,

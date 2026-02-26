@@ -81,9 +81,9 @@ float cubic_interp_1d(float fm1, float f0, float f1, float f2, float s){
 __device__ __forceinline__
 float tricubic_interp(const float *f, int Nx, int Ny, float Dx, float Dy, float Dz, float h){
     // Convert physical position to grid coordinates
-    float gx = Dx / h;
-    float gy = Dy / h;
-    float gz = Dz / h;
+    float gx = Dx / h - 0.5f;
+    float gy = Dy / h - 0.5f;
+    float gz = Dz / h - 0.5f;
 
     int i = (int)floorf(gx);
     int j = (int)floorf(gy);
@@ -269,9 +269,9 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	float nz = -gz/gn;
 	
     	// cell center
-    	float Cx = (i + 0.5) * h;
-    	float Cy = (j + 0.5) * h;
-    	float Cz = (k + 0.5) * h;
+    	float Cx = (i + 0.5f) * h;
+    	float Cy = (j + 0.5f) * h;
+    	float Cz = (k + 0.5f) * h;
 		
     	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid) 
     	float Wx = Cx + s * nx;
@@ -602,7 +602,7 @@ __device__ void compute_Vs_z(float *Q_V, float *V, float *dd, float *c_rl, float
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML, int i_src, int j_src, int k_src, float *p_time, int n){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -676,6 +676,8 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		v1[Cijk] = v0[Cijk] + dt*(-G_vP + G_vM)/h;
 		w1[Cijk] = w0[Cijk] + dt*(-H_wP + H_wM)/h;
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
+		
+		//if (i == i_src && j == j_src && k == k_src) p1[Cijk] += p_time[n];
 	
 		// PML BCs
 		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
@@ -687,7 +689,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML, int i_src, int j_src, int k_src, float *p_time, int n){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -762,6 +764,8 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		w2[Cijk] = 0.75f*w0[Cijk] + 0.25f*(w1[Cijk] + dt*((-H_wP + H_wM)/h));
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
 
+		//if (i == i_src && j == j_src && k == k_src) p2[Cijk] += p_time[n];
+
 		// PML BCs
 		sPML(u2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(v2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
@@ -772,7 +776,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML, int i_src, int j_src, int k_src, float *p_time, int n){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -848,7 +852,8 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		w1[Cijk] = (w0[Cijk] + 2.0f*(w2[Cijk] + dt*((-H_wP + H_wM)/h)))/3.0f;
 		p1[Cijk] = (p0[Cijk] + 2.0f*(p2[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h)))/3.0f;
 
-		
+		//if (i == i_src && j == j_src && k == k_src) p1[Cijk] += p_time[n];
+
 		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(w1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);

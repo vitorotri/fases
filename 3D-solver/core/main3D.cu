@@ -102,7 +102,7 @@ int main(int argc, char *argv[]){
    	if (ends_with_dotobj(path)){
     	Scene3D sc;
 
-		if(!parse_obj3d(path, &sc)) return 1;
+		if(!parse_obj3d(path, &sc, h)) return 1;
 		
 		build_sdf(&sc, h, &Nx, &Ny, &Nz, &Lx, &Ly, &Lz, &S);
 		
@@ -291,7 +291,7 @@ int main(int argc, char *argv[]){
 	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
 	// c = sqrt(K/rho) in case of liquids
     
-    printf("\nc = %.2f m/s\n",c);
+    printf("\n	c = %.2f m/s\n",c);
     
     // ---------------------------------------------------------------------------------------------------------
 
@@ -303,7 +303,7 @@ int main(int argc, char *argv[]){
 
 	float C_CFL = conf_arr[4]; // Courant number: pick values < 0.5 (not equal to)
 	dt = C_CFL*h/c; // Courant-Friedrichs-Lewy condition
-	printf("\ndt = %.9f\n", dt);
+	printf("\n	dt = %.9f\n", dt);
 	
 	// Check if Nyquist-Shannon Theorem is satisfied
 	float fs = 1/dt; // sampling frequency
@@ -334,153 +334,7 @@ int main(int argc, char *argv[]){
     	return -1;
 	}
 	
-	
-	// ----------------------- Parse sources and receivers from argv[3] and argv[4] --------------------
-    
-    // parse sources
-    
-    file.open(argv[3]);
-	if (!file.is_open()){
-    	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
-    	return -1;
-	}
-	while (std::getline(file, line)) {
-    	if (line.empty() || line[0] == '#') continue;
-    	float val_x, val_y, val_z, val_s;
-    	std::istringstream iss(line);
-    	if (iss >> val_x >> val_y >> val_z >> val_s) {
-        	int i_src = int(val_x / h);
-        	int j_src = int(val_y / h);
-        	int k_src = int(val_z / h);
-        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
-        		// point source
-            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
-            	// plane wave
-            	/*
-            	for (int j = 0; j < Ny; j++){
-            		p0[flat(i_src, j, Nx)] = 0.1f*val_s;
-            		u0[flat(i_src, j, Nx)] = val_s;
-            	}
-            	*/
-        	}
-    	}
-	}
-	file.close();
-	file.clear();
-    
-    // parse single receiver (for now), use array later
-    
-    int rec_x = Nx/2, rec_y = Ny/2, rec_z = Nz/2; // safe default
-    file.open(argv[4]);
-	if (!file.is_open()){
-    	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
-    	return -1;
-	}
-	while (std::getline(file, line)) {
-    	if (line.empty() || line[0] == '#') continue;
-    	float val_x, val_y, val_z;
-    	std::istringstream iss(line);
-    	if (iss >> val_x >> val_y >> val_z) {
-        	int i_rec = int(val_x / h);
-        	int j_rec = int(val_y / h);
-        	int k_rec = int(val_z / h);
-        	if (i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny && k_rec >= 0 && k_rec < Nz){
-            	rec_x = i_rec;
-            	rec_y = j_rec;
-            	rec_z = k_rec;
-        	}
-    	}
-	}
-	file.close();
-	file.clear();
-	
-	
-	// --------------------------- Fields initialization (sources and receiver) ----------------------
-	
-	
-	int opt;
-	/*
-	printf("\nChoose pulse type:\n\n 1) Delta\n 2) Gaussian\n 3) Top-hat\n\n");
-	scanf("%d",&opt);
-	
-	// for Lx = 4.07, Ly = 12.03 [m]
-	int src_x = (int)(0.5f*Nx); int src_y = (int)(0.5f*Ny); // single source ut 0.5*Nx,0.2*Ny for numerical TST reflect
-	int rec_x = (int)(0.75f*Nx); int rec_y = (int)(0.5f*Ny); // sound receiver at normal incidence (transmission)
-	
-	float amp = 0.001f; // amplitude
-	if (opt == 1){
-		// Delta pulse
-		//p0[flat(src_x, src_y, Nx)] = amp; // [Pa]
-		//p0[flat((int)(0.75f*Nx), src_y, Nx)] = amp; // 2nd source
-		
-		// Directional source
-		//p0[flat(src_x+1, src_y+1, Nx)] = amp; // without pressure scheme seems not TVD
-		//u0[flat(src_x+1, src_y, Nx)] = 0.04;
-		//v0[flat(src_x, src_y+1, Nx)] = 0.04;
-		
-		// Delta distribution
-		//delta(p0, 1.0/2.0, src_x, src_y, Nx, Ny, 390.0);
-		
-		
-		// Plane wave
-		//int src_x_0 = (int)(0.25f*Nx);
-		//int src_x_1 = (int)(0.08*Nx);
-		//for (int j = (int)(0.05*Ny); j < Ny-(int)(0.05*Ny); j++){ // depends on resolution
-		for (int j = int(0.05f*Ny); j < int(0.95f*Ny); j++){
-			//for (int i = src_x_0; i <= src_x_1; i++){
-				u0[flat(src_x,j,Nx)] = amp;
-				p0[flat(src_x,j,Nx)] = 0.1*amp;
-			//}
-		}
-		
-		
-	}
-	else if (opt == 2){
-		// Gaussian profile
-		//amp = 1.0; // 125
-		
- 		float sigma = 1.5; // 2
-		float r2;
-		for (int i = 0; i < Nx; i++){
-			for (int j = 0; j < Ny; j++){
-            	r2 = (i - src_x)*(i - src_x) + (j - src_y)*(j - src_y);
-				p0[flat(i,j,Nx)] = amp*exp(-r2 / (2*sigma*sigma));
-			}
-		}
-		
-	}
-	else {
-		// Top-hat
-		int ratio = 200;
-		int ii, jj;
-		for (int i = 0; i < Nx; i++){
-			for (int j = 0; j < Ny; j++){
-				ii = i - src_x;
-				jj = j - src_y;
-				if (sqrt(ii*ii + jj*jj) <= max(Nx,Ny)/ratio){
-					p0[flat(i,j,Nx)] = 150.0;
-				}
-			}
-		}
-	}
-	*/
-	
-	// ----------------------- Define kernel parameters and copy sources to device --------------------------
-	
-	// Kernel launch parameters
-	dim3 TP(8,8,8); // multiples of 32, max is 1024 (TP.x * TP.y * TP.z <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
-	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z); // BLOCKS Per Grid
-	
-	// Copy initial data to device
-    if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_w0, w0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
-    		printf("[!] CUDA error allocating device memory\n");
-    	return -1;
-    }
-	
-	// ---------------------------------- kernel options --------------------------------
+	// ---------------------------------- kernel options and extra arrays --------------------------------
 	
 	int kern;
 	float dm;
@@ -541,11 +395,108 @@ int main(int argc, char *argv[]){
 			
 		dd[0] = 3.0/10.0; dd[1] = 3.0/5.0; dd[2] = 1.0/10.0;
 		
-		//dm = (12*N + 3*Ny + 12+9+3)*sizeof(float); // if using atmospheric gradients
-		dm = (12*N + 12+9+3)*sizeof(float);
+		dm = (12*N + 12+9+3 + nMat*(2*K_m + 4*L_m) + nB*(3*K_m + 6*L_m))*sizeof(float);
+		dm += N*(sizeof(uint8_t) + sizeof(int)); // oid and bmap
 		
 		cudaDeviceSynchronize();
 	}
+	
+	// ----------------------- Parse sources and receivers from argv[3] and argv[4] --------------------
+    
+    // parse source(s)
+    
+    float *p_time = new float[Nt]();
+    float *d_p_time;
+    int i_src, j_src, k_src;
+    
+    file.open(argv[3]);
+	if (!file.is_open()){
+    	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
+    	return -1;
+	}
+	while (std::getline(file, line)) {
+    	if (line.empty() || line[0] == '#') continue;
+    	float val_x, val_y, val_z, val_s;
+    	std::istringstream iss(line);
+    	if (iss >> val_x >> val_y >> val_z >> val_s){
+        	i_src = int(val_x / h);
+        	j_src = int(val_y / h);
+        	k_src = int(val_z / h);
+        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
+        		// point source
+        		//p_time[0] = val_s;
+        		//p_time[1] = val_s;
+            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	// plane wave
+            	/*
+            	for (int j = 0; j < Ny; j++){
+            		p0[flat(i_src, j, Nx)] = 0.1f*val_s;
+            		u0[flat(i_src, j, Nx)] = val_s;
+            	}
+            	*/
+        	}
+    	}
+	}
+	file.close();
+	file.clear();
+    
+    // parse receiver(s)
+    
+    int i_rec, j_rec, k_rec;
+    i_rec = Nx/2; j_rec = Ny/2; k_rec = Nz/2; // safe default
+    
+    file.open(argv[4]);
+	if (!file.is_open()){
+    	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
+    	return -1;
+	}
+	while (std::getline(file, line)) {
+    	if (line.empty() || line[0] == '#') continue;
+    	float val_x, val_y, val_z;
+    	std::istringstream iss(line);
+    	if (iss >> val_x >> val_y >> val_z) {
+        	i_rec = int(val_x / h);
+        	j_rec = int(val_y / h);
+        	k_rec = int(val_z / h);
+        	if (!(i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny && k_rec >= 0 && k_rec < Nz)){
+        		printf("\n[!] Receiver(s) outside domain, will now stop...\n");
+            	return -1;
+        	}
+    	}
+	}
+	file.close();
+	file.clear();
+	
+	
+	// ----------------------- Define kernel parameters and copy sources to device --------------------------
+	
+	int opt;
+	
+	// Kernel launch parameters
+	dim3 TP(8,8,8); // multiples of 32, max is 1024 (TP.x * TP.y * TP.z <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
+	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z); // BLOCKS Per Grid
+	
+	// Copy initial data to device
+    if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_w0, w0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
+    		printf("[!] CUDA error allocating device memory\n");
+    	return -1;
+    }
+    /*
+    // Copy initial data to device
+    if (cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_v1, v1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+    	|| cudaMemcpy(d_w1, w1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
+    		printf("[!] CUDA error allocating device memory\n");
+    	return -1;
+    }
+    */
+    cudaMalloc(&d_p_time, Nt*sizeof(float));
+    cudaMemcpy(d_p_time, p_time, Nt*sizeof(float), cudaMemcpyHostToDevice);
 	
 	// --------------------------------- Memory assessment ---------------------------------
 	
@@ -728,33 +679,31 @@ int main(int argc, char *argv[]){
 				cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
 			}
 			*/
-			/*
-			// Copy pressure to device (for oscillating source)
-			p0[flat(src_x, src_y, Nx)] += p_osc[n]; // if += then it is a soft source
-			cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice);
-			*/
 				
 			// Launch WENO3 kernel + SSP-RK3
 				
 			// (0)
-			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);	
+			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML, i_src, j_src, k_src, d_p_time, n);
+			
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 				
 			// (1)
-			kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);	
+			kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML, i_src, j_src, k_src, d_p_time, n);
+
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 				
 			// (2)
-			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML, i_src, j_src, k_src, d_p_time, n);
+			
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 
-			// exchange state arrays
+			// exchange state arrays (2 are used for mid-step in SSP)
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(d_w0, d_w1, N*sizeof(float), cudaMemcpyDeviceToDevice);
 				
-			// exchange ADE state arrays
+			// exchange ADE state arrays (nu are used for mid-step SSP)
 			cudaMemcpy(phi_old, phi, nB * K_m * sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(psi_1_old, psi_1, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
 			cudaMemcpy(psi_2_old, psi_2, nB * L_m * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -765,7 +714,7 @@ int main(int argc, char *argv[]){
 			print_progress(n, Nt, 50);
 		
 			// Copy result back to host
-			cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+			cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost); // for writing impulse response
 			
 			// write animation slices
 			if (n % anim_step == 0){
@@ -802,7 +751,7 @@ int main(int argc, char *argv[]){
 			}
         		
         	// write to file for single receiver
-			fwrite(&p1[flat3(rec_x, rec_y, rec_z, Nx, Ny)], sizeof(float), 1, f_rec);
+			fwrite(&p1[flat3(i_rec, j_rec, k_rec, Nx, Ny)], sizeof(float), 1, f_rec);
         		
 			n += 1; // update time-step
 		}
