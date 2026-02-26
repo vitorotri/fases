@@ -46,9 +46,9 @@ int main(int argc, char *argv[]){
     	if (hash_pos != std::string::npos) {
         	line.erase(hash_pos);  // Everything after # is gone
     	}
-    	float f;
-    	std::istringstream(line) >> f;
-    	conf_arr.push_back(f);
+    	std::istringstream iss(line);
+		float f;
+		if (iss >> f) conf_arr.push_back(f);
 	}
 	file.close();
 	file.clear();
@@ -147,11 +147,18 @@ int main(int argc, char *argv[]){
     }
     
     
+    
+    /*
+    // force for test with BCs without parsing (no need to comment above)
+    Lx = 3.0; Ly = 4.0; Lz = 2.8;
+    Nx = (int)(Lx/h); Ny = (int)(Ly/h); Nz = (int)(Lz/h);
+    */
+    
     // ----------------------------- Print scene parameters ---------------------------------------
     
     size_t N = Nx * Ny * Nz; // number of grid cells
     
-    printf("\n[OK] Nx = %zu  Ny = %zu  Nz %zu\n", Nx, Ny, Nz);
+    printf("\n[OK] Nx = %d  Ny = %d  Nz = %d\n", Nx, Ny, Nz);
     printf("\n[Ok] Lx = %f  Ly = %f  Lz = %f\n", Lx, Ly, Lz);
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
@@ -333,6 +340,10 @@ int main(int argc, char *argv[]){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
 	}
+	cudaMemset(d_p0, 0.0, N * sizeof(float));
+	cudaMemset(d_u0, 0.0, N * sizeof(float));
+	cudaMemset(d_v0, 0.0, N * sizeof(float));
+	cudaMemset(d_w0, 0.0, N * sizeof(float));
 	
 	// ---------------------------------- kernel options and extra arrays --------------------------------
 	
@@ -353,17 +364,16 @@ int main(int argc, char *argv[]){
 	cudaMalloc(&d_v1, N*sizeof(float));
 	cudaMalloc(&d_w1, N*sizeof(float));
 		
-	cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_v1, v1, N*sizeof(float), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_w1, w1, N*sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemset(d_p1, 0.0, N * sizeof(float));
+	cudaMemset(d_u1, 0.0, N * sizeof(float));
+	cudaMemset(d_v1, 0.0, N * sizeof(float));
+	cudaMemset(d_w1, 0.0, N * sizeof(float));
 	
 	dm = 8*N*sizeof(float);
 	
 	// WENO5 option
 	
 	if (kern == 2){
-	
 		
     	p2 = new float[N](); // sound pressure
     	u2 = new float[N](); // x component of particle velocity 
@@ -375,10 +385,10 @@ int main(int argc, char *argv[]){
 		cudaMalloc(&d_v2, N*sizeof(float));
 		cudaMalloc(&d_w2, N*sizeof(float));
 		
-		cudaMemcpy(d_p2, p2, N*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMemcpy(d_u2, u2, N*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMemcpy(d_v2, v2, N*sizeof(float), cudaMemcpyHostToDevice);
-		cudaMemcpy(d_w2, w2, N*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMemset(d_p2, 0.0, N * sizeof(float));
+		cudaMemset(d_u2, 0.0, N * sizeof(float));
+		cudaMemset(d_v2, 0.0, N * sizeof(float));
+		cudaMemset(d_w2, 0.0, N * sizeof(float));
 			
 		cudaMallocManaged(&c_rl, 12*sizeof(float)); // coefficients
 		cudaMallocManaged(&beta_rl, 9*sizeof(float)); // coefficients for second term of beta_r
@@ -419,14 +429,14 @@ int main(int argc, char *argv[]){
     	float val_x, val_y, val_z, val_s;
     	std::istringstream iss(line);
     	if (iss >> val_x >> val_y >> val_z >> val_s){
-        	i_src = int(val_x / h);
-        	j_src = int(val_y / h);
-        	k_src = int(val_z / h);
+        	i_src = (int)(val_x / h);
+        	j_src = (int)(val_y / h);
+        	k_src = (int)(val_z / h);
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
         		// point source
-        		//p_time[0] = val_s;
+        		p_time[0] = val_s;
         		//p_time[1] = val_s;
-            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	// plane wave
             	/*
@@ -448,17 +458,18 @@ int main(int argc, char *argv[]){
     
     file.open(argv[4]);
 	if (!file.is_open()){
-    	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
+    	std::cerr << "[!] Failed to open: " << argv[4] << "\n";
     	return -1;
 	}
 	while (std::getline(file, line)) {
     	if (line.empty() || line[0] == '#') continue;
     	float val_x, val_y, val_z;
     	std::istringstream iss(line);
-    	if (iss >> val_x >> val_y >> val_z) {
-        	i_rec = int(val_x / h);
-        	j_rec = int(val_y / h);
-        	k_rec = int(val_z / h);
+    	if (iss >> val_x >> val_y >> val_z){
+    		printf("\nrec values ---> %f %f %f\n", val_x, val_y, val_z);
+        	i_rec = (int)(val_x / h);
+        	j_rec = (int)(val_y / h);
+        	k_rec = (int)(val_z / h);
         	if (!(i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny && k_rec >= 0 && k_rec < Nz)){
         		printf("\n[!] Receiver(s) outside domain, will now stop...\n");
             	return -1;
@@ -477,6 +488,7 @@ int main(int argc, char *argv[]){
 	dim3 TP(8,8,8); // multiples of 32, max is 1024 (TP.x * TP.y * TP.z <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z); // BLOCKS Per Grid
 	
+	/*
 	// Copy initial data to device
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -485,16 +497,7 @@ int main(int argc, char *argv[]){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
-    /*
-    // Copy initial data to device
-    if (cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_v1, v1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_w1, w1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
-    		printf("[!] CUDA error allocating device memory\n");
-    	return -1;
-    }
-    */
+	*/
     cudaMalloc(&d_p_time, Nt*sizeof(float));
     cudaMemcpy(d_p_time, p_time, Nt*sizeof(float), cudaMemcpyHostToDevice);
 	
@@ -685,23 +688,23 @@ int main(int argc, char *argv[]){
 			// (0)
 			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML, i_src, j_src, k_src, d_p_time, n);
 			
-			//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
-			kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
+			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 			
 			// (1)
 			kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML, i_src, j_src, k_src, d_p_time, n);
 
-			//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
-			kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p2, d_u2, d_v2, d_w2);
+			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p2, d_u2, d_v2, d_w2);
 			
 			// (2)
 			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML, i_src, j_src, k_src, d_p_time, n);
 			
-			//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 			
-			kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
+			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 
 			// exchange state arrays (2 are used for mid-step in SSP)
 			cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);

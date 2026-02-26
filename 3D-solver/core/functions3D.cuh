@@ -54,7 +54,7 @@ __host__ __device__ float TV(float *Q, int Nx, int Ny, int Nz, float h){
 			}
 		}
 	}
-	return h*retval;
+	return h*h*retval;
 }
 
 // check if scheme is TVD
@@ -613,7 +613,7 @@ __global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, flo
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
 	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
    
-   	float R = 1.0;
+   	float R = 0.1;
    
     if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
     	
@@ -655,7 +655,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
 		// restrict
-		//if (S[Cijk] < h) return;
+		if (S[Cijk] < h) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -719,7 +719,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		w1[Cijk] = w0[Cijk] + dt*(-H_wP + H_wM)/h;
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
 		
-		//if (i == i_src && j == j_src && k == k_src) p1[Cijk] += p_time[n];
+		if (i == i_src && j == j_src && k == k_src && (n == 0 || n == 1)) p1[Cijk] = p_time[n];
 	
 		// PML BCs
 		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
@@ -742,7 +742,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
 		// restrict
-		//if (S[Cijk] < h) return;
+		if (S[Cijk] < h) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -806,8 +806,6 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		w2[Cijk] = 0.75f*w0[Cijk] + 0.25f*(w1[Cijk] + dt*((-H_wP + H_wM)/h));
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
 
-		//if (i == i_src && j == j_src && k == k_src) p2[Cijk] += p_time[n];
-
 		// PML BCs
 		sPML(u2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(v2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
@@ -829,7 +827,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
 		// restrict
-		//if (S[Cijk] < h) return;
+		if (S[Cijk] < h) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -893,8 +891,6 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		v1[Cijk] = (v0[Cijk] + 2.0f*(v2[Cijk] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		w1[Cijk] = (w0[Cijk] + 2.0f*(w2[Cijk] + dt*((-H_wP + H_wM)/h)))/3.0f;
 		p1[Cijk] = (p0[Cijk] + 2.0f*(p2[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h)))/3.0f;
-
-		//if (i == i_src && j == j_src && k == k_src) p1[Cijk] += p_time[n];
 
 		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);

@@ -180,7 +180,7 @@ inline static bool load_obj_mesh3d(const std::string& path, Mesh3D& mesh, std::s
 			if(current_group < 0){
     			// Faces without any preceding 'g'/'o' go into an auto group (rare but legal OBJ).
     			mesh.group_names.push_back("unnamed");
-    			current_group = 0;
+    			current_group = (int)mesh.group_names.size() - 1;
 			}
 
             // Triangulate fan (KEEP THIS)
@@ -511,13 +511,15 @@ inline static int build_sdf_cpu(const Scene3D& Sc, int Nx,int Ny,int Nz, float h
     float* S = (float*)std::malloc(sizeof(float)*N);
     if(!S){ std::fprintf(stderr,"[SDF3D] malloc failed\n"); return 0; }
 
-    vec3 bmin,bmax;
-    mesh_bbox_transformed(Sc, bmin, bmax);
-
     Grid3D grid;
     grid.Nx=Nx; grid.Ny=Ny; grid.Nz=Nz;
     grid.h=v3(h,h,h);
-    grid.origin=bmin;
+    // IMPORTANT:
+    // The virtual SDF domain is defined to start at the origin (0,0,0) and extend
+    // to (Lx+6h, Ly+6h, Lz+6h). The mesh itself is shifted by +3h so its transformed
+    // bbox is [3h, size+3h]. Therefore the SDF grid origin MUST be (0,0,0), not the
+    // transformed mesh bbox min.
+    grid.origin=v3(0.f,0.f,0.f);
 
     std::vector<float> tmp;
     compute_sdf_cpu(Sc, grid, tmp);
@@ -671,8 +673,9 @@ inline static int build_oid_dense_cpu(const Scene3D& Sc, const float* S,
         if(lid_counter <= 254) gid2lid[(size_t)gid] = lid_counter++ + 1;
     }
 
-    vec3 bmin,bmax;
-    mesh_bbox_transformed(Sc, bmin, bmax);
+    // OID classification must use the same virtual grid origin as the SDF.
+    // The virtual domain starts at (0,0,0) even though the mesh is shifted by +3h.
+    const vec3 dom_min = v3(0.f,0.f,0.f);
 
     for(int k=1;k<Nz-1;++k){
         for(int j=1;j<Ny-1;++j){
@@ -690,9 +693,9 @@ inline static int build_oid_dense_cpu(const Scene3D& Sc, const float* S,
                 const float inv_gn = 1.0f/std::sqrt(gn2);
                 const vec3 n = v3(gx*inv_gn, gy*inv_gn, gz*inv_gn);
 
-                const vec3 C = v3(bmin.x + (i + 0.5f)*h,
-                                  bmin.y + (j + 0.5f)*h,
-                                  bmin.z + (k + 0.5f)*h);
+                const vec3 C = v3(dom_min.x + (i + 0.5f)*h,
+                                  dom_min.y + (j + 0.5f)*h,
+                                  dom_min.z + (k + 0.5f)*h);
                 const vec3 W = v3(C.x - s*n.x, C.y - s*n.y, C.z - s*n.z);
 
                 NearestTriResult nt = nearest_tri_at_point(Sc, W);
