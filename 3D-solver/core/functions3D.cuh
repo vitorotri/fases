@@ -81,10 +81,16 @@ float cubic_interp_1d(float fm1, float f0, float f1, float f2, float s){
 __device__ __forceinline__
 float tricubic_interp(const float *f, int Nx, int Ny, float Dx, float Dy, float Dz, float h){
     // Convert physical position to grid coordinates
+    
     float gx = Dx / h - 0.5f;
     float gy = Dy / h - 0.5f;
     float gz = Dz / h - 0.5f;
-
+	
+	/*
+	float gx = Dx / h;
+    float gy = Dy / h;
+    float gz = Dz / h;
+	*/
     int i = (int)floorf(gx);
     int j = (int)floorf(gy);
     int k = (int)floorf(gz);
@@ -109,8 +115,7 @@ float tricubic_interp(const float *f, int Nx, int Ny, float Dx, float Dy, float 
     const int ylist[4] = { iym1, iy0, iyp1, iyp2 };
     const int xlist[4] = { ixm1, ix0, ixp1, ixp2 };
 
-    for (int zz = 0; zz < 4; ++zz)
-    {
+    for (int zz = 0; zz < 4; ++zz){
         int kz = zlist[zz];
 
         // Interpolate in x for each of 4 y-rows at this kz
@@ -442,6 +447,7 @@ __device__ float compute_beta_y(float *u, int r, int i, int j, int k, int Nx, in
 	return (13.0*b1*b1/12.0) + (0.25*b2*b2);
 }
 
+// compute smoothness indicators in z
 __device__ float compute_beta_z(float *u, int r, int i, int j, int k, int Nx, int Ny, float *beta_rl){
 	float b1, b2;
 	
@@ -545,7 +551,7 @@ __device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_k- instead of V_k+)
 __device__ float WENO_z(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
 	
-	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
+	// 1) Contruct point values V_{k+1/2}, V_{k-1/2}
 	float Vk_12[3];
 	for (int r = 0; r < 3; r++){
 		Vk_12[r] = construct_Vk_12(V, i, j, k, Nx, Ny, c_rl, r, idx);
@@ -568,7 +574,7 @@ __device__ float WENO_z(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 		w[r] = compute_w(alpha, r);
 	}
 	
-	// 5) Compute V_j+ / V_j-, depending on the value of idx
+	// 5) Compute V_k+ / V_k-, depending on the value of idx
 	float V_k = 0.0;
 	for (int r = 0; r < 3; r++){
 		V_k += w[r]*Vk_12[r];
@@ -601,6 +607,42 @@ __device__ void compute_Vs_z(float *Q_V, float *V, float *dd, float *c_rl, float
 	Q_V[3] = WENO_z(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 0, eps);
 }
 
+__global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, float *u, float *v, float *w){
+	
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
+	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
+   
+   	float R = 1.0;
+   
+    if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
+    	
+    	// wall at x-
+    	p[flat3(3,j,k,Nx,Ny)] = R * p[flat3(4,j,k,Nx,Ny)];
+    	u[flat3(3,j,k,Nx,Ny)] = -R * u[flat3(4,j,k,Nx,Ny)];
+    	
+    	// wall at x+
+    	p[flat3(Nx-4,j,k,Nx,Ny)] = R * p[flat3(Nx-5,j,k,Nx,Ny)];
+    	u[flat3(Nx-4,j,k,Nx,Ny)] = -R * u[flat3(Nx-5,j,k,Nx,Ny)];
+    	
+    	// wall at y-
+    	p[flat3(i,3,k,Nx,Ny)] = R * p[flat3(i,4,k,Nx,Ny)];
+    	v[flat3(i,3,k,Nx,Ny)] = -R * v[flat3(i,4,k,Nx,Ny)];
+    	
+    	// wall at y+
+    	p[flat3(i,Ny-4,k,Nx,Ny)] = R * p[flat3(i,Ny-5,k,Nx,Ny)];
+    	v[flat3(i,Ny-4,k,Nx,Ny)] = -R * v[flat3(i,Ny-5,k,Nx,Ny)];
+    	
+    	// wall at z-
+    	p[flat3(i,j,3,Nx,Ny)] = R * p[flat3(i,j,4,Nx,Ny)];
+    	w[flat3(i,j,3,Nx,Ny)] = -R * w[flat3(i,j,4,Nx,Ny)];
+    	
+    	// wall at z+
+    	p[flat3(i,j,Nz-4,Nx,Ny)] = R * p[flat3(i,j,Nz-5,Nx,Ny)];
+    	w[flat3(i,j,Nz-4,Nx,Ny)] = -R * w[flat3(i,j,Nz-5,Nx,Ny)];
+    }
+}
+
 // WENO5 SSP-RK3 step 0
 __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML, int i_src, int j_src, int k_src, float *p_time, int n){
 	
@@ -613,7 +655,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
 		// restrict
-		if (S[Cijk] < h) return;
+		//if (S[Cijk] < h) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -700,7 +742,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
 		// restrict
-		if (S[Cijk] < h) return;
+		//if (S[Cijk] < h) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -787,7 +829,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
 		// restrict
-		if (S[Cijk] < h) return;
+		//if (S[Cijk] < h) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -846,7 +888,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		
 		
 		// stage update
-		// trick to avoid yet another array for each field U is to use U1 input as final u here, since not used
+		// trick to avoid yet another array for each field U is to use U1 as final u here (outp), since not used
 		u1[Cijk] = (u0[Cijk] + 2.0f*(u2[Cijk] + dt*((-F_uP + F_uM)/h)))/3.0f;
 		v1[Cijk] = (v0[Cijk] + 2.0f*(v2[Cijk] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		w1[Cijk] = (w0[Cijk] + 2.0f*(w2[Cijk] + dt*((-H_wP + H_wM)/h)))/3.0f;
