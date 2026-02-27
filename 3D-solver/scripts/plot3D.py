@@ -33,47 +33,33 @@ cmap = mcolors.LinearSegmentedColormap.from_list(
 )
 
 # color limits (set None to auto each frame)
-V_LIM = 0.01  # Pa
+V_LIM = 0.001  # Pa
 
 
 # -------------------------- helpers --------------------------
 
 def read_header(header_path: Path):
-    """
-    Tries to handle both your old 2D header and a new 3D header.
-    Expected 3D header (recommended):
-      Nx Ny Nz Nt Lx Ly Lz anim_counter step dt obj_name
-    """
     with open(header_path, "r") as f:
         line = f.readline().strip()
     vals = line.split()
 
-    # Heuristic:
-    # 2D old: Nx Ny Nt Lx Ly anim_counter step dt name
-    # 3D new: Nx Ny Nz Nt Lx Ly Lz anim_counter step dt name
-    if len(vals) >= 11:
-        Nx, Ny, Nz, Nt = map(int, vals[0:4])
-        Lx, Ly, Lz = map(float, vals[4:7])
-        anim_counter = int(vals[7])
-        step = int(vals[8])
-        dt = float(vals[9])
-        obj_name = str(vals[10])
-        return Nx, Ny, Nz, Nt, Lx, Ly, Lz, anim_counter, step, dt, obj_name
+    # Expect:
+    # Nx Ny Nz Nt Lx Ly Lz pbin_size anim_step dt obj_name h tol_over_h
+    if len(vals) < 13:
+        raise RuntimeError(f"Header has {len(vals)} tokens, expected 13+. Line: {line}")
 
-    if len(vals) >= 9:
-        # fallback: treat as 2D (no Nz/Lz)
-        Nx, Ny, Nt = map(int, vals[0:3])
-        Lx, Ly = map(float, vals[3:5])
-        anim_counter = int(vals[5])
-        step = int(vals[6])
-        dt = float(vals[7])
-        obj_name = str(vals[8])
-        raise RuntimeError(
-            "Your header.txt looks 2D. For this 3D script, write a 3D header:\n"
-            "Nx Ny Nz Nt Lx Ly Lz anim_counter step dt obj_name"
-        )
+    Nx, Ny, Nz, Nt = map(int, vals[0:4])
+    Lx, Ly, Lz = map(float, vals[4:7])
 
-    raise RuntimeError(f"Unrecognized header format: {line}")
+    anim_counter = int(vals[7])      # pbin_size
+    anim_step    = int(vals[8])      # anim_step
+    dt           = float(vals[9])
+    obj_name     = str(vals[10])
+
+    h            = float(vals[11])
+    tol_over_h   = int(vals[12])
+
+    return Nx, Ny, Nz, Nt, Lx, Ly, Lz, anim_counter, anim_step, dt, obj_name, h, tol_over_h
 
 
 def load_slices(Nx, Ny, Nz, anim_counter):
@@ -131,7 +117,7 @@ def set_clim(actor, vlim):
 # -------------------------- main --------------------------
 
 def main():
-    Nx, Ny, Nz, Nt, Lx, Ly, Lz, anim_counter, step, dt, obj_name = read_header(HEADER)
+    Nx, Ny, Nz, Nt, Lx, Ly, Lz, anim_counter, anim_step, dt, obj_name, h, tol_over_h = read_header(HEADER)
     obj_path = find_obj(obj_name)
 
     pX, pY, pZ = load_slices(Nx, Ny, Nz, anim_counter)
@@ -140,11 +126,15 @@ def main():
     dx = Lx / Nx
     dy = Ly / Ny
     dz = Lz / Nz
-
+    '''
     # Choose slice indices consistent with your C++ (Nx/2, Ny/2, Nz/2 typically)
     i0 = Nx // 2
     j0 = Ny // 2
     k0 = Nz // 2
+    '''
+    i0 = int(1.0 / dx)
+    j0 = int(1.0 / dy)
+    k0 = int(1.0 / dz)
 
     x0 = (i0 + 0.5) * dx
     y0 = (j0 + 0.5) * dy
@@ -197,9 +187,9 @@ def main():
     plane_Z.point_data["p"] = pZ[0].T.astype(np.float32).ravel(order="F")
 
     # Add meshes (semi-transparent so you can see overlap)
-    aX = pl.add_mesh(plane_X, scalars="p", cmap=cmap, opacity=0.80, lighting=False, show_scalar_bar=False)
-    aY = pl.add_mesh(plane_Y, scalars="p", cmap=cmap, opacity=0.80, lighting=False, show_scalar_bar=False)
-    aZ = pl.add_mesh(plane_Z, scalars="p", cmap=cmap, opacity=0.80, lighting=False, show_scalar_bar=False)
+    aX = pl.add_mesh(plane_X, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
+    aY = pl.add_mesh(plane_Y, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
+    aZ = pl.add_mesh(plane_Z, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
 
     # fixed color limits if desired
     set_clim(aX, V_LIM)
@@ -233,7 +223,7 @@ def main():
         plane_Y.point_data["p"] = pY[frame].T.astype(np.float32).ravel(order="F")
         plane_Z.point_data["p"] = pZ[frame].T.astype(np.float32).ravel(order="F")
     
-        t = frame * dt * step
+        t = frame * dt * anim_step
         pl.add_text(f"t = {t:.6f} s", name="time_text", font_size=14)
     
         if V_LIM is not None:
