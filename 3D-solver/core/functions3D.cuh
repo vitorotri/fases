@@ -65,6 +65,35 @@ __host__ void is_TVD(float TV_0, float TV_1){
 	else printf("\n[!] Scheme is not TVD\n\n");
 }
 
+// TV norm is not the best to estimate energy injection into the system if source is a sinusoid or similar with E0 = 0.0
+__host__ float Energy(float *p, float *u, float *v, float *w, int Nx, int Ny, int Nz, float h, float rho, float c){
+
+	float sum = 0.0;
+	for (int i = 0; i < Nx; i++){
+		for (int j = 0; j < Ny; j++){
+			for (int k = 0; k < Nz; k++){
+				
+				int idx = flat3(i,j,k,Nx,Ny);
+				
+				float pi = p[idx];
+				float ui = u[idx], vi = v[idx], wi = w[idx];
+				
+				sum += (pi*pi) / (rho * c*c);
+				sum += rho * (ui*ui + vi*vi + wi*wi);
+			}
+		}
+	}
+	return 0.5 * sum;
+}
+
+// check if scheme is conservative
+__host__ void is_conservative(float E0, float E1){
+	if (E1 <= E0){
+		printf("\n[OK] Scheme is conservative\n\n");
+	}
+	else printf("\n[!] Scheme is not conservative\n\n");
+}
+
 __device__ __forceinline__
 float cubic_interp_1d(float fm1, float f0, float f1, float f2, float s){
     // s in [0,1): position between grid points i (0) and i+1
@@ -79,12 +108,12 @@ float cubic_interp_1d(float fm1, float f0, float f1, float f2, float s){
 }
 
 __device__ __forceinline__
-float tricubic_interp(const float *f, int Nx, int Ny, float Dx, float Dy, float Dz, float h){
+float tricubic_interp(const float *f, int Nx, int Ny, int Nz, float Dx, float Dy, float Dz, float h){
     // Convert physical position to grid coordinates
     
-    float gx = Dx / h - 0.5f;
-    float gy = Dy / h - 0.5f;
-    float gz = Dz / h - 0.5f;
+    float gx = Dx / h - 0.5;
+    float gy = Dy / h - 0.5;
+    float gz = Dz / h - 0.5;
 	
 	/*
 	float gx = Dx / h;
@@ -92,9 +121,14 @@ float tricubic_interp(const float *f, int Nx, int Ny, float Dx, float Dy, float 
     float gz = Dz / h;
 	*/
     int i = (int)floorf(gx);
-    int j = (int)floorf(gy);
-    int k = (int)floorf(gz);
-
+	int j = (int)floorf(gy);
+	int k = (int)floorf(gz);
+	
+	// clamp so that i-1 >= 0 and i+2 < Nx  -> i in [1, Nx-3]
+	i = max(1, min(i, Nx - 3));
+	j = max(1, min(j, Ny - 3));
+	k = max(1, min(k, Nz - 3));
+	
     float sx = gx - (float)i;   // in [0,1)
     float sy = gy - (float)j;   // in [0,1)
     float sz = gz - (float)k;   // in [0,1)
@@ -149,13 +183,12 @@ __host__ __device__ inline float R_to_Zb(float R, float Z0){
     if (R < -1.f + eps) R = -1.f + eps;
     return Z0 * (1.0f + R) / (1.0f - R);
 }
-// 4-point raised cosine distribution (as seen in Bilbao "Modelling impedance ... one-dimensional case", 2023)
-// multiplied by a factor of 2 to give correct weighting in the kernel below (?)
-__device__ float phi(float r){
-	if (r <= 2.0f && r >= 0.0f){
-		return 0.5f*(1.0f + cos(0.5f*M_PI*r));
-	}
-	return 0.0f;
+
+// Raised-cosine bump: full width = 2*w (Smits: 0.04 m => w=0.02 m)
+__host__ __device__ float raised_cosine(float x, float x0, float w){
+    float xi = (x - x0) / w;
+    if (fabsf(xi) > 1.0f) return 0.0f;
+    return 0.5f * (1.0f + cosf((float)M_PI * xi));
 }
 
 // case above but correctly ranges only inside the fluid
@@ -202,6 +235,125 @@ __host__ bool check_energy_coeffs(float R, float T){
 		return 1;
 	}
 	return 0;
+}
+
+__host__ __device__
+void periodic_BC_3D_WENO5(float *p, float *u, float *v, float *w,
+                          int i, int j, int k,
+                          int Nx, int Ny, int Nz)
+{
+    constexpr int ng = 3;
+	/*
+    // ---------------------------------
+    // X periodic faces: one writer per (j,k)
+    // ---------------------------------
+    if (i == ng) {
+        // left ghosts: 0,1,2 <- Nx-6,Nx-5,Nx-4
+        p[flat3(0, j, k, Nx, Ny)] = p[flat3(Nx - 2*ng,     j, k, Nx, Ny)];
+        u[flat3(0, j, k, Nx, Ny)] = u[flat3(Nx - 2*ng,     j, k, Nx, Ny)];
+        v[flat3(0, j, k, Nx, Ny)] = v[flat3(Nx - 2*ng,     j, k, Nx, Ny)];
+        w[flat3(0, j, k, Nx, Ny)] = w[flat3(Nx - 2*ng,     j, k, Nx, Ny)];
+
+        p[flat3(1, j, k, Nx, Ny)] = p[flat3(Nx - 2*ng + 1, j, k, Nx, Ny)];
+        u[flat3(1, j, k, Nx, Ny)] = u[flat3(Nx - 2*ng + 1, j, k, Nx, Ny)];
+        v[flat3(1, j, k, Nx, Ny)] = v[flat3(Nx - 2*ng + 1, j, k, Nx, Ny)];
+        w[flat3(1, j, k, Nx, Ny)] = w[flat3(Nx - 2*ng + 1, j, k, Nx, Ny)];
+
+        p[flat3(2, j, k, Nx, Ny)] = p[flat3(Nx - 2*ng + 2, j, k, Nx, Ny)];
+        u[flat3(2, j, k, Nx, Ny)] = u[flat3(Nx - 2*ng + 2, j, k, Nx, Ny)];
+        v[flat3(2, j, k, Nx, Ny)] = v[flat3(Nx - 2*ng + 2, j, k, Nx, Ny)];
+        w[flat3(2, j, k, Nx, Ny)] = w[flat3(Nx - 2*ng + 2, j, k, Nx, Ny)];
+
+        // right ghosts: Nx-3,Nx-2,Nx-1 <- 3,4,5
+        p[flat3(Nx - ng,     j, k, Nx, Ny)] = p[flat3(ng,     j, k, Nx, Ny)];
+        u[flat3(Nx - ng,     j, k, Nx, Ny)] = u[flat3(ng,     j, k, Nx, Ny)];
+        v[flat3(Nx - ng,     j, k, Nx, Ny)] = v[flat3(ng,     j, k, Nx, Ny)];
+        w[flat3(Nx - ng,     j, k, Nx, Ny)] = w[flat3(ng,     j, k, Nx, Ny)];
+
+        p[flat3(Nx - ng + 1, j, k, Nx, Ny)] = p[flat3(ng + 1, j, k, Nx, Ny)];
+        u[flat3(Nx - ng + 1, j, k, Nx, Ny)] = u[flat3(ng + 1, j, k, Nx, Ny)];
+        v[flat3(Nx - ng + 1, j, k, Nx, Ny)] = v[flat3(ng + 1, j, k, Nx, Ny)];
+        w[flat3(Nx - ng + 1, j, k, Nx, Ny)] = w[flat3(ng + 1, j, k, Nx, Ny)];
+
+        p[flat3(Nx - ng + 2, j, k, Nx, Ny)] = p[flat3(ng + 2, j, k, Nx, Ny)];
+        u[flat3(Nx - ng + 2, j, k, Nx, Ny)] = u[flat3(ng + 2, j, k, Nx, Ny)];
+        v[flat3(Nx - ng + 2, j, k, Nx, Ny)] = v[flat3(ng + 2, j, k, Nx, Ny)];
+        w[flat3(Nx - ng + 2, j, k, Nx, Ny)] = w[flat3(ng + 2, j, k, Nx, Ny)];
+    }
+
+    // ---------------------------------
+    // Y periodic faces: one writer per (i,k)
+    // ---------------------------------
+    if (j == ng) {
+        // bottom ghosts: 0,1,2 <- Ny-6,Ny-5,Ny-4
+        p[flat3(i, 0, k, Nx, Ny)] = p[flat3(i, Ny - 2*ng,     k, Nx, Ny)];
+        u[flat3(i, 0, k, Nx, Ny)] = u[flat3(i, Ny - 2*ng,     k, Nx, Ny)];
+        v[flat3(i, 0, k, Nx, Ny)] = v[flat3(i, Ny - 2*ng,     k, Nx, Ny)];
+        w[flat3(i, 0, k, Nx, Ny)] = w[flat3(i, Ny - 2*ng,     k, Nx, Ny)];
+
+        p[flat3(i, 1, k, Nx, Ny)] = p[flat3(i, Ny - 2*ng + 1, k, Nx, Ny)];
+        u[flat3(i, 1, k, Nx, Ny)] = u[flat3(i, Ny - 2*ng + 1, k, Nx, Ny)];
+        v[flat3(i, 1, k, Nx, Ny)] = v[flat3(i, Ny - 2*ng + 1, k, Nx, Ny)];
+        w[flat3(i, 1, k, Nx, Ny)] = w[flat3(i, Ny - 2*ng + 1, k, Nx, Ny)];
+
+        p[flat3(i, 2, k, Nx, Ny)] = p[flat3(i, Ny - 2*ng + 2, k, Nx, Ny)];
+        u[flat3(i, 2, k, Nx, Ny)] = u[flat3(i, Ny - 2*ng + 2, k, Nx, Ny)];
+        v[flat3(i, 2, k, Nx, Ny)] = v[flat3(i, Ny - 2*ng + 2, k, Nx, Ny)];
+        w[flat3(i, 2, k, Nx, Ny)] = w[flat3(i, Ny - 2*ng + 2, k, Nx, Ny)];
+
+        // top ghosts: Ny-3,Ny-2,Ny-1 <- 3,4,5
+        p[flat3(i, Ny - ng,     k, Nx, Ny)] = p[flat3(i, ng,     k, Nx, Ny)];
+        u[flat3(i, Ny - ng,     k, Nx, Ny)] = u[flat3(i, ng,     k, Nx, Ny)];
+        v[flat3(i, Ny - ng,     k, Nx, Ny)] = v[flat3(i, ng,     k, Nx, Ny)];
+        w[flat3(i, Ny - ng,     k, Nx, Ny)] = w[flat3(i, ng,     k, Nx, Ny)];
+
+        p[flat3(i, Ny - ng + 1, k, Nx, Ny)] = p[flat3(i, ng + 1, k, Nx, Ny)];
+        u[flat3(i, Ny - ng + 1, k, Nx, Ny)] = u[flat3(i, ng + 1, k, Nx, Ny)];
+        v[flat3(i, Ny - ng + 1, k, Nx, Ny)] = v[flat3(i, ng + 1, k, Nx, Ny)];
+        w[flat3(i, Ny - ng + 1, k, Nx, Ny)] = w[flat3(i, ng + 1, k, Nx, Ny)];
+
+        p[flat3(i, Ny - ng + 2, k, Nx, Ny)] = p[flat3(i, ng + 2, k, Nx, Ny)];
+        u[flat3(i, Ny - ng + 2, k, Nx, Ny)] = u[flat3(i, ng + 2, k, Nx, Ny)];
+        v[flat3(i, Ny - ng + 2, k, Nx, Ny)] = v[flat3(i, ng + 2, k, Nx, Ny)];
+        w[flat3(i, Ny - ng + 2, k, Nx, Ny)] = w[flat3(i, ng + 2, k, Nx, Ny)];
+    }
+	*/
+    // ---------------------------------
+    // Z periodic faces: one writer per (i,j)
+    // ---------------------------------
+    if (k == ng) {
+        // lower ghosts: 0,1,2 <- Nz-6,Nz-5,Nz-4
+        p[flat3(i, j, 3, Nx, Ny)] = p[flat3(i, j, Nz - 2*ng - 3,     Nx, Ny)];
+        u[flat3(i, j, 3, Nx, Ny)] = u[flat3(i, j, Nz - 2*ng - 3,     Nx, Ny)];
+        v[flat3(i, j, 3, Nx, Ny)] = v[flat3(i, j, Nz - 2*ng - 3,     Nx, Ny)];
+        w[flat3(i, j, 3, Nx, Ny)] = w[flat3(i, j, Nz - 2*ng - 3,     Nx, Ny)];
+
+        p[flat3(i, j, 4, Nx, Ny)] = p[flat3(i, j, Nz - 2*ng + 1 - 3, Nx, Ny)];
+        u[flat3(i, j, 4, Nx, Ny)] = u[flat3(i, j, Nz - 2*ng + 1 - 3, Nx, Ny)];
+        v[flat3(i, j, 4, Nx, Ny)] = v[flat3(i, j, Nz - 2*ng + 1 - 3, Nx, Ny)];
+        w[flat3(i, j, 4, Nx, Ny)] = w[flat3(i, j, Nz - 2*ng + 1 - 3, Nx, Ny)];
+
+        p[flat3(i, j, 5, Nx, Ny)] = p[flat3(i, j, Nz - 2*ng + 2 - 3, Nx, Ny)];
+        u[flat3(i, j, 5, Nx, Ny)] = u[flat3(i, j, Nz - 2*ng + 2 - 3, Nx, Ny)];
+        v[flat3(i, j, 5, Nx, Ny)] = v[flat3(i, j, Nz - 2*ng + 2 - 3, Nx, Ny)];
+        w[flat3(i, j, 5, Nx, Ny)] = w[flat3(i, j, Nz - 2*ng + 2 - 3, Nx, Ny)];
+
+        // upper ghosts: Nz-3,Nz-2,Nz-1 <- 3,4,5
+        p[flat3(i, j, Nz - ng - 3,     Nx, Ny)] = p[flat3(i, j, ng,     Nx, Ny)];
+        u[flat3(i, j, Nz - ng - 3,     Nx, Ny)] = u[flat3(i, j, ng,     Nx, Ny)];
+        v[flat3(i, j, Nz - ng - 3,     Nx, Ny)] = v[flat3(i, j, ng,     Nx, Ny)];
+        w[flat3(i, j, Nz - ng - 3,     Nx, Ny)] = w[flat3(i, j, ng,     Nx, Ny)];
+
+        p[flat3(i, j, Nz - ng + 1 - 3, Nx, Ny)] = p[flat3(i, j, ng + 1 + 3, Nx, Ny)];
+        u[flat3(i, j, Nz - ng + 1 - 3, Nx, Ny)] = u[flat3(i, j, ng + 1 + 3, Nx, Ny)];
+        v[flat3(i, j, Nz - ng + 1 - 3, Nx, Ny)] = v[flat3(i, j, ng + 1 + 3, Nx, Ny)];
+        w[flat3(i, j, Nz - ng + 1 - 3, Nx, Ny)] = w[flat3(i, j, ng + 1 + 3, Nx, Ny)];
+
+        p[flat3(i, j, Nz - ng + 2 - 3, Nx, Ny)] = p[flat3(i, j, ng + 2 + 3, Nx, Ny)];
+        u[flat3(i, j, Nz - ng + 2 - 3, Nx, Ny)] = u[flat3(i, j, ng + 2 + 3, Nx, Ny)];
+        v[flat3(i, j, Nz - ng + 2 - 3, Nx, Ny)] = v[flat3(i, j, ng + 2 + 3, Nx, Ny)];
+        w[flat3(i, j, Nz - ng + 2 - 3, Nx, Ny)] = w[flat3(i, j, ng + 2 + 3, Nx, Ny)];
+    }
 }
 
 // non-implicit, solved with regular SSP-RK3, but coefficients alpha, beta and zeta are restricted in terms
@@ -257,10 +409,8 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	// those values are only on positive s, which is the case here
     	// oid[] ranges from 1 to nMat, 255 elsewhere
 		const uint8_t o_ID = oid[Cijk]; // object's material ID
-		if (o_ID == 0 || o_ID == 0xFF) return;
-		
-		int b_ID = bmap[Cijk];
-		//if (b_ID < 0) return; // safety; should match oid test
+		int b_ID = bmap[Cijk]; // boundary map
+		if (o_ID == 0 || o_ID == 0xFF || b_ID < 0) return;
 		
 		// gradients from S[] for detecting normals   
     	float gx = (S[flat3(i+1,j,k,Nx,Ny)] - S[flat3(i-1,j,k,Nx,Ny)]) * (0.5f / h);
@@ -272,12 +422,18 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	float nx = -gx/gn;
     	float ny = -gy/gn;
     	float nz = -gz/gn;
-	
+		
     	// cell center
     	float Cx = (i + 0.5f) * h;
     	float Cy = (j + 0.5f) * h;
     	float Cz = (k + 0.5f) * h;
-		
+    	
+    	/*
+    	// cell center
+    	float Cx = i * h;
+    	float Cy = j * h;
+    	float Cz = k * h;
+		*/
     	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid) 
     	float Wx = Cx + s * nx;
     	float Wy = Cy + s * ny;
@@ -289,10 +445,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	float Dy = Wy - l * ny;
     	float Dz = Wz - l * nz;
 		
-    	float pD = tricubic_interp(p_old, Nx, Ny, Dx, Dy, Dz, h);
-    	float uD = tricubic_interp(u_old, Nx, Ny, Dx, Dy, Dz, h);
-    	float vD = tricubic_interp(v_old, Nx, Ny, Dx, Dy, Dz, h);
-    	float wD = tricubic_interp(w_old, Nx, Ny, Dx, Dy, Dz, h);
+    	float pD = tricubic_interp(p_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    	float uD = tricubic_interp(u_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    	float vD = tricubic_interp(v_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    	float wD = tricubic_interp(w_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
 
         const float un =  uD*nx + vD*ny + wD*nz;
         // tangential vector (free-slip)
@@ -343,51 +499,93 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
     	float lam = 1.0f - expf(-chi * dt / eta); // dimensionless
 		lam = fminf(lam, 1.0f); // clamp for explicit stability + no overshoot
 		
-		u[Cij] = (1.0f - lam) * u[Cij] + lam * u_b;
-    	v[Cij] = (1.0f - lam) * v[Cij] + lam * v_b;
-    	p[Cij] = (1.0f - lam) * p[Cij] + lam * p_b;
+		u[Cijk] = (1.0f - lam) * u[Cijk] + lam * u_b;
+    	v[Cijk] = (1.0f - lam) * v[Cijk] + lam * v_b;
+    	w[Cijk] = (1.0f - lam) * w[Cijk] + lam * w_b;
+    	p[Cijk] = (1.0f - lam) * p[Cijk] + lam * p_b;
     	*/
-    	    
+    	/*
+    	// no merging
+		u[Cijk] = u_b;
+    	v[Cijk] = v_b;
+    	w[Cijk] = w_b;
+    	p[Cijk] = p_b;
+    	*/
     }
 }
 
+/*
+__host__ __device__
+void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+          
+    const float s_max = 0.018f;
+    const int ng = 3;
+
+    // physical interior sizes
+    const int Nxi = Nx - 2*ng;
+    const int Nyi = Ny - 2*ng;
+    const int Nzi = Nz - 2*ng;
+
+    const int max_idx = (int)(0.15f * min(Nxi, min(Nyi, Nzi)));
+    const float half = (float)max_idx;
+
+    // physical-domain limits
+    const float xL = (float)ng;
+    const float xR = (float)(Nx - ng - 1);
+    const float yL = (float)ng;
+    const float yR = (float)(Ny - ng - 1);
+    const float zL = (float)ng;
+    const float zR = (float)(Nz - ng - 1);
+
+    // ramps measured from physical boundaries, not ghost boundaries
+    float rx = E_PML * fmaxf(0.0f, fminf((i - (xR - half + 1.0f)) / half, 1.0f));
+    float lx = W_PML * fmaxf(0.0f, fminf(((xL + half - 1.0f) - i) / half, 1.0f));
+
+    float fy = F_PML * fmaxf(0.0f, fminf((j - (yR - half + 1.0f)) / half, 1.0f));
+    float by = B_PML * fmaxf(0.0f, fminf(((yL + half - 1.0f) - j) / half, 1.0f));
+
+    float uz = N_PML * fmaxf(0.0f, fminf((k - (zR - half + 1.0f)) / half, 1.0f));
+    float lz = S_PML * fmaxf(0.0f, fminf(((zL + half - 1.0f) - k) / half, 1.0f));
+
+    float rx3 = rx*rx*rx, lx3 = lx*lx*lx;
+    float fy3 = fy*fy*fy, by3 = by*by*by;
+    float uz3 = uz*uz*uz, lz3 = lz*lz*lz;
+
+    float sx = s_max * (rx3 + lx3);
+    float sy = s_max * (fy3 + by3);
+    float sz = s_max * (uz3 + lz3);
+
+    float s = 1.0f - (1.0f - sx) * (1.0f - sy) * (1.0f - sz);
+    s = fminf(s, 0.999f);
+
+    int Cijk = flat3(i, j, k, Nx, Ny);
+    q[Cijk] -= s * q[Cijk];
+}
+*/
 // sPML Layer - "simple" PML according to:
 // 
 // https://reference.wolfram.com/language/PDEModels/tutorial/Acoustics/AcousticsTimeDomain.html
 // 
-// 
-__host__ __device__ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
-    float s_max = 0.018f; // Maximum absorption factor
-    int max_idx = (int)(0.15f*min(Nx, min(Ny, Nz))); // halfwidth
-    float half   = (float)max_idx;
+//
+__host__ __device__
+void sPML(float *p, float *p_old, float *u, float *u_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float D_PML){
+	
+	int d_x, d_y, d_z;
+	
+	d_x = (int)(perc*Nx); d_y = (int)(perc_y*Ny); d_z = (int)(perc_z*Nz);
+	
+	if (i > d_x || j > d_y || k > d_z) return;
 
-	// ramps in [0,1] (to exclude a side, multiply by 0.0f)
-	float rx = E_PML*fmaxf(0.0f, fminf((i - (Nx - half)) / half, 1.0f)); // right boundary ramp
-	float lx = W_PML*fmaxf(0.0f, fminf((half - i) / half, 1.0f)); // left boundary ramp
-	float uy = N_PML*fmaxf(0.0f, fminf((j - (Ny - half)) / half, 1.0f)); // upper boundary ramp
-	float ly = S_PML*fmaxf(0.0f, fminf((half - j) / half, 1.0f)); // lower boundary ramp
-	float fz = F_PML*fmaxf(0.0f, fminf((k - (Nz - half)) / half, 1.0f)); // front boundary ramp
-	float bz = B_PML*fmaxf(0.0f, fminf((half - k) / half, 1.0f)); // back boundary map
+	int Cijk = flat3(i,j,k,Nx,Ny);
 	
-	// cubic (faster than powf)
-	float rx3 = rx*rx*rx, lx3 = lx*lx*lx, ly3 = ly*ly*ly, uy3 = uy*uy*uy, fz3 = fz*fz*fz, bz3 = bz*bz*bz;
+	const float R0 = 0.01;
+	const float m = 4.0;
 	
-	// per-axis combined strengths (L/R, U/D and F/B are mutually exclusive)
-	float sx = s_max * (rx3 + lx3);
-	float sy = s_max * (uy3 + ly3);
-	float sz = s_max * (fz3 + bz3);
+	float sx = -0.5 * pow(i / d_x, m) * c * (m + 1.0) * log(R0) / d_x;
 	
-	// exact corner composition
-	//float s = 1.0f - (1.0f - sx) * (1.0f - sy);
-	float s = 1.0f - (1.0f - sx) * (1.0f - sy) * (1.0f - sz);
-	
-	// (optional) keep strictly < 1.0 to avoid killing the value numerically
-	s = fminf(s, 0.999f);
-	
-	// apply once
-	int Cijk = flat3(i, j, k, Nx, Ny);
-	q[Cijk] -= s * q[Cijk];
-    
+	p[Cijk] -= s * dt * p_old[Cijk];
+	u[Cijk] -= s * dt * u_old[Cijk];
+
 }
 
 // --- WENO5 functions ---
@@ -643,13 +841,19 @@ __global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, flo
     }
 }
 
+__global__ void kernel_inject_source(float *p, float *p_time, int i_src, int j_src, int k_src, int Nx, int Ny, int n){
+	p[flat3(i_src, j_src, k_src, Nx, Ny)] += p_time[n];
+}
+
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML, int i_src, int j_src, int k_src, float *p_time, int n){
+__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
 	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
     if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
+    	
+    	periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
     	
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
@@ -718,10 +922,9 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		v1[Cijk] = v0[Cijk] + dt*(-G_vP + G_vM)/h;
 		w1[Cijk] = w0[Cijk] + dt*(-H_wP + H_wM)/h;
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
-		
-		if (i == i_src && j == j_src && k == k_src && (n == 0 || n == 1)) p1[Cijk] = p_time[n];
 	
 		// PML BCs
+		
 		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(w1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
@@ -731,12 +934,14 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML, int i_src, int j_src, int k_src, float *p_time, int n){
+__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
 	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
     if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
+    	
+    	periodic_BC_3D_WENO5(p2, u2, v2, w2, i, j, k, Nx, Ny, Nz);
     	
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
@@ -805,7 +1010,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		v2[Cijk] = 0.75f*v0[Cijk] + 0.25f*(v1[Cijk] + dt*((-G_vP + G_vM)/h));
 		w2[Cijk] = 0.75f*w0[Cijk] + 0.25f*(w1[Cijk] + dt*((-H_wP + H_wM)/h));
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
-
+		
 		// PML BCs
 		sPML(u2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(v2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
@@ -816,12 +1021,14 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML, int i_src, int j_src, int k_src, float *p_time, int n){
+__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
 	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
     if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
+    	
+    	periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
     	
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
@@ -891,7 +1098,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		v1[Cijk] = (v0[Cijk] + 2.0f*(v2[Cijk] + dt*((-G_vP + G_vM)/h)))/3.0f;
 		w1[Cijk] = (w0[Cijk] + 2.0f*(w2[Cijk] + dt*((-H_wP + H_wM)/h)))/3.0f;
 		p1[Cijk] = (p0[Cijk] + 2.0f*(p2[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h)))/3.0f;
-
+		
 		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(w1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
