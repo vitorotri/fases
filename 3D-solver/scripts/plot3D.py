@@ -10,6 +10,7 @@ import pyvista as pv
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = (BASE_DIR / ".." / "output").resolve()
+SRC_TXT = (BASE_DIR / ".." / "input" / "src" / "src.txt").resolve()
 
 # filenames (adjust if yours differ)
 HEADER = OUTPUT_DIR / "header.txt"
@@ -113,6 +114,15 @@ def set_clim(actor, vlim):
         return
     actor.mapper.scalar_range = (-vlim, vlim)
 
+def read_source_pos(src_path: Path):
+    with open(src_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            x, y, z, value = map(float, line.split()[:4])
+            return x, y, z, value
+    raise RuntimeError(f"No source line found in {src_path}")
 
 # -------------------------- main --------------------------
 
@@ -126,19 +136,26 @@ def main():
     dx = Lx / Nx
     dy = Ly / Ny
     dz = Lz / Nz
-    '''
-    # Choose slice indices consistent with your C++ (Nx/2, Ny/2, Nz/2 typically)
-    i0 = Nx // 2
-    j0 = Ny // 2
-    k0 = Nz // 2
-    '''
-    i0 = int(1.0 / dx)
-    j0 = int(1.0 / dy)
-    k0 = int(1.0 / dz)
+    
+    src_x, src_y, src_z, src_val = read_source_pos(SRC_TXT)
 
-    x0 = (i0 + 0.5) * dx
-    y0 = (j0 + 0.5) * dy
-    z0 = (k0 + 0.5) * dz
+    # cell-center coordinates
+    xc = (np.arange(Nx) + 0.5) * dx
+    yc = (np.arange(Ny) + 0.5) * dy
+    zc = (np.arange(Nz) + 0.5) * dz
+    
+    # nearest cell-center indices to the source position
+    i0 = int(np.argmin(np.abs(xc - src_x)))
+    j0 = int(np.argmin(np.abs(yc - src_y)))
+    k0 = int(np.argmin(np.abs(zc - src_z)))
+    
+    # fixed slice positions (exactly at the chosen cell centers)
+    x0 = xc[i0]
+    y0 = yc[j0]
+    z0 = zc[k0]
+    
+    print(f"Source: ({src_x:.3f}, {src_y:.3f}, {src_z:.3f})")
+    print(f"Slices at cell centers: x0={x0:.3f} (i0={i0}), y0={y0:.3f} (j0={j0}), z0={z0:.3f} (k0={k0})")
 
     # --- create plotter ---
     pv.global_theme.background = "white"
@@ -188,8 +205,8 @@ def main():
 
     # Add meshes (semi-transparent so you can see overlap)
     aX = pl.add_mesh(plane_X, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
-    aY = pl.add_mesh(plane_Y, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
-    aZ = pl.add_mesh(plane_Z, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
+    aY = pl.add_mesh(plane_Y, scalars="p", cmap=cmap, opacity=0.05, lighting=False, show_scalar_bar=False)
+    aZ = pl.add_mesh(plane_Z, scalars="p", cmap=cmap, opacity=0.05, lighting=False, show_scalar_bar=False)
 
     # fixed color limits if desired
     set_clim(aX, V_LIM)
@@ -202,6 +219,8 @@ def main():
 
     # Nice isometric-ish camera
     pl.camera_position = "iso"
+    pl.camera.azimuth = 5    # rotate left/right
+    #pl.camera.elevation = 5     # tilt up/down
     pl.camera.zoom(1.2)
 
     # --- write animation ---

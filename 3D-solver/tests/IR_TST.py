@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import os
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-path = os.path.join(script_dir, "..", "output", "IR1.bin")
+path = os.path.join(script_dir, "..", "output", "IR.bin")
 
 p = np.fromfile(path, dtype=np.float32)
 
