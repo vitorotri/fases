@@ -516,7 +516,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float
 
 /*
 __host__ __device__
-void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
           
     const float s_max = 0.018f;
     const int ng = 3;
@@ -538,14 +538,14 @@ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float 
     const float zR = (float)(Nz - ng - 1);
 
     // ramps measured from physical boundaries, not ghost boundaries
-    float rx = E_PML * fmaxf(0.0f, fminf((i - (xR - half + 1.0f)) / half, 1.0f));
-    float lx = W_PML * fmaxf(0.0f, fminf(((xL + half - 1.0f) - i) / half, 1.0f));
+    float rx = R_PML * fmaxf(0.0f, fminf((i - (xR - half + 1.0f)) / half, 1.0f));
+    float lx = L_PML * fmaxf(0.0f, fminf(((xL + half - 1.0f) - i) / half, 1.0f));
 
     float fy = F_PML * fmaxf(0.0f, fminf((j - (yR - half + 1.0f)) / half, 1.0f));
     float by = B_PML * fmaxf(0.0f, fminf(((yL + half - 1.0f) - j) / half, 1.0f));
 
-    float uz = N_PML * fmaxf(0.0f, fminf((k - (zR - half + 1.0f)) / half, 1.0f));
-    float lz = S_PML * fmaxf(0.0f, fminf(((zL + half - 1.0f) - k) / half, 1.0f));
+    float uz = U_PML * fmaxf(0.0f, fminf((k - (zR - half + 1.0f)) / half, 1.0f));
+    float lz = D_PML * fmaxf(0.0f, fminf(((zL + half - 1.0f) - k) / half, 1.0f));
 
     float rx3 = rx*rx*rx, lx3 = lx*lx*lx;
     float fy3 = fy*fy*fy, by3 = by*by*by;
@@ -570,31 +570,66 @@ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float 
 __host__ __device__
 void sPML(float *p, float *p_old, float *u, float *u_old, float *v, float *v_old, float *w, float *w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML){
 	
-	int d_x, d_y, d_z;
-	
-	d_x = (int)(perc*Nx); d_y = (int)(perc_y*Ny); d_z = (int)(perc_z*Nz);
-	
-	if (i > d_x || j > d_y || k > d_z) return;
+	const float d_x = perc_x * (float)Nx;
+    const float d_y = perc_y * (float)Ny;
+    const float d_z = perc_z * (float)Nz;
 
-	int Cijk = flat3(i,j,k,Nx,Ny);
-	
-	const float R0 = 0.01;
-	const float m = 4.0;
-	
-	float sx_P = -0.5 * pow(i / d_x, m) * c * (m + 1.0) * log(R0) / d_x; // x+ ramp
-	float sx_M = -0.5 * pow((Nx-1 - i) / d_x, m) * c * (m + 1.0) * log(R0) / d_x; // x- ramp
-	
-	float sy_P = -0.5 * pow(j / d_y, m) * c * (m + 1.0) * log(R0) / d_y; // y+ ramp
-	float sy_M = -0.5 * pow((Ny-1 - j) / d_y, m) * c * (m + 1.0) * log(R0) / d_y; // y- ramp
-	
-	float sz_P = -0.5 * pow(k / d_z, m) * c * (m + 1.0) * log(R0) / d_z; // z+ ramp
-	float sz_M = -0.5 * pow((Nz-1 - k) / d_z, m) * c * (m + 1.0) * log(R0) / d_z; // z- ramp
-	
-	p[Cijk] -= (R_PML*sx_P + L_PML*sx_M + U_PML*sz_P + D_PML*sz_M + F_PML*sy_P + B_PML*sy_M) * dt * p_old[Cijk];
-	
-	u[Cijk] -= (R_PML*sx_P + L_PML*sx_M) * dt * u_old[Cijk];
-	v[Cijk] -= (F_PML*sy_P + B_PML*sy_M) * dt * v_old[Cijk];
-	w[Cijk] -= (U_PML*sz_P + D_PML*sz_M) * dt * w_old[Cijk];
+    const int Cijk = flat3(i, j, k, Nx, Ny);
+
+    const float R0   = 0.01f;
+    const float m    = 4.0f;
+    const float lnR0 = logf(R0);
+
+    // Small guard to avoid division by zero without branching the profiles.
+    // If perc_* is zero, corresponding sigma terms collapse to ~0 after clamping.
+    const float inv_dxh = (d_x > 0.0f) ? 1.0f / (d_x * h) : 0.0f;
+    const float inv_dyh = (d_y > 0.0f) ? 1.0f / (d_y * h) : 0.0f;
+    const float inv_dzh = (d_z > 0.0f) ? 1.0f / (d_z * h) : 0.0f;
+
+    const float inv_dx  = (d_x > 0.0f) ? 1.0f / d_x : 0.0f;
+    const float inv_dy  = (d_y > 0.0f) ? 1.0f / d_y : 0.0f;
+    const float inv_dz  = (d_z > 0.0f) ? 1.0f / d_z : 0.0f;
+
+    // Normalized local depth in each slab, clamped to [0,1].
+    float xm = ((d_x - (float)i) * inv_dx);
+    float xp = (((float)i - ((float)Nx - d_x)) * inv_dx);
+
+    float ym = ((d_y - (float)j) * inv_dy);
+    float yp = (((float)j - ((float)Ny - d_y)) * inv_dy);
+
+    float zm = ((d_z - (float)k) * inv_dz);
+    float zp = (((float)k - ((float)Nz - d_z)) * inv_dz);
+
+    xm = fminf(1.0f, fmaxf(0.0f, xm));
+    xp = fminf(1.0f, fmaxf(0.0f, xp));
+    ym = fminf(1.0f, fmaxf(0.0f, ym));
+    yp = fminf(1.0f, fmaxf(0.0f, yp));
+    zm = fminf(1.0f, fmaxf(0.0f, zm));
+    zp = fminf(1.0f, fmaxf(0.0f, zp));
+
+    const float pref_x = -0.5f * c * (m + 1.0f) * lnR0 * inv_dxh;
+    const float pref_y = -0.5f * c * (m + 1.0f) * lnR0 * inv_dyh;
+    const float pref_z = -0.5f * c * (m + 1.0f) * lnR0 * inv_dzh;
+
+    const float sx_M = pref_x * powf(xm, m);   // x-
+    const float sx_P = pref_x * powf(xp, m);   // x+
+    const float sy_M = pref_y * powf(ym, m);   // y-
+    const float sy_P = pref_y * powf(yp, m);   // y+
+    const float sz_M = pref_z * powf(zm, m);   // z-
+    const float sz_P = pref_z * powf(zp, m);   // z+
+
+    const float sig_p = L_PML * sx_M + R_PML * sx_P
+                      + B_PML * sy_M + F_PML * sy_P
+                      + D_PML * sz_M + U_PML * sz_P;
+
+    const float sig_u = L_PML * sx_M + R_PML * sx_P;
+    const float sig_v = B_PML * sy_M + F_PML * sy_P;
+    const float sig_w = D_PML * sz_M + U_PML * sz_P;
+
+    p[Cijk] -= sig_p * dt * p_old[Cijk];
+    u[Cijk] -= sig_u * dt * u_old[Cijk];
+    v[Cijk] -= sig_v * dt * v_old[Cijk];
+    w[Cijk] -= sig_w * dt * w_old[Cijk];
 
 }
 
@@ -856,7 +891,7 @@ __global__ void kernel_inject_source(float *p, float *p_time, int i_src, int j_s
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -931,12 +966,9 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		w1[Cijk] = w0[Cijk] + dt*(-H_wP + H_wM)/h;
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
 	
-		// PML BCs
+		// other BCs
 		
-		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(w1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.1, 0.1, 0.1, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
 		
 		periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
 		
@@ -944,7 +976,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1019,11 +1051,9 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		w2[Cijk] = 0.75f*w0[Cijk] + 0.25f*(w1[Cijk] + dt*((-H_wP + H_wM)/h));
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
 		
-		// PML BCs
-		sPML(u2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(w2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		// other BCs
+		
+		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.1, 0.1, 0.1, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
 		
 		periodic_BC_3D_WENO5(p2, u2, v2, w2, i, j, k, Nx, Ny, Nz);
 		
@@ -1031,7 +1061,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float N_PML, float S_PML, float E_PML, float W_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1107,10 +1137,9 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		w1[Cijk] = (w0[Cijk] + 2.0f*(w2[Cijk] + dt*((-H_wP + H_wM)/h)))/3.0f;
 		p1[Cijk] = (p0[Cijk] + 2.0f*(p2[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h)))/3.0f;
 		
-		sPML(u1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(w1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
-		sPML(p1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		// other BCs
+		
+		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.1, 0.1, 0.1, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
 		
 		periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
 		
