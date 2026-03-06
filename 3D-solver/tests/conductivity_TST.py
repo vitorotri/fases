@@ -6,7 +6,8 @@ d_x = 0.1*200
 R0 = 0.01
 m = 4.0
 c = 344.0
-i = np.linspace(0,Nx)
+
+i = np.linspace(0, Nx-1, Nx)
 
 sx = -0.5 * ((i / d_x)**m) * c * (m + 1.0) * np.log(R0) / d_x
 
