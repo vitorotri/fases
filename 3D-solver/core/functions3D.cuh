@@ -568,7 +568,7 @@ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float 
 // 
 //
 __host__ __device__
-void sPML(float *p, float *p_old, float *u, float *u_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float D_PML){
+void sPML(float *p, float *p_old, float *u, float *u_old, float *v, float *v_old, float *w, float *w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML){
 	
 	int d_x, d_y, d_z;
 	
@@ -581,10 +581,20 @@ void sPML(float *p, float *p_old, float *u, float *u_old, int i, int j, int k, i
 	const float R0 = 0.01;
 	const float m = 4.0;
 	
-	float sx = -0.5 * pow(i / d_x, m) * c * (m + 1.0) * log(R0) / d_x;
+	float sx_P = -0.5 * pow(i / d_x, m) * c * (m + 1.0) * log(R0) / d_x; // x+ ramp
+	float sx_M = -0.5 * pow((Nx-1 - i) / d_x, m) * c * (m + 1.0) * log(R0) / d_x; // x- ramp
 	
-	p[Cijk] -= s * dt * p_old[Cijk];
-	u[Cijk] -= s * dt * u_old[Cijk];
+	float sy_P = -0.5 * pow(j / d_y, m) * c * (m + 1.0) * log(R0) / d_y; // y+ ramp
+	float sy_M = -0.5 * pow((Ny-1 - j) / d_y, m) * c * (m + 1.0) * log(R0) / d_y; // y- ramp
+	
+	float sz_P = -0.5 * pow(k / d_z, m) * c * (m + 1.0) * log(R0) / d_z; // z+ ramp
+	float sz_M = -0.5 * pow((Nz-1 - k) / d_z, m) * c * (m + 1.0) * log(R0) / d_z; // z- ramp
+	
+	p[Cijk] -= (R_PML*sx_P + L_PML*sx_M + U_PML*sz_P + D_PML*sz_M + F_PML*sy_P + B_PML*sy_M) * dt * p_old[Cijk];
+	
+	u[Cijk] -= (R_PML*sx_P + L_PML*sx_M) * dt * u_old[Cijk];
+	v[Cijk] -= (F_PML*sy_P + B_PML*sy_M) * dt * v_old[Cijk];
+	w[Cijk] -= (U_PML*sz_P + D_PML*sz_M) * dt * w_old[Cijk];
 
 }
 
@@ -853,8 +863,6 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
     if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
     	
-    	periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
-    	
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
@@ -930,6 +938,8 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		sPML(w1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(p1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
+		periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
+		
 	}
 }
 
@@ -940,8 +950,6 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
 	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
     if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
-    	
-    	periodic_BC_3D_WENO5(p2, u2, v2, w2, i, j, k, Nx, Ny, Nz);
     	
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
@@ -1017,6 +1025,8 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		sPML(w2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(p2, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		
+		periodic_BC_3D_WENO5(p2, u2, v2, w2, i, j, k, Nx, Ny, Nz);
+		
 	}
 }
 
@@ -1027,8 +1037,6 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
 	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
     if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
-    	
-    	periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
     	
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
@@ -1103,6 +1111,8 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		sPML(v1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(w1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
 		sPML(p1, i, j, k, Nx, Ny, Nz, h, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		
+		periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
 		
 	}
 }
