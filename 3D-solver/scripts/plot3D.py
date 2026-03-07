@@ -205,8 +205,8 @@ def main():
 
     # Add meshes (semi-transparent so you can see overlap)
     aX = pl.add_mesh(plane_X, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
-    aY = pl.add_mesh(plane_Y, scalars="p", cmap=cmap, opacity=0.05, lighting=False, show_scalar_bar=False)
-    aZ = pl.add_mesh(plane_Z, scalars="p", cmap=cmap, opacity=0.05, lighting=False, show_scalar_bar=False)
+    aY = pl.add_mesh(plane_Y, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
+    aZ = pl.add_mesh(plane_Z, scalars="p", cmap=cmap, opacity=0.95, lighting=False, show_scalar_bar=False)
 
     # fixed color limits if desired
     set_clim(aX, V_LIM)
