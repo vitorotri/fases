@@ -421,7 +421,7 @@ int main(int argc, char *argv[]){
     float *d_p_time;
     int i_src, j_src, k_src;
     
-    float src_y; // for raised cosine
+    //float src_y; // for raised cosine
     
     file.open(argv[3]);
 	if (!file.is_open()){
@@ -440,9 +440,9 @@ int main(int argc, char *argv[]){
         		// point source
             	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
-            	//p_time[0] = val_s;
-            	//p_time[1] = -val_s;
-            	src_y = val_y;
+            	p_time[0] = val_s;
+            	p_time[1] = -val_s;
+            	//src_y = val_y;
             	//p_time[2] = 0.25 * val_s;
             	// plane wave
             	/*
@@ -459,7 +459,7 @@ int main(int argc, char *argv[]){
 	}
 	file.close();
 	file.clear();
-	
+	/*
 	// raised cosine
 	float W_full = 0.04f;
 	float ww = 0.5f * W_full;
@@ -480,7 +480,7 @@ int main(int argc, char *argv[]){
         	}
     	}
 	}
-	
+	*/
 	/*
 	// oscillating source
 	for (int nn = 0; nn < Nt; nn++){
@@ -555,7 +555,7 @@ int main(int argc, char *argv[]){
 	dim3 TP(8,8,8);
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 	
-	
+	/*
 	// Copy initial data to device if not using p_time[]
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -564,7 +564,7 @@ int main(int argc, char *argv[]){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
-    
+    */
     /*
     if (cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -775,7 +775,7 @@ int main(int argc, char *argv[]){
 				
 			// (0)
 			
-			//kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
+			kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
 			
 			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
