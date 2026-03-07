@@ -29,7 +29,7 @@ int main(int argc, char *argv[]){
 	float *c_rl, *dd, *beta_rl; // WENO5 arrays
 	float rho, c, Temp; // density, speed of sound, temperature
 	float Lx, Ly, Lz; // domain dimensions
-	float N_PML, S_PML, E_PML, W_PML, F_PML, B_PML; // Perfectly Matched Layer activation keys
+	float U_PML, D_PML, R_PML, L_PML, F_PML, B_PML; // Perfectly Matched Layer activation keys
     int Nx, Ny, Nz, n; // number of points in x, y, time step
     
     // timing variables
@@ -59,10 +59,10 @@ int main(int argc, char *argv[]){
     f_cutoff = conf_arr[2]; // [Hz] (cutoff frequency)
     
     // PML keys
-    N_PML = (float)conf_arr[6];
-    S_PML = (float)conf_arr[7];
-    E_PML = (float)conf_arr[8];
-    W_PML = (float)conf_arr[9];
+    U_PML = (float)conf_arr[6];
+    D_PML = (float)conf_arr[7];
+    R_PML = (float)conf_arr[8];
+    L_PML = (float)conf_arr[9];
     F_PML = (float)conf_arr[10];
     B_PML = (float)conf_arr[11];
     
@@ -109,15 +109,15 @@ int main(int argc, char *argv[]){
 		
 		build_sdf(&sc, h, &Nx, &Ny, &Nz, &Lx, &Ly, &Lz, &S);
 		
+		if(!build_oid_dense_cpu(sc, S, Nx, Ny, Nz, h, tol, &oid)){
+    		fprintf(stderr,"Failed to build OID map\n");
+    		return 1;
+		}
+		
 		FILE *file_S = fopen("output/S.bin", "wb");
 		if (file_S) {
     		fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
     		fclose(file_S);
-		}
-		
-		if(!build_oid_dense_cpu(sc, S, Nx, Ny, Nz, h, tol, &oid)){
-    		fprintf(stderr,"Failed to build OID map\n");
-    		return 1;
 		}
 		
 		FILE *file_oid = fopen("output/oid.bin", "wb");
@@ -148,7 +148,6 @@ int main(int argc, char *argv[]){
     	fprintf(pre_header, "%d %d %d %f %d\n", Nx, Ny, Nz, h, (int)(tol/h));
     	fclose(pre_header);
     }
-    
     
     
     /*
@@ -468,7 +467,7 @@ int main(int argc, char *argv[]){
     for (int k = 0; k < Nz; ++k){
     	for (int j = 0; j < Ny; ++j){
         	for (int i = 0; i < Nx; ++i){
-            	// x-location of cell center
+            	// y-location of cell center
             	float yy = (j + 0.5f) * h;
 	
             	float g  = raised_cosine(yy, src_y, ww);
@@ -477,7 +476,7 @@ int main(int argc, char *argv[]){
             	int Cijk = flat3(i, j, k, Nx, Ny);
 	
             	p0[Cijk] = pI;
-            	u0[Cijk] = pI / (rho * c);  // +x traveling wave
+            	v0[Cijk] = pI / (rho * c);  // +y traveling wave
         	}
     	}
 	}
@@ -521,9 +520,40 @@ int main(int argc, char *argv[]){
 	
 	int opt;
 	
+	
+	
+	
+	
+	
+	// peridoc BCs trick
+	dim3 TPz(16,16);
+	dim3 BPz((Nx + TPz.x - 1)/TPz.x, (Ny + TPz.y - 1)/TPz.y);
+	kernel_periodic_trick_z<<<BPz, TPz>>>(d_S, d_oid, Nx, Ny, Nz, h);
+	cudaDeviceSynchronize();
+	dim3 TPx(16,16);
+	dim3 BPx((Ny + TPx.x - 1)/TPx.x, (Nz + TPx.y - 1)/TPx.y);
+	kernel_periodic_trick_x<<<BPx, TPx>>>(d_S, d_oid, Nx, Ny, Nz, h);
+	cudaDeviceSynchronize();
+	cudaMemcpy(S, d_S, N*sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(oid, d_oid, N*sizeof(uint8_t), cudaMemcpyDeviceToHost);
+	FILE *file_S = fopen("output/S.bin", "wb");
+	if (file_S) {
+    	fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
+    	fclose(file_S);
+	}
+	FILE *file_oid = fopen("output/oid.bin", "wb");
+	if (file_oid){
+    	fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
+    	fclose(file_oid);
+	}
+	
+	
+	
+	
+	
 	// Kernel launch parameters
-	dim3 TP(8,8,8); // multiples of 32, max is 1024 (TP.x * TP.y * TP.z <= 1024) // may influence on number of resources requested, be carefull (here maximum is probably 16 x 16)
-	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z); // BLOCKS Per Grid
+	dim3 TP(8,8,8);
+	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 	
 	
 	// Copy initial data to device if not using p_time[]
@@ -667,7 +697,7 @@ int main(int argc, char *argv[]){
 		
 		// Launch Euler kernel
 			
-		//kernel_Euler<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+		//kernel_Euler<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
 		//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
 			
@@ -747,24 +777,33 @@ int main(int argc, char *argv[]){
 			
 			//kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
 			
-			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+			
+			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
+			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
 			
 			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 			
 			// (1)
 			
-			kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+			kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
+			
+			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
+			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
 			
 			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p2, d_u2, d_v2, d_w2);
 			
 			// (2)
-			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, N_PML, S_PML, E_PML, W_PML, F_PML, B_PML);
+			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+			
+			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
+			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
 			
 			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 

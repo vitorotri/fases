@@ -237,123 +237,125 @@ __host__ bool check_energy_coeffs(float R, float T){
 	return 0;
 }
 
-__host__ __device__
-void periodic_BC_3D_WENO5(float *p, float *u, float *v, float *w,
-                          int i, int j, int k,
-                          int Nx, int Ny, int Nz)
+__global__ void kernel_periodic_trick_z(float *S, uint8_t *oid, int Nx, int Ny, int Nz, float h){
+                          
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+	int j = blockIdx.y*blockDim.y + threadIdx.y;
+	
+	if ((i < Nx) && (j < Ny)){
+    
+    	// lower ghosts: 0,1,2, ...
+        for (int k = 0; k < 6; k++){
+          	oid[flat3(i, j, k, Nx, Ny)] = 0xFF;
+          	S[flat3(i, j, k, Nx, Ny)] = (1+k) * h; // should be smaller, but we want to trick WENO kernels
+		}
+
+        // upper ghosts: ..., Nz-3,Nz-2,Nz-1
+        for (int k = Nz-7; k < Nz; k++){
+        	oid[flat3(i, j, k, Nx, Ny)] = 0xFF;
+        	S[flat3(i, j, k, Nx, Ny)] = (Nz - 1+k) * h; // should be smaller, but we want to trick WENO kernels
+        }
+	
+	}
+}
+
+__global__ void kernel_periodic_trick_x(float *S, uint8_t *oid,
+                                        int Nx, int Ny, int Nz, float h)
 {
-    constexpr int ng = 3;
-	/*
-    // ---------------------------------
-    // X periodic faces: one writer per (j,k)
-    // ---------------------------------
-    if (i == ng) {
-        // left ghosts: 0,1,2 <- Nx-6,Nx-5,Nx-4
-        p[flat3(0, j, k, Nx, Ny)] = p[flat3(Nx - 2*ng,     j, k, Nx, Ny)];
-        u[flat3(0, j, k, Nx, Ny)] = u[flat3(Nx - 2*ng,     j, k, Nx, Ny)];
-        v[flat3(0, j, k, Nx, Ny)] = v[flat3(Nx - 2*ng,     j, k, Nx, Ny)];
-        w[flat3(0, j, k, Nx, Ny)] = w[flat3(Nx - 2*ng,     j, k, Nx, Ny)];
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int k = blockIdx.y * blockDim.y + threadIdx.y;
 
-        p[flat3(1, j, k, Nx, Ny)] = p[flat3(Nx - 2*ng + 1, j, k, Nx, Ny)];
-        u[flat3(1, j, k, Nx, Ny)] = u[flat3(Nx - 2*ng + 1, j, k, Nx, Ny)];
-        v[flat3(1, j, k, Nx, Ny)] = v[flat3(Nx - 2*ng + 1, j, k, Nx, Ny)];
-        w[flat3(1, j, k, Nx, Ny)] = w[flat3(Nx - 2*ng + 1, j, k, Nx, Ny)];
+    if (j >= Ny || k >= Nz) return;
 
-        p[flat3(2, j, k, Nx, Ny)] = p[flat3(Nx - 2*ng + 2, j, k, Nx, Ny)];
-        u[flat3(2, j, k, Nx, Ny)] = u[flat3(Nx - 2*ng + 2, j, k, Nx, Ny)];
-        v[flat3(2, j, k, Nx, Ny)] = v[flat3(Nx - 2*ng + 2, j, k, Nx, Ny)];
-        w[flat3(2, j, k, Nx, Ny)] = w[flat3(Nx - 2*ng + 2, j, k, Nx, Ny)];
-
-        // right ghosts: Nx-3,Nx-2,Nx-1 <- 3,4,5
-        p[flat3(Nx - ng,     j, k, Nx, Ny)] = p[flat3(ng,     j, k, Nx, Ny)];
-        u[flat3(Nx - ng,     j, k, Nx, Ny)] = u[flat3(ng,     j, k, Nx, Ny)];
-        v[flat3(Nx - ng,     j, k, Nx, Ny)] = v[flat3(ng,     j, k, Nx, Ny)];
-        w[flat3(Nx - ng,     j, k, Nx, Ny)] = w[flat3(ng,     j, k, Nx, Ny)];
-
-        p[flat3(Nx - ng + 1, j, k, Nx, Ny)] = p[flat3(ng + 1, j, k, Nx, Ny)];
-        u[flat3(Nx - ng + 1, j, k, Nx, Ny)] = u[flat3(ng + 1, j, k, Nx, Ny)];
-        v[flat3(Nx - ng + 1, j, k, Nx, Ny)] = v[flat3(ng + 1, j, k, Nx, Ny)];
-        w[flat3(Nx - ng + 1, j, k, Nx, Ny)] = w[flat3(ng + 1, j, k, Nx, Ny)];
-
-        p[flat3(Nx - ng + 2, j, k, Nx, Ny)] = p[flat3(ng + 2, j, k, Nx, Ny)];
-        u[flat3(Nx - ng + 2, j, k, Nx, Ny)] = u[flat3(ng + 2, j, k, Nx, Ny)];
-        v[flat3(Nx - ng + 2, j, k, Nx, Ny)] = v[flat3(ng + 2, j, k, Nx, Ny)];
-        w[flat3(Nx - ng + 2, j, k, Nx, Ny)] = w[flat3(ng + 2, j, k, Nx, Ny)];
+    for (int i = 0; i < 8; ++i) {
+        oid[flat3(i, j, k, Nx, Ny)] = 0xFF;
+        S[flat3(i, j, k, Nx, Ny)] = (i + 1) * h;
     }
 
-    // ---------------------------------
-    // Y periodic faces: one writer per (i,k)
-    // ---------------------------------
-    if (j == ng) {
-        // bottom ghosts: 0,1,2 <- Ny-6,Ny-5,Ny-4
-        p[flat3(i, 0, k, Nx, Ny)] = p[flat3(i, Ny - 2*ng,     k, Nx, Ny)];
-        u[flat3(i, 0, k, Nx, Ny)] = u[flat3(i, Ny - 2*ng,     k, Nx, Ny)];
-        v[flat3(i, 0, k, Nx, Ny)] = v[flat3(i, Ny - 2*ng,     k, Nx, Ny)];
-        w[flat3(i, 0, k, Nx, Ny)] = w[flat3(i, Ny - 2*ng,     k, Nx, Ny)];
-
-        p[flat3(i, 1, k, Nx, Ny)] = p[flat3(i, Ny - 2*ng + 1, k, Nx, Ny)];
-        u[flat3(i, 1, k, Nx, Ny)] = u[flat3(i, Ny - 2*ng + 1, k, Nx, Ny)];
-        v[flat3(i, 1, k, Nx, Ny)] = v[flat3(i, Ny - 2*ng + 1, k, Nx, Ny)];
-        w[flat3(i, 1, k, Nx, Ny)] = w[flat3(i, Ny - 2*ng + 1, k, Nx, Ny)];
-
-        p[flat3(i, 2, k, Nx, Ny)] = p[flat3(i, Ny - 2*ng + 2, k, Nx, Ny)];
-        u[flat3(i, 2, k, Nx, Ny)] = u[flat3(i, Ny - 2*ng + 2, k, Nx, Ny)];
-        v[flat3(i, 2, k, Nx, Ny)] = v[flat3(i, Ny - 2*ng + 2, k, Nx, Ny)];
-        w[flat3(i, 2, k, Nx, Ny)] = w[flat3(i, Ny - 2*ng + 2, k, Nx, Ny)];
-
-        // top ghosts: Ny-3,Ny-2,Ny-1 <- 3,4,5
-        p[flat3(i, Ny - ng,     k, Nx, Ny)] = p[flat3(i, ng,     k, Nx, Ny)];
-        u[flat3(i, Ny - ng,     k, Nx, Ny)] = u[flat3(i, ng,     k, Nx, Ny)];
-        v[flat3(i, Ny - ng,     k, Nx, Ny)] = v[flat3(i, ng,     k, Nx, Ny)];
-        w[flat3(i, Ny - ng,     k, Nx, Ny)] = w[flat3(i, ng,     k, Nx, Ny)];
-
-        p[flat3(i, Ny - ng + 1, k, Nx, Ny)] = p[flat3(i, ng + 1, k, Nx, Ny)];
-        u[flat3(i, Ny - ng + 1, k, Nx, Ny)] = u[flat3(i, ng + 1, k, Nx, Ny)];
-        v[flat3(i, Ny - ng + 1, k, Nx, Ny)] = v[flat3(i, ng + 1, k, Nx, Ny)];
-        w[flat3(i, Ny - ng + 1, k, Nx, Ny)] = w[flat3(i, ng + 1, k, Nx, Ny)];
-
-        p[flat3(i, Ny - ng + 2, k, Nx, Ny)] = p[flat3(i, ng + 2, k, Nx, Ny)];
-        u[flat3(i, Ny - ng + 2, k, Nx, Ny)] = u[flat3(i, ng + 2, k, Nx, Ny)];
-        v[flat3(i, Ny - ng + 2, k, Nx, Ny)] = v[flat3(i, ng + 2, k, Nx, Ny)];
-        w[flat3(i, Ny - ng + 2, k, Nx, Ny)] = w[flat3(i, ng + 2, k, Nx, Ny)];
+    for (int t = 0; t < 8; ++t) {
+        int i = Nx - 8 + t;
+        oid[flat3(i, j, k, Nx, Ny)] = 0xFF;
+        S[flat3(i, j, k, Nx, Ny)] = (8 - t) * h;
     }
-	*/
-    // ---------------------------------
-    // Z periodic faces: one writer per (i,j)
-    // ---------------------------------
-    if (k == ng) {
-        // lower ghosts: 0,1,2 <- Nz-6,Nz-5,Nz-4
-        p[flat3(i, j, 3, Nx, Ny)] = p[flat3(i, j, Nz - 2*ng - 3,     Nx, Ny)];
-        u[flat3(i, j, 3, Nx, Ny)] = u[flat3(i, j, Nz - 2*ng - 3,     Nx, Ny)];
-        v[flat3(i, j, 3, Nx, Ny)] = v[flat3(i, j, Nz - 2*ng - 3,     Nx, Ny)];
-        w[flat3(i, j, 3, Nx, Ny)] = w[flat3(i, j, Nz - 2*ng - 3,     Nx, Ny)];
+}
 
-        p[flat3(i, j, 4, Nx, Ny)] = p[flat3(i, j, Nz - 2*ng + 1 - 3, Nx, Ny)];
-        u[flat3(i, j, 4, Nx, Ny)] = u[flat3(i, j, Nz - 2*ng + 1 - 3, Nx, Ny)];
-        v[flat3(i, j, 4, Nx, Ny)] = v[flat3(i, j, Nz - 2*ng + 1 - 3, Nx, Ny)];
-        w[flat3(i, j, 4, Nx, Ny)] = w[flat3(i, j, Nz - 2*ng + 1 - 3, Nx, Ny)];
+__global__ void kernel_apply_periodic_x(float *p, float *u, float *v, float *w, int Nx, int Ny, int Nz){
+    int j = blockIdx.x * blockDim.x + threadIdx.x + 3;
+    int k = blockIdx.y * blockDim.y + threadIdx.y + 3;
 
-        p[flat3(i, j, 5, Nx, Ny)] = p[flat3(i, j, Nz - 2*ng + 2 - 3, Nx, Ny)];
-        u[flat3(i, j, 5, Nx, Ny)] = u[flat3(i, j, Nz - 2*ng + 2 - 3, Nx, Ny)];
-        v[flat3(i, j, 5, Nx, Ny)] = v[flat3(i, j, Nz - 2*ng + 2 - 3, Nx, Ny)];
-        w[flat3(i, j, 5, Nx, Ny)] = w[flat3(i, j, Nz - 2*ng + 2 - 3, Nx, Ny)];
+    if (j >= Ny - 3 || k >= Nz - 3) return;
 
-        // upper ghosts: Nz-3,Nz-2,Nz-1 <- 3,4,5
-        p[flat3(i, j, Nz - ng - 3,     Nx, Ny)] = p[flat3(i, j, ng,     Nx, Ny)];
-        u[flat3(i, j, Nz - ng - 3,     Nx, Ny)] = u[flat3(i, j, ng,     Nx, Ny)];
-        v[flat3(i, j, Nz - ng - 3,     Nx, Ny)] = v[flat3(i, j, ng,     Nx, Ny)];
-        w[flat3(i, j, Nz - ng - 3,     Nx, Ny)] = w[flat3(i, j, ng,     Nx, Ny)];
+    // left ghosts 0,1,2 <- Nx-6,Nx-5,Nx-4
+    p[flat3(0, j, k, Nx, Ny)] = p[flat3(Nx-6, j, k, Nx, Ny)];
+    u[flat3(0, j, k, Nx, Ny)] = u[flat3(Nx-6, j, k, Nx, Ny)];
+    v[flat3(0, j, k, Nx, Ny)] = v[flat3(Nx-6, j, k, Nx, Ny)];
+    w[flat3(0, j, k, Nx, Ny)] = w[flat3(Nx-6, j, k, Nx, Ny)];
 
-        p[flat3(i, j, Nz - ng + 1 - 3, Nx, Ny)] = p[flat3(i, j, ng + 1 + 3, Nx, Ny)];
-        u[flat3(i, j, Nz - ng + 1 - 3, Nx, Ny)] = u[flat3(i, j, ng + 1 + 3, Nx, Ny)];
-        v[flat3(i, j, Nz - ng + 1 - 3, Nx, Ny)] = v[flat3(i, j, ng + 1 + 3, Nx, Ny)];
-        w[flat3(i, j, Nz - ng + 1 - 3, Nx, Ny)] = w[flat3(i, j, ng + 1 + 3, Nx, Ny)];
+    p[flat3(1, j, k, Nx, Ny)] = p[flat3(Nx-5, j, k, Nx, Ny)];
+    u[flat3(1, j, k, Nx, Ny)] = u[flat3(Nx-5, j, k, Nx, Ny)];
+    v[flat3(1, j, k, Nx, Ny)] = v[flat3(Nx-5, j, k, Nx, Ny)];
+    w[flat3(1, j, k, Nx, Ny)] = w[flat3(Nx-5, j, k, Nx, Ny)];
 
-        p[flat3(i, j, Nz - ng + 2 - 3, Nx, Ny)] = p[flat3(i, j, ng + 2 + 3, Nx, Ny)];
-        u[flat3(i, j, Nz - ng + 2 - 3, Nx, Ny)] = u[flat3(i, j, ng + 2 + 3, Nx, Ny)];
-        v[flat3(i, j, Nz - ng + 2 - 3, Nx, Ny)] = v[flat3(i, j, ng + 2 + 3, Nx, Ny)];
-        w[flat3(i, j, Nz - ng + 2 - 3, Nx, Ny)] = w[flat3(i, j, ng + 2 + 3, Nx, Ny)];
-    }
+    p[flat3(2, j, k, Nx, Ny)] = p[flat3(Nx-4, j, k, Nx, Ny)];
+    u[flat3(2, j, k, Nx, Ny)] = u[flat3(Nx-4, j, k, Nx, Ny)];
+    v[flat3(2, j, k, Nx, Ny)] = v[flat3(Nx-4, j, k, Nx, Ny)];
+    w[flat3(2, j, k, Nx, Ny)] = w[flat3(Nx-4, j, k, Nx, Ny)];
+
+    // right ghosts Nx-3,Nx-2,Nx-1 <- 3,4,5
+    p[flat3(Nx-3, j, k, Nx, Ny)] = p[flat3(3, j, k, Nx, Ny)];
+    u[flat3(Nx-3, j, k, Nx, Ny)] = u[flat3(3, j, k, Nx, Ny)];
+    v[flat3(Nx-3, j, k, Nx, Ny)] = v[flat3(3, j, k, Nx, Ny)];
+    w[flat3(Nx-3, j, k, Nx, Ny)] = w[flat3(3, j, k, Nx, Ny)];
+
+    p[flat3(Nx-2, j, k, Nx, Ny)] = p[flat3(4, j, k, Nx, Ny)];
+    u[flat3(Nx-2, j, k, Nx, Ny)] = u[flat3(4, j, k, Nx, Ny)];
+    v[flat3(Nx-2, j, k, Nx, Ny)] = v[flat3(4, j, k, Nx, Ny)];
+    w[flat3(Nx-2, j, k, Nx, Ny)] = w[flat3(4, j, k, Nx, Ny)];
+
+    p[flat3(Nx-1, j, k, Nx, Ny)] = p[flat3(5, j, k, Nx, Ny)];
+    u[flat3(Nx-1, j, k, Nx, Ny)] = u[flat3(5, j, k, Nx, Ny)];
+    v[flat3(Nx-1, j, k, Nx, Ny)] = v[flat3(5, j, k, Nx, Ny)];
+    w[flat3(Nx-1, j, k, Nx, Ny)] = w[flat3(5, j, k, Nx, Ny)];
+}
+
+__global__ void kernel_apply_periodic_z(float *p, float *u, float *v, float *w, int Nx, int Ny, int Nz){
+    
+    int i = blockIdx.x * blockDim.x + threadIdx.x + 3;
+    int j = blockIdx.y * blockDim.y + threadIdx.y + 3;
+
+    if (i >= Nx-3 || j >= Ny-3) return;
+
+    // lower ghosts 0,1,2 <- Nz-6,Nz-5,Nz-4
+    p[flat3(i,j,0,Nx,Ny)] = p[flat3(i,j,Nz-6,Nx,Ny)];
+    u[flat3(i,j,0,Nx,Ny)] = u[flat3(i,j,Nz-6,Nx,Ny)];
+    v[flat3(i,j,0,Nx,Ny)] = v[flat3(i,j,Nz-6,Nx,Ny)];
+    w[flat3(i,j,0,Nx,Ny)] = w[flat3(i,j,Nz-6,Nx,Ny)];
+
+    p[flat3(i,j,1,Nx,Ny)] = p[flat3(i,j,Nz-5,Nx,Ny)];
+    u[flat3(i,j,1,Nx,Ny)] = u[flat3(i,j,Nz-5,Nx,Ny)];
+    v[flat3(i,j,1,Nx,Ny)] = v[flat3(i,j,Nz-5,Nx,Ny)];
+    w[flat3(i,j,1,Nx,Ny)] = w[flat3(i,j,Nz-5,Nx,Ny)];
+
+    p[flat3(i,j,2,Nx,Ny)] = p[flat3(i,j,Nz-4,Nx,Ny)];
+    u[flat3(i,j,2,Nx,Ny)] = u[flat3(i,j,Nz-4,Nx,Ny)];
+    v[flat3(i,j,2,Nx,Ny)] = v[flat3(i,j,Nz-4,Nx,Ny)];
+    w[flat3(i,j,2,Nx,Ny)] = w[flat3(i,j,Nz-4,Nx,Ny)];
+
+    // upper ghosts Nz-3,Nz-2,Nz-1 <- 3,4,5
+    p[flat3(i,j,Nz-3,Nx,Ny)] = p[flat3(i,j,3,Nx,Ny)];
+    u[flat3(i,j,Nz-3,Nx,Ny)] = u[flat3(i,j,3,Nx,Ny)];
+    v[flat3(i,j,Nz-3,Nx,Ny)] = v[flat3(i,j,3,Nx,Ny)];
+    w[flat3(i,j,Nz-3,Nx,Ny)] = w[flat3(i,j,3,Nx,Ny)];
+
+    p[flat3(i,j,Nz-2,Nx,Ny)] = p[flat3(i,j,4,Nx,Ny)];
+    u[flat3(i,j,Nz-2,Nx,Ny)] = u[flat3(i,j,4,Nx,Ny)];
+    v[flat3(i,j,Nz-2,Nx,Ny)] = v[flat3(i,j,4,Nx,Ny)];
+    w[flat3(i,j,Nz-2,Nx,Ny)] = w[flat3(i,j,4,Nx,Ny)];
+
+    p[flat3(i,j,Nz-1,Nx,Ny)] = p[flat3(i,j,5,Nx,Ny)];
+    u[flat3(i,j,Nz-1,Nx,Ny)] = u[flat3(i,j,5,Nx,Ny)];
+    v[flat3(i,j,Nz-1,Nx,Ny)] = v[flat3(i,j,5,Nx,Ny)];
+    w[flat3(i,j,Nz-1,Nx,Ny)] = w[flat3(i,j,5,Nx,Ny)];
 }
 
 // non-implicit, solved with regular SSP-RK3, but coefficients alpha, beta and zeta are restricted in terms
@@ -970,8 +972,6 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		
 		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.1, 0.1, 0.1, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
 		
-		periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
-		
 	}
 }
 
@@ -1054,8 +1054,6 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		// other BCs
 		
 		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.1, 0.1, 0.1, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
-		
-		periodic_BC_3D_WENO5(p2, u2, v2, w2, i, j, k, Nx, Ny, Nz);
 		
 	}
 }
@@ -1140,8 +1138,6 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, 
 		// other BCs
 		
 		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.1, 0.1, 0.1, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
-		
-		periodic_BC_3D_WENO5(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz);
 		
 	}
 }
