@@ -777,7 +777,14 @@ class SolverGUI:
             )
 
             self.status_var.set("Acoustic parameters computed.")
-            messagebox.showinfo("Acoustic parameters", msg)
+            win = tk.Toplevel(self.root)
+            win.title("Acoustic parameters")
+            win.geometry("420x320")
+            
+            txt = tk.Text(win, wrap="word", height=20, width=50)
+            txt.pack(fill="both", expand=True, padx=10, pady=10)
+            txt.insert("1.0", msg)
+            txt.config(state="disabled")
 
         except Exception as e:
             self.status_var.set("Error.")
