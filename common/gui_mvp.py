@@ -25,8 +25,21 @@ def clean_group_name(raw: str) -> str:
 class SolverGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("FreqLab MVP GUI")
+        self.root.title("P.H.A.S.E - Parallel Hybrid Acoustic Solver for Environments")
         self.root.geometry("1300x820")
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
+
+        self.bg = "#15141a"        # main background
+        self.panel = "#1b1a22"     # panels
+        self.entry_bg = "#22212b"  # entry boxes
+        self.fg = "#e6e4f2"        # text
+        self.accent = "#a66cff"    # violet accent
+        self.accent_hover = "#c08cff"
+        self.border = "#2a2835"
+
+        
+        self.configure_theme()
 
         self.solver_var = tk.StringVar(value="3D")
         self.scene_path = tk.StringVar()
@@ -65,6 +78,76 @@ class SolverGUI:
         self.status_var = tk.StringVar(value="Ready.")
 
         self.build_ui()
+    
+    def configure_theme(self):
+        self.root.configure(bg=self.bg)
+    
+        self.style.configure(
+            ".",
+            background=self.bg,
+            foreground=self.fg,
+            fieldbackground=self.entry_bg,
+            bordercolor=self.border,
+            lightcolor=self.border,
+            darkcolor=self.border
+        )
+    
+        self.style.configure(
+            "TFrame",
+            background=self.bg
+        )
+    
+        self.style.configure(
+            "TLabel",
+            background=self.bg,
+            foreground=self.fg
+        )
+    
+        self.style.configure(
+            "TLabelframe",
+            background=self.bg,
+            bordercolor=self.border,
+            relief="solid"
+        )
+    
+        self.style.configure(
+            "TLabelframe.Label",
+            background=self.bg,
+            foreground=self.accent
+        )
+    
+        self.style.configure(
+            "TButton",
+            background=self.panel,
+            foreground=self.fg,
+            borderwidth=1,
+            padding=6
+        )
+    
+        self.style.map(
+            "TButton",
+            background=[("active", self.accent)],
+            foreground=[("active", "#ffffff")]
+        )
+    
+        self.style.configure(
+            "TEntry",
+            fieldbackground=self.entry_bg,
+            foreground=self.fg,
+            insertcolor=self.fg
+        )
+    
+        self.style.configure(
+            "TRadiobutton",
+            background=self.bg,
+            foreground=self.fg
+        )
+    
+        self.style.configure(
+            "TCheckbutton",
+            background=self.bg,
+            foreground=self.fg
+        )
 
     def solver_dir(self):
         return "3D-solver" if self.solver_var.get() == "3D" else "2D-solver"
@@ -148,7 +231,13 @@ class SolverGUI:
         materials_outer = ttk.LabelFrame(outer, text="Scene objects / materials")
         materials_outer.pack(fill="both", expand=True, pady=6)
 
-        canvas = tk.Canvas(materials_outer, height=320)
+        canvas = tk.Canvas(
+            materials_outer,
+            height=320,
+            bg=self.panel,
+            highlightthickness=1,
+            highlightbackground=self.border
+        )
         scrollbar = ttk.Scrollbar(materials_outer, orient="vertical", command=canvas.yview)
         self.material_frame = ttk.Frame(canvas)
 
@@ -515,7 +604,8 @@ class SolverGUI:
 
             self.status_var.set("Running solver...")
             self.root.update_idletasks()
-            proc = subprocess.run(args, capture_output=True, text=True)
+            #proc = subprocess.run(args, capture_output=True, text=True)
+            proc = subprocess.run(args, cwd=self.solver_root())
 
             if proc.returncode != 0:
                 raise RuntimeError(
@@ -562,18 +652,38 @@ class SolverGUI:
             messagebox.showerror("Error", f"{script} not found.")
             return
 
-        proc = subprocess.run(
-            ["python3", script_path],
-            cwd=self.solver_root(),
-            capture_output=True,
-            text=True,
-        )
+        anim_name = "anim3d_slices.mp4" if solver == "3D-solver" else "anim.mp4"
+        anim_path = os.path.join(self.solver_root(), "output", anim_name)
 
-        if proc.returncode != 0:
-            messagebox.showerror(
-                "Error",
-                f"Failed to run {script}\n\nSTDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}",
+        try:
+            self.status_var.set("Generating animation...")
+            self.root.update_idletasks()
+
+            proc = subprocess.run(
+                ["python3", script_path],
+                cwd=self.solver_root(),
+                capture_output=True,
+                text=True,
             )
+
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to run {script}\n\nSTDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}"
+                )
+
+            if os.path.exists(anim_path):
+                self.status_var.set("Animation finished.")
+                messagebox.showinfo("Done", f"Animation finished:\n{anim_path}")
+            else:
+                self.status_var.set("Plot script finished.")
+                messagebox.showwarning(
+                    "Done",
+                    f"{script} finished, but the animation file was not found:\n{anim_path}"
+                )
+
+        except Exception as e:
+            self.status_var.set("Error.")
+            messagebox.showerror("Error", str(e))
 
 
 if __name__ == "__main__":
