@@ -564,7 +564,7 @@ int main(int argc, char *argv[]){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
-    */
+    
     /*
     if (cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -630,15 +630,15 @@ int main(int argc, char *argv[]){
 	float TV_p_, TV_u_, TV_v_, TV_w_, TV_0, TV_1;
 	
 	// compute initial TVs if not using p_time[]
-	
+	/*
 	TV_p_ = TV(p0, Nx, Ny, Nz, h);
 	TV_u_ = TV(u0, Nx, Ny, Nz, h);
 	TV_v_ = TV(v0, Nx, Ny, Nz, h);
 	TV_w_ = TV(w0, Nx, Ny, Nz, h);
 	
 	TV_0 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
-	
-	//TV_0 = 3.0 * h * h * p_time[0];
+	*/
+	TV_0 = 3.0 * h * h * p_time[0];
 	
 	// --------------------------------- Initial energy ------------------------------------
 	
