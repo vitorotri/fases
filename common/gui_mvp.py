@@ -263,6 +263,9 @@ class SolverGUI:
             side="left", padx=5
         )
         ttk.Button(bottom, text="Plot IR", command=self.plot_ir).pack(side="left", padx=5)
+        ttk.Button(bottom, text="Compute params", command=self.compute_acoustic_params).pack(
+            side="left", padx=5
+        )
         ttk.Button(bottom, text="Plot slices", command=self.plot_slices).pack(side="left", padx=5)
 
         ttk.Label(bottom, textvariable=self.status_var).pack(side="right", padx=5)
@@ -642,6 +645,143 @@ class SolverGUI:
         plt.title("Impulse Response")
         plt.grid(True, alpha=0.5)
         plt.show()
+
+    def _fit_decay_rt60(self, t, edc_db, db_lo, db_hi):
+        """
+        Fit a straight line to the Schroeder decay curve between db_hi and db_lo [dB]
+        and extrapolate to RT60.
+        Example:
+            EDT -> db_hi = 0,   db_lo = -10
+            T20 -> db_hi = -5,  db_lo = -25
+            T30 -> db_hi = -5,  db_lo = -35
+        """
+        mask = (edc_db <= db_hi) & (edc_db >= db_lo)
+
+        if np.count_nonzero(mask) < 2:
+            return np.nan
+
+        tt = t[mask]
+        yy = edc_db[mask]
+
+        # Linear fit: yy = a * t + b
+        a, b = np.polyfit(tt, yy, 1)
+
+        # Physical decay must have negative slope
+        if a >= 0:
+            return np.nan
+
+        return -60.0 / a
+
+    def _compute_ir_parameters(self, ir, dt):
+        """
+        Compute broadband room-acoustic-style parameters from a single IR.
+        Uses energy E = h^2 and Schroeder backward integration.
+        """
+        if ir.size < 4:
+            raise ValueError("IR.bin is too short.")
+
+        t = np.arange(ir.size, dtype=np.float64) * dt
+        energy = ir.astype(np.float64) ** 2
+
+        total_energy = np.sum(energy)
+        if total_energy <= 0.0:
+            raise ValueError("IR energy is zero.")
+
+        # Schroeder curve
+        edc = np.cumsum(energy[::-1])[::-1]
+
+        if edc[0] <= 0.0:
+            raise ValueError("Could not build valid Schroeder decay.")
+
+        edc_db = 10.0 * np.log10(np.maximum(edc / edc[0], 1e-30))
+
+        # Reverberation-related metrics
+        edt = self._fit_decay_rt60(t, edc_db, db_lo=-10.0, db_hi=0.0)
+        t20 = self._fit_decay_rt60(t, edc_db, db_lo=-25.0, db_hi=-5.0)
+        t30 = self._fit_decay_rt60(t, edc_db, db_lo=-35.0, db_hi=-5.0)
+
+        # Clarity / definition / center time
+        n50 = int(round(0.050 / dt))
+        n80 = int(round(0.080 / dt))
+
+        n50 = max(0, min(n50, ir.size))
+        n80 = max(0, min(n80, ir.size))
+
+        early50 = np.sum(energy[:n50])
+        late50  = np.sum(energy[n50:])
+        early80 = np.sum(energy[:n80])
+        late80  = np.sum(energy[n80:])
+
+        eps = 1e-30
+        c50 = 10.0 * np.log10((early50 + eps) / (late50 + eps))
+        c80 = 10.0 * np.log10((early80 + eps) / (late80 + eps))
+        d50 = 100.0 * early50 / (total_energy + eps)
+        ts  = np.sum(t * energy) / (total_energy + eps)
+
+        return {
+            "N samples": ir.size,
+            "dt [s]": dt,
+            "EDT [s]": edt,
+            "T20 [s]": t20,
+            "T30 [s]": t30,
+            "C50 [dB]": c50,
+            "C80 [dB]": c80,
+            "D50 [%]": d50,
+            "Ts [s]": ts,
+        }
+
+    def compute_acoustic_params(self):
+        ir_path = os.path.join(self.solver_root(), "output", "IR.bin")
+        if not os.path.exists(ir_path):
+            messagebox.showerror("Error", "IR.bin not found.")
+            return
+
+        try:
+            ir = np.fromfile(ir_path, dtype=np.float32)
+
+            if ir.size == 0:
+                messagebox.showerror("Error", "IR.bin is empty.")
+                return
+
+            t_max = float(self.config_vars["t_max [s]"].get())
+            if ir.size < 2 or t_max <= 0.0:
+                messagebox.showerror("Error", "Invalid t_max or IR too short.")
+                return
+
+            # MVP choice: infer dt from GUI t_max and number of samples
+            dt = t_max / float(ir.size - 1)
+
+            params = self._compute_ir_parameters(ir, dt)
+
+            def fmt(x, nd=4):
+                if isinstance(x, (int, np.integer)):
+                    return str(x)
+                if isinstance(x, float) or isinstance(x, np.floating):
+                    if np.isnan(x) or np.isinf(x):
+                        return "not available"
+                    return f"{x:.{nd}f}"
+                return str(x)
+
+            msg = (
+                "Broadband parameters from output/IR.bin\n"
+                "(single source-receiver IR, local values)\n\n"
+                f"N samples: {fmt(params['N samples'])}\n"
+                f"dt [s]:    {fmt(params['dt [s]'], 6)}\n\n"
+                f"EDT [s]:   {fmt(params['EDT [s]'])}\n"
+                f"T20 [s]:   {fmt(params['T20 [s]'])}\n"
+                f"T30 [s]:   {fmt(params['T30 [s]'])}\n\n"
+                f"C50 [dB]:  {fmt(params['C50 [dB]'])}\n"
+                f"C80 [dB]:  {fmt(params['C80 [dB]'])}\n"
+                f"D50 [%]:   {fmt(params['D50 [%]'])}\n"
+                f"Ts [s]:    {fmt(params['Ts [s]'])}"
+            )
+
+            self.status_var.set("Acoustic parameters computed.")
+            messagebox.showinfo("Acoustic parameters", msg)
+
+        except Exception as e:
+            self.status_var.set("Error.")
+            messagebox.showerror("Error", str(e))
 
     def plot_slices(self):
         solver = self.solver_dir()
