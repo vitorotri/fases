@@ -636,11 +636,11 @@ class SolverGUI:
             return
 
         plt.figure()
-        plt.plot(data)
-        plt.xlabel("Sample")
-        plt.ylabel("Amplitude")
+        plt.plot(data, 'b')
+        plt.xlabel("Sample [n]")
+        plt.ylabel("Sound Pressure [Pa]")
         plt.title("Impulse Response")
-        plt.grid(True, alpha=0.3)
+        plt.grid(True, alpha=0.5)
         plt.show()
 
     def plot_slices(self):
