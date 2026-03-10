@@ -327,10 +327,15 @@ def R_constant_from_octaves(freq, R_oct, mag_ceil=1-1e-12):
 # Block 1: User input
 # --------------------
 
-read_file = sys.argv[1] if len(sys.argv) > 1 else sys.exit("\nUsage: python3 vectFIT.py <material_name.mat>\n")
+read_file = sys.argv[1] if len(sys.argv) > 2 else sys.exit("\nUsage: python3 vectFIT.py <material_name.mat> <sim_option>\n")
 
-s_opt = int(input("\nEnter with an option:\n\n0) 2D-solver\n1) 3D-solver\n\n"))
-if not (s_opt == 0 or s_opt == 1):
+s_opt = int(sys.argv[2])
+
+if s_opt == 0:
+    solver_path = "2D-solver"
+elif s_opt == 1:
+    solver_path = "3D-solver"
+else:
     sys.exit("\n[!] No possible option\n")
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -339,14 +344,18 @@ if s_opt == 0:
 if s_opt == 1:
     solver_path = "3D-solver"
 
-s_delete = input("\nReffiting for new simulation? Y/N\n\n")
+'''
+s_delete = input("\nReffiting for new scenario? Y/N\n\n")
 if not (s_delete == "Y" or s_delete == "N"):
     sys.exit("\n[!] No possible option\n")
+'''
 
 Npoles_path = os.path.join(script_dir, "..", solver_path, "config", "poles.txt")
+'''
 if s_delete == "Y":
 	delete_str = "rm " + Npoles_path
 	os.system(delete_str)
+'''
 
 Rmag_oct = np.loadtxt(read_file)
 
