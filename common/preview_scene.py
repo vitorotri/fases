@@ -1,4 +1,3 @@
-
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
@@ -40,16 +39,18 @@ def plot_sphere(ax, center, radius, color):
     ax.plot_surface(x, y, z, linewidth=0, antialiased=True, alpha=0.95, color=color)
 
 
-def set_equal_axes(ax, verts):
+def set_true_aspect(ax, verts):
     mins = verts.min(axis=0)
     maxs = verts.max(axis=0)
-    center = 0.5 * (mins + maxs)
-    radius = 0.5 * np.max(maxs - mins)
-    if radius <= 0:
-        radius = 1.0
-    ax.set_xlim(center[0] - radius, center[0] + radius)
-    ax.set_ylim(center[1] - radius, center[1] + radius)
-    ax.set_zlim(center[2] - radius, center[2] + radius)
+
+    dx, dy, dz = maxs - mins
+
+    ax.set_xlim(mins[0], maxs[0])
+    ax.set_ylim(mins[1], maxs[1])
+    ax.set_zlim(mins[2], maxs[2])
+
+    # this preserves real spatial proportions
+    ax.set_box_aspect((dx, dy, dz))
 
 
 def plot_scene(obj_path, src, rec):
@@ -59,6 +60,7 @@ def plot_scene(obj_path, src, rec):
 
     segments = []
     seen = set()
+
     for face in faces:
         for a, b in face_edges(face):
             key = tuple(sorted((a, b)))
@@ -70,8 +72,14 @@ def plot_scene(obj_path, src, rec):
     fig = plt.figure(figsize=(9, 7))
     ax = fig.add_subplot(111, projection="3d")
 
+    ax.grid(False)
+
     if segments:
-        lc = Line3DCollection(segments, linewidths=0.7)
+        lc = Line3DCollection(
+            segments,
+            colors="black",   # <<< wireframe color
+            linewidths=0.7
+        )
         ax.add_collection3d(lc)
 
     bbox = verts.max(axis=0) - verts.min(axis=0)
@@ -86,12 +94,13 @@ def plot_scene(obj_path, src, rec):
     ax.text(src[0], src[1], src[2], "  Source", color="red")
     ax.text(rec[0], rec[1], rec[2], "  Receiver", color="blue")
 
-    set_equal_axes(ax, np.vstack([verts, np.array(src), np.array(rec)]))
+    set_true_aspect(ax, np.vstack([verts, np.array(src), np.array(rec)]))
+
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
     ax.set_zlabel("Z [m]")
     ax.set_title("Scene preview")
-    #plt.tight_layout()
+
     plt.show()
 
 
