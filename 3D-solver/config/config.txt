@@ -1,10 +1,12 @@
-0.005 	# grid spacing h [m]
-0.01	# maximum simulation time t_max [s]
+0.0275	# grid spacing h [m]
+0.7		# maximum simulation time t_max [s]
 1000.0	# cutoff frequency f_cutoff [Hz]
 22.0	# temperature Temp [°C]
-0.3		# Courant-Friedrich-Lewy number C_CFL (0,0.5]
-8		# number of poles for the ADE
-1		# N PML [0,1]
-1		# S PML [0,1]
-0		# E PML [0,1]
-1		# W PML [0,1]
+0.5		# Courant-Friedrich-Lewy number C_CFL (0,0.5]
+12		# number of poles for the ADE
+0		# U PML {0,1}
+0		# D PML {0,1}
+0		# R PML {0,1}
+0		# L PML {0,1}
+0		# F PML {0,1}
+1		# B PML {0,1}
