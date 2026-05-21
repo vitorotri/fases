@@ -1,4 +1,3 @@
-#include <iostream>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -6,8 +5,10 @@
 #include <cstring>
 #include <string>
 #include <filesystem>
+#include <iostream>
 #include <fstream>
 #include <vector>
+#include <array>
 #include <sstream>
 #include "functions3D.cuh"
 
@@ -417,9 +418,9 @@ int main(int argc, char *argv[]){
     
     // parse source(s)
     
-    float *p_time = new float[Nt]();
-    float *d_p_time;
-    int i_src, j_src, k_src;
+    //float *p_time = new float[Nt]();
+    //float *d_p_time;
+    int i_src, j_src, k_src; // discretized position of source
     
     //float src_y; // for raised cosine
     
@@ -437,26 +438,27 @@ int main(int argc, char *argv[]){
         	j_src = (int)(val_y / h);
         	k_src = (int)(val_z / h);
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
-        		// point source
-            	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
-            	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
-            	p_time[0] = val_s;
-            	p_time[1] = -val_s;
+        		// map point source(s) as intial condition(s) / source injection, no delay(s)
+            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
+            	
+            	// single timed source
+            	//p_time[0] = val_s;
+            	//p_time[1] = -val_s;
             	//src_y = val_y;
             	//p_time[2] = 0.25 * val_s;
-            	// plane wave
-            	/*
-            	for (int i = 0; i < Nx; i++){
-            		for (int k = 0; k < Nz; k++){
-            			p0[flat3(i, j_src, k, Nx, Ny)] = 0.1f*val_s;
-            			u0[flat3(i, j_src, k, Nx, Ny)] = val_s;
-            		}
-            	}
-            	*/
+            	
+            	// single plane wave
+            	//for (int i = 0; i < Nx; i++){
+            	//	for (int k = 0; k < Nz; k++){
+            	//		p0[flat3(i, j_src, k, Nx, Ny)] = 0.1f*val_s;
+            	//		u0[flat3(i, j_src, k, Nx, Ny)] = val_s;
+            	//	}
+            	//}
         	}
-        	
     	}
 	}
+	
 	file.close();
 	file.clear();
 	/*
@@ -487,10 +489,13 @@ int main(int argc, char *argv[]){
 		p_time[nn] = sin(2.0*M_PI*1000.0*nn*dt);
 	}
     */
+    
     // parse receiver(s)
     
-    int i_rec, j_rec, k_rec;
-    i_rec = Nx/2; j_rec = Ny/2; k_rec = Nz/2; // safe default
+    int i_rec, j_rec, k_rec; // receiver position
+    //i_rec = Nx/2; j_rec = Ny/2; k_rec = Nz/2; // safe default
+    
+    std::vector<int> i_recV, j_recV, k_recV; // vectors for multiple receivers
     
     file.open(argv[4]);
 	if (!file.is_open()){
@@ -502,13 +507,18 @@ int main(int argc, char *argv[]){
     	float val_x, val_y, val_z;
     	std::istringstream iss(line);
     	if (iss >> val_x >> val_y >> val_z){
-    		printf("\nrec values ---> %f %f %f\n", val_x, val_y, val_z);
+    		//printf("\nrec values ---> %f %f %f\n", val_x, val_y, val_z);
         	i_rec = (int)(val_x / h);
         	j_rec = (int)(val_y / h);
         	k_rec = (int)(val_z / h);
         	if (!(i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny && k_rec >= 0 && k_rec < Nz)){
         		printf("\n[!] Receiver(s) outside domain, will now stop...\n");
             	return -1;
+        	}
+        	else{
+        		i_recV.push_back(i_rec);
+        		j_recV.push_back(j_rec);
+        		k_recV.push_back(k_rec);
         	}
     	}
 	}
@@ -518,14 +528,11 @@ int main(int argc, char *argv[]){
 	
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
-	int opt;
+	int opt; // opt param for some user inputs
 	
 	
 	
-	
-	
-	
-	// peridoc BCs trick
+	// peridoc BCs trick (if used)
 	dim3 TPz(16,16);
 	dim3 BPz((Nx + TPz.x - 1)/TPz.x, (Ny + TPz.y - 1)/TPz.y);
 	kernel_periodic_trick_z<<<BPz, TPz>>>(d_S, d_oid, Nx, Ny, Nz, h);
@@ -550,12 +557,11 @@ int main(int argc, char *argv[]){
 	
 	
 	
-	
 	// Kernel launch parameters
 	dim3 TP(8,8,8);
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 	
-	/*
+	
 	// Copy initial data to device if not using p_time[]
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -564,8 +570,6 @@ int main(int argc, char *argv[]){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
-    
-    /*
     if (cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_v1, v1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -573,9 +577,10 @@ int main(int argc, char *argv[]){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
-	*/
-    cudaMalloc(&d_p_time, Nt*sizeof(float));
-    cudaMemcpy(d_p_time, p_time, Nt*sizeof(float), cudaMemcpyHostToDevice);
+	
+	// if using p_time
+    //cudaMalloc(&d_p_time, Nt*sizeof(float));
+    //cudaMemcpy(d_p_time, p_time, Nt*sizeof(float), cudaMemcpyHostToDevice);
 	
 	// --------------------------------- Memory assessment ---------------------------------
 	
@@ -642,8 +647,8 @@ int main(int argc, char *argv[]){
 	
 	// --------------------------------- Initial energy ------------------------------------
 	
-	// if pulse is only p-basedsinusoid (max is 1.0)
-	float E0 = 0.5 * p_time[0] * p_time[0] / (rho * c*c); // for delta pulse
+	// if pulse is only p-based sinusoid (max is 1.0)
+	float E0 = 0.5 * p_time[0] * p_time[0] / (rho * c*c); // initial energy for delta pulse
 	
 	// -------------------------------------------------------------------------------------
 	
@@ -668,12 +673,19 @@ int main(int argc, char *argv[]){
     	exit(1);
 	}
 	
+	/*
 	// open BIN file for writing pressure at single receiver
 	FILE *f_rec = fopen("output/IR.bin", "ab");
 	if (f_rec == NULL) {
     	printf("[!] Error opening output/IR.bin file!\n");
     	exit(1);
 	}
+	*/
+	
+	// open BIN file for writing pressure at multuple receivers
+	std::ofstream file_rec;
+	
+	file_rec.open(ios::app | ios::binary);
 	
 	//Nt = 100; // for testing
 	
