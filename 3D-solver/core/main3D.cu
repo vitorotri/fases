@@ -635,20 +635,20 @@ int main(int argc, char *argv[]){
 	float TV_p_, TV_u_, TV_v_, TV_w_, TV_0, TV_1;
 	
 	// compute initial TVs if not using p_time[]
-	/*
+	
 	TV_p_ = TV(p0, Nx, Ny, Nz, h);
 	TV_u_ = TV(u0, Nx, Ny, Nz, h);
 	TV_v_ = TV(v0, Nx, Ny, Nz, h);
 	TV_w_ = TV(w0, Nx, Ny, Nz, h);
 	
 	TV_0 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
-	*/
-	TV_0 = 3.0 * h * h * p_time[0];
+	
+	//TV_0 = 3.0 * h * h * p_time[0];
 	
 	// --------------------------------- Initial energy ------------------------------------
 	
 	// if pulse is only p-based sinusoid (max is 1.0)
-	float E0 = 0.5 * p_time[0] * p_time[0] / (rho * c*c); // initial energy for delta pulse
+	//float E0 = 0.5 * p_time[0] * p_time[0] / (rho * c*c); // initial energy for delta pulse
 	
 	// -------------------------------------------------------------------------------------
 	
@@ -682,10 +682,13 @@ int main(int argc, char *argv[]){
 	}
 	*/
 	
-	// open BIN file for writing pressure at multuple receivers
-	std::ofstream file_rec;
-	
-	file_rec.open(ios::app | ios::binary);
+	// open BIN files for writing pressure at multuple receivers
+	std::vector<std::ofstream> files_rec(i_recV.size());
+	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
+	for (int ct = 0; ct < i_recV.size(); ct++) {
+    	std::string str = "IR" + std::to_string(ct) + ".bin";
+    	files_rec[ct].open(str, std::ios::app | std::ios::binary);
+	}
 	
 	//Nt = 100; // for testing
 	
@@ -787,7 +790,7 @@ int main(int argc, char *argv[]){
 				
 			// (0)
 			
-			kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
+			//kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
 			
 			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
@@ -872,7 +875,16 @@ int main(int argc, char *argv[]){
 			}
         		
         	// write to file for single receiver IR
-			fwrite(&p0[flat3(i_rec, j_rec, k_rec, Nx, Ny)], sizeof(float), 1, f_rec);
+			//fwrite(&p0[flat3(i_rec, j_rec, k_rec, Nx, Ny)], sizeof(float), 1, f_rec);
+			
+			// write to file for each receiver
+			// i_recV.size() should be the same as j_recV.size() and k_recV.size()
+			for (int ct = 0; ct < i_recV.size(); ct++){
+				files_rec[ct].write(
+					reinterpret_cast<const char*>(&p0[flat3(i_recV[ct], j_recV[ct], k_recV[ct], Nx, Ny)]),
+					sizeof(float)
+				);
+			}
         		
 			n += 1; // update time-step
 		}
@@ -915,7 +927,7 @@ int main(int argc, char *argv[]){
     }
     
     fflush(file_pX); fflush(file_pY); fflush(file_pZ);
-	fflush(f_rec);
+	//fflush(f_rec);
     
     toc = clock();
     
@@ -923,7 +935,8 @@ int main(int argc, char *argv[]){
     printf("\n[OK] Simulation time: %f min \n\n", elapsed_time); 
     
     fclose(file_pX); fclose(file_pY); fclose(file_pZ);
-    fclose(f_rec);
+    //fclose(f_rec);
+    files_rec.clear();
     fclose(fp);
     
     printf("[OK] Wrote to file for single receiver\n\n");
