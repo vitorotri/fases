@@ -337,9 +337,9 @@ int main(int argc, char *argv[]){
 
     // Allocate device memory
     if (cudaMalloc(&d_p0, N*sizeof(float)) != cudaSuccess
-		|| cudaMalloc(&d_u0, N*sizeof(float)) != cudaSuccess
-		|| cudaMalloc(&d_v0, N*sizeof(float)) != cudaSuccess
-		|| cudaMalloc(&d_w0, N*sizeof(float))){
+	 || cudaMalloc(&d_u0, N*sizeof(float)) != cudaSuccess
+	 || cudaMalloc(&d_v0, N*sizeof(float)) != cudaSuccess
+	 || cudaMalloc(&d_w0, N*sizeof(float)) != cudaSuccess){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
 	}
@@ -531,7 +531,7 @@ int main(int argc, char *argv[]){
 	int opt; // opt param for some user inputs
 	
 	
-	
+	/*
 	// peridoc BCs trick (if used)
 	dim3 TPz(16,16);
 	dim3 BPz((Nx + TPz.x - 1)/TPz.x, (Ny + TPz.y - 1)/TPz.y);
@@ -553,7 +553,7 @@ int main(int argc, char *argv[]){
     	fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
     	fclose(file_oid);
 	}
-	
+	*/
 	
 	
 	
