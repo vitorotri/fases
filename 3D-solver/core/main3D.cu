@@ -531,7 +531,7 @@ int main(int argc, char *argv[]){
 	int opt; // opt param for some user inputs
 	
 	
-	/*
+	
 	// peridoc BCs trick (if used)
 	dim3 TPz(16,16);
 	dim3 BPz((Nx + TPz.x - 1)/TPz.x, (Ny + TPz.y - 1)/TPz.y);
@@ -553,9 +553,6 @@ int main(int argc, char *argv[]){
     	fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
     	fclose(file_oid);
 	}
-	*/
-	
-	
 	
 	// Kernel launch parameters
 	dim3 TP(8,8,8);
@@ -686,7 +683,7 @@ int main(int argc, char *argv[]){
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
 	for (int ct = 0; ct < i_recV.size(); ct++) {
-    	std::string str = "IR" + std::to_string(ct) + ".bin";
+    	std::string str = "output/IR" + std::to_string(ct) + ".bin";
     	files_rec[ct].open(str, std::ios::app | std::ios::binary);
 	}
 	
@@ -795,10 +792,10 @@ int main(int argc, char *argv[]){
 			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
-			
+			/*
 			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
 			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-			
+			*/
 			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 			
 			// (1)
@@ -806,20 +803,20 @@ int main(int argc, char *argv[]){
 			kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
-			
+			/*
 			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
 			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
-			
+			*/
 			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p2, d_u2, d_v2, d_w2);
 			
 			// (2)
 			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
-			
+			/*
 			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
 			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-			
+			*/
 			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 
 			// sync
