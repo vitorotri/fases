@@ -18,6 +18,9 @@ Key bindings (GL viewport):
     Click          : (in placement mode) confirm placement
     Escape         : cancel placement mode / deselect layer
     LMB click      : (normal mode) ray-pick layer
+    Shift + LMB drag: inside-box look mode; lets you look straight up/down
+    Alt + LMB drag  : free tumble
+    Ctrl + LMB drag : roll around view axis
 """
 
 import sys, os, math
@@ -187,8 +190,11 @@ class GLViewer(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # camera
-        self._yaw   =  35.0
-        self._pitch = -22.0
+        self._yaw   =  35.0       # normal orbit: around OBJ/world Z
+        self._pitch = -22.0       # normal orbit: tilt
+        self._free_x = 0.0        # Alt+LMB free tumble around screen X
+        self._free_y = 0.0        # Alt+LMB free tumble around screen Y
+        self._roll  =  0.0        # Ctrl+LMB roll around view axis
         self._dist  =   6.0
         self._pan   = np.zeros(3, np.float32)
         self._last_pos  = None
@@ -247,6 +253,9 @@ class GLViewer(QOpenGLWidget):
             self._dist       = span * 1.8 if span > 0 else 6.0
             self._yaw   = 35.0
             self._pitch = -22.0
+            self._free_x = 0.0
+            self._free_y = 0.0
+            self._roll   = 0.0
             # default placement position at mesh centre
             self._place_pos = ctr.copy()
         self.update()
@@ -260,7 +269,12 @@ class GLViewer(QOpenGLWidget):
         self._bbox_visible = v; self.update()
 
     def select_layer(self, name):
-        self._selected_layer = name; self.update()
+        self._selected_layer = name if name else None
+        self.update()
+
+    def clear_selection(self):
+        self._selected_layer = None
+        self.update()
 
     def set_sources(self, pts):
         self._sources = [list(p[:3]) for p in pts]; self.update()
@@ -290,17 +304,22 @@ class GLViewer(QOpenGLWidget):
         glPolygonOffset(1.0, 1.0)
         glEnable(GL_LIGHTING)
         glEnable(GL_LIGHT0)
-        glEnable(GL_LIGHT1)
+        glDisable(GL_LIGHT1)
         glEnable(GL_COLOR_MATERIAL)
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        # TWO_SIDE: OpenGL flips the normal of back-facing polygons toward the
+        # viewer before lighting, so a wall lit by a headlight looks the same
+        # whether its OBJ winding points in or out. This is the key to making
+        # color winding-independent.
         glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE)
         glDisable(GL_CULL_FACE)
-        glLightfv(GL_LIGHT0, GL_POSITION, [ 2.0, 3.0, 4.0, 0.0])
-        glLightfv(GL_LIGHT0, GL_DIFFUSE,  [ 0.80, 0.80, 0.80, 1.0])
-        glLightfv(GL_LIGHT0, GL_AMBIENT,  [ 0.20, 0.20, 0.22, 1.0])
-        glLightfv(GL_LIGHT1, GL_POSITION, [-2.0,-1.0,-2.0, 0.0])
-        glLightfv(GL_LIGHT1, GL_DIFFUSE,  [ 0.25, 0.25, 0.30, 1.0])
-        glLightfv(GL_LIGHT1, GL_AMBIENT,  [ 0.00, 0.00, 0.00, 1.0])
+        # Modest global ambient floor.
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.35, 0.35, 0.35, 1.0])
+        # Single "headlight": diffuse + ambient. Its POSITION is set every
+        # frame in _setup_camera (in eye space) so it always shines from the
+        # camera toward whatever you are looking at.
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.7, 0.7, 0.7, 1.0])
+        glLightfv(GL_LIGHT0, GL_AMBIENT, [0.0, 0.0, 0.0, 1.0])
         glClearColor(0.10, 0.12, 0.14, 1.0)
 
     def resizeGL(self, w, h):
@@ -315,6 +334,10 @@ class GLViewer(QOpenGLWidget):
         gluPerspective(45.0, asp, near, far)
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
+        # Headlight: with the modelview at identity (eye space), position the
+        # light just behind the eye looking down -Z. It stays glued to the
+        # camera regardless of how the scene is rotated below.
+        glLightfv(GL_LIGHT0, GL_POSITION, [0.0, 0.0, 1.0, 0.0])
         # Standard arcball:
         #   1. pull camera back along Z
         #   2. apply view-space pan  (pan moves the scene left/right/up in screen space)
@@ -322,8 +345,17 @@ class GLViewer(QOpenGLWidget):
         #   4. translate world so pivot sits at origin
         glTranslatef(0.0, 0.0, -self._dist)
         glTranslatef(self._pan[0], self._pan[1], 0.0)   # pan in view/screen space
-        glRotatef(self._pitch, 1, 0, 0)
-        glRotatef(self._yaw,   0, 1, 0)
+        # Camera rotation is intentionally split into two modes:
+        #   - normal LMB orbit keeps OBJ Z as the main/up axis
+        #   - Alt+LMB adds free tumble around screen axes
+        #   - Ctrl+LMB rolls around the view axis
+        # This keeps the room easy to navigate, but still allows total freedom
+        # when inspecting hard-to-see surfaces such as the ceiling.
+        glRotatef(self._roll,   0, 0, 1)
+        glRotatef(self._free_x, 1, 0, 0)
+        glRotatef(self._free_y, 0, 1, 0)
+        glRotatef(self._pitch,  1, 0, 0)
+        glRotatef(self._yaw,    0, 0, 1)
         glTranslatef(-self._pivot[0], -self._pivot[1], -self._pivot[2])
         self._mv   = glGetDoublev(GL_MODELVIEW_MATRIX)
         self._proj = glGetDoublev(GL_PROJECTION_MATRIX)
@@ -385,13 +417,13 @@ class GLViewer(QOpenGLWidget):
         # project 3-D axis direction onto the 2-D gizmo plane
         # using the same rotation the scene camera applies
         def project_axis(ax, ay, az):
-            # rotate by yaw around Y
-            x1 =  ax * math.cos(yaw_r) + az * math.sin(yaw_r)
-            y1 =  ay
-            z1 = -ax * math.sin(yaw_r) + az * math.cos(yaw_r)
+            # rotate by yaw around Z (same vertical-axis orbit as the scene)
+            x1 = ax * math.cos(yaw_r) - ay * math.sin(yaw_r)
+            y1 = ax * math.sin(yaw_r) + ay * math.cos(yaw_r)
+            z1 = az
             # rotate by pitch around X
-            x2 =  x1
-            y2 =  y1 * math.cos(pitch_r) - z1 * math.sin(pitch_r)
+            x2 = x1
+            y2 = y1 * math.cos(pitch_r) - z1 * math.sin(pitch_r)
             # z2 unused (depth)
             return x2, y2   # screen-space direction
 
@@ -458,44 +490,107 @@ class GLViewer(QOpenGLWidget):
             return
         verts = self._verts
 
-        # ── pass 1: solid geometry (non-bbox) ──────────────
-        for g in self._groups:
-            if g["is_bbox"] or not g["visible"]:
-                continue
+        # Final visualization rule:
+        #   1. OBJ groups keep their own assigned colors. No grouping by wall,
+        #      floor, ceiling, normal direction, or shell detection.
+        #   2. Surfaces are real opaque, flat, and two-sided, so the ceiling color
+        #      is the same from outside and inside.
+        #   3. A non-occluding wire overlay is drawn for every visible group. This
+        #      is the honest way to inspect a closed room: the solid box remains
+        #      physically correct, but interior objects such as a sphere are still
+        #      readable through their wire silhouette.
+        #   4. The boundary object remains wire-only.
+        glDisable(GL_CULL_FACE)
+        glDisable(GL_LIGHTING)          # flat, stable layer colors
+        glEnable(GL_DEPTH_TEST)
+        glDepthMask(GL_TRUE)
+        glDisable(GL_BLEND)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+
+        def draw_triangles(g):
             tris = g["tris"]
             if len(tris) == 0:
-                continue
+                return
             r, gr, b = g["color"]
-            is_sel = (self._selected_layer == g["name"])
-            norms  = g["normals"]
-
-            glEnable(GL_LIGHTING)
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-            glColor4f(r, gr, b, 0.88)
+            glColor4f(r, gr, b, 1.0)
             glBegin(GL_TRIANGLES)
-            for ti, tri in enumerate(tris):
-                if norms is not None:
-                    glNormal3fv(norms[ti])
+            for tri in tris:
                 for vi in tri:
                     glVertex3fv(verts[vi])
             glEnd()
 
-            if is_sel:
-                glDisable(GL_LIGHTING)
-                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-                glLineWidth(2.2)
-                glColor4f(1.0, 1.0, 1.0, 0.95)
-                glBegin(GL_TRIANGLES)
-                for tri in tris:
-                    for vi in tri: glVertex3fv(verts[vi])
-                glEnd()
-                glEnable(GL_LIGHTING)
-                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        def draw_wire(g, *, depth_test, alpha, width, color_scale=0.35):
+            tris = g["tris"]
+            if len(tris) == 0:
+                return
+            if depth_test:
+                glEnable(GL_DEPTH_TEST)
+            else:
+                glDisable(GL_DEPTH_TEST)
+            r, gr, b = g["color"]
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+            glLineWidth(width)
+            # darker same-hue wire: never changes the layer identity
+            glColor4f(max(0.0, r * color_scale),
+                      max(0.0, gr * color_scale),
+                      max(0.0, b * color_scale), alpha)
+            glBegin(GL_TRIANGLES)
+            for tri in tris:
+                for vi in tri:
+                    glVertex3fv(verts[vi])
+            glEnd()
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            glEnable(GL_DEPTH_TEST)
 
-        # ── pass 2: bounding box wireframe drawn last ───────
-        # Drawn after all solid geometry so its depth writes
-        # (even with GL_FALSE) cannot occlude interior objects.
+        # Pass 1: real opaque material surfaces, one color per OBJ group.
+        for g in self._groups:
+            if g["is_bbox"] or not g["visible"]:
+                continue
+            draw_triangles(g)
+
+        # Pass 2: readable global wireframe. First draw depth-tested edges for
+        # normal spatial reading, then draw a lighter non-depth-tested copy so
+        # hidden/internal geometry is still visible through the room shell.
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDepthMask(GL_FALSE)
+        for g in self._groups:
+            if g["is_bbox"] or not g["visible"]:
+                continue
+            draw_wire(g, depth_test=True,  alpha=0.85, width=1.15, color_scale=0.28)
+        for g in self._groups:
+            if g["is_bbox"] or not g["visible"]:
+                continue
+            draw_wire(g, depth_test=False, alpha=0.28, width=1.00, color_scale=0.55)
+        glDepthMask(GL_TRUE)
+        glDisable(GL_BLEND)
+
+        # Pass 3: selected layer outline, always visible and unmistakable.
+        for g in self._groups:
+            if g["is_bbox"] or not g["visible"] or self._selected_layer != g["name"]:
+                continue
+            tris = g["tris"]
+            if len(tris) == 0:
+                continue
+            glDisable(GL_DEPTH_TEST)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+            glLineWidth(2.8)
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            glBegin(GL_TRIANGLES)
+            for tri in tris:
+                for vi in tri:
+                    glVertex3fv(verts[vi])
+            glEnd()
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            glEnable(GL_DEPTH_TEST)
+
+        # Pass 4: boundary/bounding box, wire-only and non-occluding.
         if self._bbox_visible:
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDepthMask(GL_FALSE)
+            glDisable(GL_DEPTH_TEST)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
             for g in self._groups:
                 if not g["is_bbox"] or not g["visible"]:
                     continue
@@ -504,19 +599,19 @@ class GLViewer(QOpenGLWidget):
                     continue
                 r, gr, b = g["color"]
                 is_sel = (self._selected_layer == g["name"])
-                glDisable(GL_LIGHTING)
-                glDepthMask(GL_FALSE)
-                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-                glLineWidth(1.0)
-                glColor4f(r, gr, b, 0.55 if not is_sel else 0.85)
+                glLineWidth(1.2 if not is_sel else 2.2)
+                glColor4f(r, gr, b, 0.60 if not is_sel else 1.00)
                 glBegin(GL_TRIANGLES)
                 for tri in tris:
-                    for vi in tri: glVertex3fv(verts[vi])
+                    for vi in tri:
+                        glVertex3fv(verts[vi])
                 glEnd()
-                glDepthMask(GL_TRUE)
-                glEnable(GL_LIGHTING)
-                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            glDepthMask(GL_TRUE)
+            glEnable(GL_DEPTH_TEST)
+            glDisable(GL_BLEND)
 
+        glEnable(GL_LIGHTING)
     def _speaker_icon(self, x, y, z, scale, color):
         """Draw a stylised loudspeaker at world position (x,y,z)."""
         r, g, b = color
@@ -524,8 +619,11 @@ class GLViewer(QOpenGLWidget):
         glPushMatrix()
         glTranslatef(x, y, z)
         # billboard — rotate to face camera (undo yaw+pitch)
-        glRotatef(-self._yaw,   0, 1, 0)
-        glRotatef(-self._pitch, 1, 0, 0)
+        glRotatef(-self._yaw,    0, 0, 1)
+        glRotatef(-self._pitch,  1, 0, 0)
+        glRotatef(-self._free_y, 0, 1, 0)
+        glRotatef(-self._free_x, 1, 0, 0)
+        glRotatef(-self._roll,   0, 0, 1)
         s = scale
 
         # body rectangle
@@ -570,8 +668,11 @@ class GLViewer(QOpenGLWidget):
         glDisable(GL_LIGHTING)
         glPushMatrix()
         glTranslatef(x, y, z)
-        glRotatef(-self._yaw,   0, 1, 0)
-        glRotatef(-self._pitch, 1, 0, 0)
+        glRotatef(-self._yaw,    0, 0, 1)
+        glRotatef(-self._pitch,  1, 0, 0)
+        glRotatef(-self._free_y, 0, 1, 0)
+        glRotatef(-self._free_x, 1, 0, 0)
+        glRotatef(-self._roll,   0, 0, 1)
         s = scale
 
         # capsule (head)
@@ -733,8 +834,27 @@ class GLViewer(QOpenGLWidget):
             self._update_cursor_world(e.position())
         else:
             if self._mouse_btn == Qt.MouseButton.LeftButton:
-                self._yaw   += dx * 0.4
-                self._pitch  = max(-89, min(89, self._pitch + dy*0.4))
+                mods = e.modifiers()
+                if mods & Qt.KeyboardModifier.AltModifier:
+                    # Free tumble: hold Alt while dragging with LMB.
+                    # This deliberately does NOT clamp, so you can inspect the
+                    # room from any orientation, including over/under the ceiling.
+                    self._free_y += dx * 0.45
+                    self._free_x += dy * 0.45
+                elif mods & Qt.KeyboardModifier.ControlModifier:
+                    # Roll: hold Ctrl while dragging horizontally with LMB.
+                    self._roll += dx * 0.45
+                elif mods & Qt.KeyboardModifier.ShiftModifier:
+                    # Inside-box look mode: keep Z as the main yaw axis, but do
+                    # NOT clamp pitch. This lets you look straight up at the
+                    # ceiling or straight down at the floor after zooming inside.
+                    self._yaw   += dx * 0.35
+                    self._pitch += dy * 0.35
+                else:
+                    # Default stable architectural orbit: Z remains the main/up axis.
+                    # Allow full pitch instead of stopping at +/-89 degrees.
+                    self._yaw   += dx * 0.4
+                    self._pitch += dy * 0.4
             elif self._mouse_btn == Qt.MouseButton.MiddleButton:
                 sc = self._dist * 0.002
                 self._pan[0] += dx * sc
@@ -801,6 +921,7 @@ class GLViewer(QOpenGLWidget):
         if key == Qt.Key.Key_R and self._mode == self.MODE_NONE:
             # reset camera
             self._yaw = 35.0; self._pitch = -22.0
+            self._free_x = 0.0; self._free_y = 0.0; self._roll = 0.0
             self._pan = np.zeros(3, np.float32)
             self.update()
             e.accept(); return
@@ -908,7 +1029,12 @@ class GLViewer(QOpenGLWidget):
         if best_name:
             self._selected_layer = best_name
             self.layerPicked.emit(best_name)
-            self.update()
+        else:
+            # Clicking empty space must genuinely deselect; do not keep the
+            # previous layer highlighted or selected in the list/material panel.
+            self._selected_layer = None
+            self.layerPicked.emit("")
+        self.update()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1212,7 +1338,7 @@ class MainWindow(QMainWindow):
         place_bar.addWidget(self._rec_btn)
 
         place_bar.addStretch()
-        hint = QLabel("Rotate: LMB   Pan: MMB   Scroll: zoom   R: reset   "
+        hint = QLabel("Rotate: LMB Z-up   Alt+LMB free   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   R: reset   "
                       "S: source  T: receiver   X/Y/Z: axis lock   RMB: delete   Esc: cancel")
         hint.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
         place_bar.addWidget(hint)
@@ -1288,10 +1414,17 @@ class MainWindow(QMainWindow):
             self._toggle_placement("receiver")
             e.accept(); return
         if key == Qt.Key.Key_Escape:
+            was_placing = self._src_btn.isChecked() or self._rec_btn.isChecked()
             self._src_btn.setChecked(False)
             self._rec_btn.setChecked(False)
             self._gl.exit_placement_mode()
-            self._sb.showMessage("Ready.")
+            if not was_placing:
+                self._layer_list.setCurrentRow(-1)
+                self._gl.clear_selection()
+                self._show_no_layer_selected()
+                self._sb.showMessage("Layer deselected.")
+            else:
+                self._sb.showMessage("Ready.")
             e.accept(); return
         # forward R (reset) and X/Y/Z to GL
         self._gl.keyPressEvent(e)
@@ -1511,8 +1644,22 @@ class MainWindow(QMainWindow):
                 ed = MaterialEditor(); ed.load(mp)
                 self._mat_editors[name] = ed
 
+    def _show_no_layer_selected(self):
+        ph = QLabel("Select a layer to edit its material.")
+        ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph.setStyleSheet(f"color:{PAL['subtext']};")
+        old = self._mat_stack.takeWidget()
+        if old is not None:
+            old.setParent(None)
+        self._mat_stack.setWidget(ph)
+
     def _on_layer_picked(self, name):
         """Sync list selection when user clicks in the GL viewport."""
+        if not name:
+            self._layer_list.setCurrentRow(-1)
+            self._show_no_layer_selected()
+            self._sb.showMessage("Layer deselected.")
+            return
         for i in range(self._layer_list.count()):
             if self._layer_list.item(i).text() == name:
                 self._layer_list.setCurrentRow(i)
@@ -1520,7 +1667,10 @@ class MainWindow(QMainWindow):
         self._tabs.setCurrentIndex(0)
 
     def _on_layer_row_changed(self, row):
-        if row < 0 or row >= len(self._groups): return
+        if row < 0 or row >= len(self._groups):
+            self._gl.clear_selection()
+            self._show_no_layer_selected()
+            return
         name = self._groups[row]["name"]
         self._gl.select_layer(name)
         if "boundary" in name.lower():
