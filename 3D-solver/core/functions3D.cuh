@@ -214,7 +214,7 @@ __device__ float peskin_chi(float s){
 	if (s >= 1.0f && s < 2.0f){
 		return (5.0f - 2.0f*s - sqrtf(-7.0f + 12.0f*s - 4.0f*s*s))/8.0f;
 	}
-	if (s >= 2.0f) return 0.0f;
+	return 0.0f;
 }
 
 // correctly considers cases where s < h, so it does not sum itself with old U[Cij] values
