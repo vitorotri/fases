@@ -172,6 +172,7 @@ def ray_group_hit(ro, rd, verts, tris):
 class GLViewer(QOpenGLWidget):
     layerPicked   = pyqtSignal(str)    # emitted on ray-pick
     pointPlaced   = pyqtSignal(str, float, float, float)  # mode, x, y, z
+    pointRemoved  = pyqtSignal(str, int)                   # kind, index
     coordsChanged = pyqtSignal(float, float, float)        # live HUD coords
 
     # placement modes
@@ -209,6 +210,9 @@ class GLViewer(QOpenGLWidget):
         self._place_pos = np.zeros(3, np.float32)  # frozen base position
         self._cursor_world = np.zeros(3, np.float32)
 
+        # pivot (orbit centre = mesh centre)
+        self._pivot      = np.zeros(3, np.float32)
+        self._scene_span = 1.0   # updated by load_mesh
         # cached GL matrices (for unprojection)
         self._mv  = np.eye(4, dtype=np.float64)
         self._proj= np.eye(4, dtype=np.float64)
@@ -217,13 +221,19 @@ class GLViewer(QOpenGLWidget):
     def load_mesh(self, verts, groups):
         self._verts  = verts
         self._groups = []
-        for i, g in enumerate(groups):
+        color_idx = 0   # counts only non-bbox groups so colors are never skipped
+        for g in groups:
             is_bbox = "boundary" in g["name"].lower()
+            if is_bbox:
+                color = BBOX_COLOR
+            else:
+                color = LAYER_COLORS[color_idx % len(LAYER_COLORS)]
+                color_idx += 1
             self._groups.append({
                 "name":    g["name"],
                 "tris":    g["tris"],
                 "normals": face_normals(verts, g["tris"]) if len(g["tris"]) else None,
-                "color":   BBOX_COLOR if is_bbox else LAYER_COLORS[i % len(LAYER_COLORS)],
+                "color":   color,
                 "visible": True,
                 "is_bbox": is_bbox,
             })
@@ -231,9 +241,13 @@ class GLViewer(QOpenGLWidget):
             mn, mx = verts.min(0), verts.max(0)
             ctr  = (mn + mx) * 0.5
             span = (mx - mn).max()
-            self._pan  = -ctr
-            self._dist = span * 1.9 if span > 0 else 6.0
-            # good starting position for placement
+            self._pivot      = ctr.copy()
+            self._scene_span = span if span > 0 else 1.0
+            self._pan        = np.zeros(3, np.float32)
+            self._dist       = span * 1.8 if span > 0 else 6.0
+            self._yaw   = 35.0
+            self._pitch = -22.0
+            # default placement position at mesh centre
             self._place_pos = ctr.copy()
         self.update()
 
@@ -296,22 +310,28 @@ class GLViewer(QOpenGLWidget):
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         asp = self.width() / max(self.height(), 1)
-        gluPerspective(45.0, asp, self._dist*0.0005, self._dist*200)
+        near = max(self._dist * 0.001, 0.01)
+        far  = self._dist * 500.0
+        gluPerspective(45.0, asp, near, far)
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
-        gluLookAt(0, 0, self._dist, 0, 0, 0, 0, 1, 0)
-        glTranslatef(*self._pan)
+        # Standard arcball:
+        #   1. pull camera back along Z
+        #   2. apply view-space pan  (pan moves the scene left/right/up in screen space)
+        #   3. rotate around pivot
+        #   4. translate world so pivot sits at origin
+        glTranslatef(0.0, 0.0, -self._dist)
+        glTranslatef(self._pan[0], self._pan[1], 0.0)   # pan in view/screen space
         glRotatef(self._pitch, 1, 0, 0)
         glRotatef(self._yaw,   0, 1, 0)
-        # cache matrices for unprojection
+        glTranslatef(-self._pivot[0], -self._pivot[1], -self._pivot[2])
         self._mv   = glGetDoublev(GL_MODELVIEW_MATRIX)
         self._proj = glGetDoublev(GL_PROJECTION_MATRIX)
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._setup_camera()
-        self._draw_grid()
-        self._draw_axes()
+        self._draw_gizmo()   # replaces grid + world axes
         self._draw_mesh()
         self._draw_sources()
         self._draw_receivers()
@@ -320,28 +340,118 @@ class GLViewer(QOpenGLWidget):
         self._draw_hud()
 
     # ── drawing helpers ──────────────────────────────────────
-    def _draw_grid(self):
+    def _draw_gizmo(self):
+        """
+        Fixed top-left axis gizmo.
+        Drawn entirely in a small orthographic sub-viewport so it never
+        disturbs the scene camera matrices.
+        Balls = two crossed screen-aligned filled circles per tip.
+        Labels = QPainter pixel text, positions derived from pure trig.
+        """
+        W, H = self.width(), self.height()
+        size  = 80
+        pad   = 14
+        cx    = pad + size // 2        # pixel centre of gizmo
+        cy_gl = pad + size // 2        # in GL coords (origin bottom-left)
+
+        L  = size * 0.36               # stick length in pixels
+        br = size * 0.10               # ball radius in pixels
+
+        axes = [
+            ((1,0,0), (0.95, 0.30, 0.30), 'X'),
+            ((0,1,0), (0.30, 0.88, 0.45), 'Y'),
+            ((0,0,1), (0.35, 0.55, 0.95), 'Z'),
+        ]
+
+        # ── carve out a sub-viewport, save everything ──────
+        glViewport(0, 0, pad*2+size, pad*2+size)
+        glScissor (0, 0, pad*2+size, pad*2+size)
+        glEnable(GL_SCISSOR_TEST)
+
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix(); glLoadIdentity()
+        glOrtho(0, pad*2+size, 0, pad*2+size, -200, 200)
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix(); glLoadIdentity()
+
+        glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
-        glColor4f(0.22, 0.25, 0.30, 0.55)
-        glLineWidth(1.0)
-        n, s = 12, 0.5
+        glLineWidth(2.0)
+
+        # yaw and pitch as radians for tip projection
+        yaw_r   = math.radians(self._yaw)
+        pitch_r = math.radians(self._pitch)
+
+        # project 3-D axis direction onto the 2-D gizmo plane
+        # using the same rotation the scene camera applies
+        def project_axis(ax, ay, az):
+            # rotate by yaw around Y
+            x1 =  ax * math.cos(yaw_r) + az * math.sin(yaw_r)
+            y1 =  ay
+            z1 = -ax * math.sin(yaw_r) + az * math.cos(yaw_r)
+            # rotate by pitch around X
+            x2 =  x1
+            y2 =  y1 * math.cos(pitch_r) - z1 * math.sin(pitch_r)
+            # z2 unused (depth)
+            return x2, y2   # screen-space direction
+
+        # ── draw sticks ───────────────────────────────────
         glBegin(GL_LINES)
-        for i in range(-n, n+1):
-            glVertex3f(i*s, 0, -n*s); glVertex3f(i*s, 0,  n*s)
-            glVertex3f(-n*s, 0, i*s); glVertex3f( n*s, 0, i*s)
+        for (ax,ay,az), col, _ in axes:
+            px, py = project_axis(ax, ay, az)
+            glColor3f(*col)
+            glVertex2f(cx, cy_gl)
+            glVertex2f(cx + px*L, cy_gl + py*L)
         glEnd()
+
+        # ── draw balls as two crossed filled circles ───────
+        segs = 20
+        for (ax,ay,az), col, _ in axes:
+            px, py = project_axis(ax, ay, az)
+            tx = cx + px * L
+            ty = cy_gl + py * L
+            glColor3f(*col)
+            # circle 1: in XY plane of screen
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex2f(tx, ty)
+            for k in range(segs + 1):
+                a = 2 * math.pi * k / segs
+                glVertex2f(tx + br * math.cos(a), ty + br * math.sin(a))
+            glEnd()
+            # circle 2: slightly smaller, tilted (gives depth illusion)
+            glColor3f(min(col[0]*1.3,1), min(col[1]*1.3,1), min(col[2]*1.3,1))
+            r2 = br * 0.55
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex2f(tx - br*0.2, ty + br*0.2)
+            for k in range(segs + 1):
+                a = 2 * math.pi * k / segs
+                glVertex2f(tx - br*0.2 + r2*math.cos(a),
+                           ty + br*0.2 + r2*math.sin(a))
+            glEnd()
+
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
-    def _draw_axes(self):
-        glDisable(GL_LIGHTING)
-        glLineWidth(2.5)
-        L = self._dist * 0.07
-        glBegin(GL_LINES)
-        glColor3f(0.9,0.2,0.2); glVertex3f(0,0,0); glVertex3f(L,0,0)
-        glColor3f(0.2,0.9,0.2); glVertex3f(0,0,0); glVertex3f(0,L,0)
-        glColor3f(0.3,0.5,0.9); glVertex3f(0,0,0); glVertex3f(0,0,L)
-        glEnd()
-        glEnable(GL_LIGHTING)
+        # ── restore matrices and full viewport ────────────
+        glMatrixMode(GL_PROJECTION); glPopMatrix()
+        glMatrixMode(GL_MODELVIEW);  glPopMatrix()
+        glDisable(GL_SCISSOR_TEST)
+        glViewport(0, 0, W, H)
+
+        # ── labels via QPainter (no gluProject needed) ────
+        painter = QPainter(self)
+        painter.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+        # QPainter y is flipped vs GL y
+        cy_qt = H - cy_gl
+        for (ax,ay,az), col, label in axes:
+            px, py = project_axis(ax, ay, az)
+            sx = int(cx  + px * L) + pad // 2
+            sy = int(cy_qt - py * L) - pad // 2
+            painter.setPen(QColor(int(col[0]*255),
+                                  int(col[1]*255),
+                                  int(col[2]*255)))
+            painter.drawText(sx + int(br) + 2, sy + 4, label)
+        painter.end()
 
     def _draw_mesh(self):
         if len(self._verts) == 0:
@@ -500,12 +610,13 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def _draw_sources(self):
-        s = self._dist * 0.06
+        # icon size = 3% of scene span, independent of zoom distance
+        s = max(self._scene_span * 0.03, 0.05)
         for pt in self._sources:
             self._speaker_icon(pt[0], pt[1], pt[2], s, SRC_COLOR)
 
     def _draw_receivers(self):
-        s = self._dist * 0.06
+        s = max(self._scene_span * 0.03, 0.05)
         for pt in self._receivers:
             self._mic_icon(pt[0], pt[1], pt[2], s, REC_COLOR)
 
@@ -542,7 +653,7 @@ class GLViewer(QOpenGLWidget):
             glEnd()
 
         # preview icon
-        s = self._dist * 0.06
+        s = max(self._scene_span * 0.03, 0.05)
         if self._mode == self.MODE_SRC:
             self._speaker_icon(p[0], p[1], p[2], s, SRC_COLOR)
         else:
@@ -647,27 +758,81 @@ class GLViewer(QOpenGLWidget):
 
         if not moved and e.button() == Qt.MouseButton.LeftButton:
             self._do_ray_pick(e.position())
+        if not moved and e.button() == Qt.MouseButton.RightButton:
+            self._do_point_remove(e.position())
 
     def wheelEvent(self, e):
-        f = 0.88 if e.angleDelta().y() > 0 else 1.14
-        self._dist = max(0.01, self._dist * f)
+        steps = e.angleDelta().y() / 120.0   # 1 notch = 120 units
+        f = 0.85 ** steps                     # 15% per notch
+
+        # ── dolly toward cursor, not toward fixed pivot ──────────────
+        # Unproject the pixel under the mouse at mid-scene depth to get
+        # a world-space target, then shift the pivot a fraction toward it.
+        self.makeCurrent()
+        W, H = self.width(), self.height()
+        pos = e.position()
+        mx, my = float(pos.x()), float(pos.y())
+        viewport = [int(0), int(0), int(W), int(H)]
+        try:
+            # sample depth at the pivot itself to get a stable reference depth
+            sx, sy, sz = gluProject(
+                float(self._pivot[0]),
+                float(self._pivot[1]),
+                float(self._pivot[2]),
+                self._mv, self._proj, viewport)
+            # unproject mouse at that same depth
+            world = gluUnProject(mx, float(H) - my, float(sz),
+                                 self._mv, self._proj, viewport)
+            target = np.array(world, np.float32)
+            # shift pivot toward/away from cursor proportional to zoom step
+            shift_frac = 1.0 - f          # positive = zoom in, negative = out
+            self._pivot += (target - self._pivot) * shift_frac
+        except Exception:
+            pass  # fallback: plain zoom with no pivot shift
+
+        self._dist = max(0.001, self._dist * f)
         self.update()
 
     def keyPressEvent(self, e):
         key = e.key()
         if key == Qt.Key.Key_Escape:
             self.exit_placement_mode()
-        elif key == Qt.Key.Key_R and self._mode == self.MODE_NONE:
-            self._yaw = 35; self._pitch = -22
-            self._pan[:] = 0
+            e.accept(); return
+        if key == Qt.Key.Key_R and self._mode == self.MODE_NONE:
+            # reset camera
+            self._yaw = 35.0; self._pitch = -22.0
+            self._pan = np.zeros(3, np.float32)
             self.update()
-        elif self._mode != self.MODE_NONE:
+            e.accept(); return
+        if self._mode != self.MODE_NONE:
             if key == Qt.Key.Key_X:
-                self._set_axis_lock('X')
+                self._set_axis_lock('X'); e.accept(); return
             elif key == Qt.Key.Key_Y:
-                self._set_axis_lock('Y')
+                self._set_axis_lock('Y'); e.accept(); return
             elif key == Qt.Key.Key_Z:
-                self._set_axis_lock('Z')
+                self._set_axis_lock('Z'); e.accept(); return
+        e.ignore()  # let MainWindow handle S / T for mode switching
+
+    def _do_point_remove(self, qpos):
+        """Right-click: remove nearest source or receiver within 30 px."""
+        self.makeCurrent()
+        W, H = self.width(), self.height()
+        viewport = [int(0), int(0), int(W), int(H)]
+        best_dist, best_list, best_idx = 30.0, None, -1
+        for lst, kind in [(self._sources, "source"), (self._receivers, "receiver")]:
+            for i, pt in enumerate(lst):
+                try:
+                    sx, sy, _ = gluProject(float(pt[0]), float(pt[1]), float(pt[2]),
+                                           self._mv, self._proj, viewport)
+                    d = math.hypot(sx - qpos.x(), (H - sy) - qpos.y())
+                    if d < best_dist:
+                        best_dist, best_list, best_idx, best_kind = d, lst, i, kind
+                except Exception:
+                    pass
+        if best_list is not None and best_idx >= 0:
+            best_list.pop(best_idx)
+            self.pointRemoved.emit(best_kind, best_idx)
+            self.update()
 
     def _set_axis_lock(self, axis):
         self._axis_lock = axis
@@ -1029,6 +1194,7 @@ class MainWindow(QMainWindow):
         self._gl = GLViewer()
         self._gl.layerPicked.connect(self._on_layer_picked)
         self._gl.pointPlaced.connect(self._on_point_placed)
+        self._gl.pointRemoved.connect(self._on_point_removed)
         gl_vlay.addWidget(self._gl)
 
         # placement toolbar under the viewer
@@ -1040,14 +1206,14 @@ class MainWindow(QMainWindow):
         self._src_btn.clicked.connect(lambda: self._toggle_placement("source"))
         place_bar.addWidget(self._src_btn)
 
-        self._rec_btn = QPushButton("🎙  Place Receiver  [E]")
+        self._rec_btn = QPushButton("🎙  Place Receiver  [T]")
         self._rec_btn.setCheckable(True)
         self._rec_btn.clicked.connect(lambda: self._toggle_placement("receiver"))
         place_bar.addWidget(self._rec_btn)
 
         place_bar.addStretch()
-        hint = QLabel("Rotate: LMB   Pan: MMB   Zoom: scroll   R: reset   "
-                      "Axis lock: X/Y/Z   Esc: cancel")
+        hint = QLabel("Rotate: LMB   Pan: MMB   Scroll: zoom   R: reset   "
+                      "S: source  T: receiver   X/Y/Z: axis lock   RMB: delete   Esc: cancel")
         hint.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
         place_bar.addWidget(hint)
         gl_vlay.addLayout(place_bar)
@@ -1098,27 +1264,37 @@ class MainWindow(QMainWindow):
         else:
             self._rec_tbl.add_point(x, y, z)
         self._refresh_gl_points()
-        # keep mode active for multiple placements — exit with Esc
         self._sb.showMessage(f"Placed {mode} at ({x:.3f}, {y:.3f}, {z:.3f}) m  —  click to place another, Esc to finish")
 
+    def _on_point_removed(self, kind, idx):
+        tbl = self._src_tbl if kind == "source" else self._rec_tbl
+        tbl._tbl.blockSignals(True)
+        tbl._tbl.removeRow(idx)
+        tbl._tbl.blockSignals(False)
+        self._refresh_gl_points()
+        self._sb.showMessage(f"Removed {kind} #{idx}")
+
     def keyPressEvent(self, e):
-        """Global key bindings even when GL doesn't have focus."""
+        """Global key bindings. S=source, T=receiver, R=reset, X/Y/Z=axis lock."""
         key = e.key()
         if key == Qt.Key.Key_S:
-            self._src_btn.setChecked(True)
+            checked = not self._src_btn.isChecked()
+            self._src_btn.setChecked(checked)
             self._toggle_placement("source")
-        elif key == Qt.Key.Key_E:
-            self._rec_btn.setChecked(True)
+            e.accept(); return
+        if key == Qt.Key.Key_T:
+            checked = not self._rec_btn.isChecked()
+            self._rec_btn.setChecked(checked)
             self._toggle_placement("receiver")
-        elif key == Qt.Key.Key_Escape:
+            e.accept(); return
+        if key == Qt.Key.Key_Escape:
             self._src_btn.setChecked(False)
             self._rec_btn.setChecked(False)
             self._gl.exit_placement_mode()
             self._sb.showMessage("Ready.")
-        else:
-            # forward X/Y/Z to GL if in placement mode
-            self._gl.keyPressEvent(e)
-            super().keyPressEvent(e)
+            e.accept(); return
+        # forward R (reset) and X/Y/Z to GL
+        self._gl.keyPressEvent(e)
 
     # ── Scene tab ────────────────────────────────────────────
     def _build_scene_tab(self):
@@ -1304,10 +1480,20 @@ class MainWindow(QMainWindow):
         except Exception as ex:
             QMessageBox.critical(self, "OBJ error", str(ex)); return
         self._groups = groups
+        names = [g["name"] for g in groups]
+        print(f"[OBJ] Parsed {len(groups)} groups: {names}")
+        bbox_found = any("boundary" in n.lower() for n in names)
+        if not bbox_found:
+            print("[OBJ] WARNING: no group named 'Boundary' found. "
+                  "Boundary toggle will have no effect. "
+                  f"Group names: {names}")
         self._gl.load_mesh(verts, groups)
         self._populate_layers(groups)
         self._update_cmd_preview()
-        self._sb.showMessage(f"Loaded {len(groups)} layer(s)  —  {len(verts)} vertices")
+        status = f"Loaded {len(groups)} layer(s)  —  {len(verts)} vertices"
+        if not bbox_found:
+            status += "  ⚠ no Boundary group detected"
+        self._sb.showMessage(status)
 
     def _populate_layers(self, groups):
         self._layer_list.clear(); self._mat_editors.clear()
