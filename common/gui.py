@@ -1,8 +1,8 @@
 """
-gui.py  —  PyQt6 GUI for the 3D Acoustic FVM Solver  (v2)
+gui.py  —  PySide6 GUI for the 3D Acoustic FVM Solver  (v2)
 ==========================================================
 Requirements:
-    pip install PyQt6 PyOpenGL PyOpenGL_accelerate numpy
+    pip install PySide6 PyOpenGL PyOpenGL_accelerate numpy
 
 Run from project root:
     python common/gui.py
@@ -28,10 +28,10 @@ import subprocess
 
 import numpy as np
 
-from PyQt6.QtCore    import Qt, QThread, pyqtSignal, QPoint, QPointF
-from PyQt6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
+from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF
+from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor)
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox,
@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar
 )
-from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
 from OpenGL.GLU import *
 
@@ -63,8 +63,8 @@ LAYER_COLORS = [
     (0.90,0.60,0.40),(0.40,0.70,0.90),(0.80,0.40,0.70),
 ]
 BBOX_COLOR = (0.35, 0.65, 1.0)
-SRC_COLOR  = (1.00, 0.82, 0.10)
-REC_COLOR  = (0.20, 1.00, 0.55)
+SRC_COLOR  = (1.00, 1.00, 1.00)
+REC_COLOR  = (1.00, 1.00, 1.00)
 SEL_OUTLINE= (1.00, 1.00, 1.00)
 
 OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
@@ -172,10 +172,10 @@ def ray_group_hit(ro, rd, verts, tris):
 #  GL viewport
 # ─────────────────────────────────────────────────────────────
 class GLViewer(QOpenGLWidget):
-    layerPicked   = pyqtSignal(str)    # emitted on ray-pick
-    pointPlaced   = pyqtSignal(str, float, float, float)  # mode, x, y, z
-    pointRemoved  = pyqtSignal(str, int)                   # kind, index
-    coordsChanged = pyqtSignal(float, float, float)        # live HUD coords
+    layerPicked   = Signal(str)    # emitted on ray-pick
+    pointPlaced   = Signal(str, float, float, float)  # mode, x, y, z
+    pointRemoved  = Signal(str, int)                   # kind, index
+    coordsChanged = Signal(float, float, float)        # live HUD coords
 
     # placement modes
     MODE_NONE = 0
@@ -615,6 +615,7 @@ class GLViewer(QOpenGLWidget):
         """Draw a stylised loudspeaker at world position (x,y,z)."""
         r, g, b = color
         glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
         glPushMatrix()
         glTranslatef(x, y, z)
         # billboard — rotate to face camera (undo yaw+pitch)
@@ -644,7 +645,7 @@ class GLViewer(QOpenGLWidget):
         glEnd()
 
         # sound waves
-        glColor4f(r, g, b, 0.55)
+        glColor4f(r, g, b, 1.0)
         for i in range(1, 3):
             ri = s * (0.75 + i*0.25)
             glBegin(GL_LINE_STRIP)
@@ -659,12 +660,14 @@ class GLViewer(QOpenGLWidget):
         glBegin(GL_POINTS); glVertex3f(0, 0, 0); glEnd()
 
         glPopMatrix()
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
     def _mic_icon(self, x, y, z, scale, color):
         """Draw a stylised microphone at world position (x,y,z)."""
         r, g, b = color
         glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
         glPushMatrix()
         glTranslatef(x, y, z)
         glRotatef(-self._yaw,    0, 0, 1)
@@ -689,7 +692,7 @@ class GLViewer(QOpenGLWidget):
         glEnd()
 
         # stand arc
-        glColor4f(r, g, b, 0.65)
+        glColor4f(r, g, b, 1.0)
         glBegin(GL_LINE_STRIP)
         for i in range(segs+1):
             ang = math.radians(i * 180 / segs)
@@ -707,17 +710,36 @@ class GLViewer(QOpenGLWidget):
         glBegin(GL_POINTS); glVertex3f(0, 0, 0); glEnd()
 
         glPopMatrix()
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
+    def _icon_scale(self, wx, wy, wz, px=28):
+        """
+        Return the world-space radius that corresponds to `px` screen pixels
+        at the given world position, using the current projection matrices.
+        Falls back to a scene-span fraction if unprojection fails.
+        """
+        W, H = self.width(), self.height()
+        viewport = [int(0), int(0), int(W), int(H)]
+        try:
+            # project the world point to screen
+            sx, sy, sz = gluProject(float(wx), float(wy), float(wz),
+                                    self._mv, self._proj, viewport)
+            # unproject a point `px` pixels to the right at the same depth
+            ox, oy, _ = gluUnProject(float(sx) + px, float(sy), float(sz),
+                                     self._mv, self._proj, viewport)
+            return max(math.hypot(ox - wx, oy - wy), 1e-4)
+        except Exception:
+            return max(self._scene_span * 0.03, 0.05)
+
     def _draw_sources(self):
-        # icon size = 3% of scene span, independent of zoom distance
-        s = max(self._scene_span * 0.03, 0.05)
         for pt in self._sources:
+            s = self._icon_scale(pt[0], pt[1], pt[2], px=22)
             self._speaker_icon(pt[0], pt[1], pt[2], s, SRC_COLOR)
 
     def _draw_receivers(self):
-        s = max(self._scene_span * 0.03, 0.05)
         for pt in self._receivers:
+            s = self._icon_scale(pt[0], pt[1], pt[2], px=22)
             self._mic_icon(pt[0], pt[1], pt[2], s, REC_COLOR)
 
     def _draw_placement_cursor(self):
@@ -752,8 +774,8 @@ class GLViewer(QOpenGLWidget):
             glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
             glEnd()
 
-        # preview icon
-        s = max(self._scene_span * 0.03, 0.05)
+        # preview icon — same constant screen size as placed icons
+        s = self._icon_scale(p[0], p[1], p[2], px=22)
         if self._mode == self.MODE_SRC:
             self._speaker_icon(p[0], p[1], p[2], s, SRC_COLOR)
         else:
@@ -775,8 +797,8 @@ class GLViewer(QOpenGLWidget):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
         # semi-transparent banner at top
-        from PyQt6.QtGui import QBrush
-        from PyQt6.QtCore import QRect
+        from PySide6.QtGui import QBrush
+        from PySide6.QtCore import QRect
         banner_h = 28
         painter.fillRect(QRect(0, 0, self.width(), banner_h),
                          QColor(20, 25, 35, 210))
@@ -1138,7 +1160,7 @@ class MaterialEditor(QWidget):
 #  Point table  (sources / receivers)
 # ─────────────────────────────────────────────────────────────
 class PointTable(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, has_amplitude=False, parent=None):
         super().__init__(parent)
@@ -1216,8 +1238,8 @@ class PointTable(QWidget):
 #  Solver runner thread
 # ─────────────────────────────────────────────────────────────
 class SolverThread(QThread):
-    output   = pyqtSignal(str)
-    finished = pyqtSignal(int)
+    output   = Signal(str)
+    finished = Signal(int)
 
     def __init__(self, cmd, cwd):
         super().__init__(); self._cmd = cmd; self._cwd = cwd
