@@ -1,1 +1,24 @@
 Copyright (c) 2026, Vito Romanelli Tricanico
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions, and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions, and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+4. You may not sell, sublicense, rent, lease, distribute for a fee, or otherwise commercially distribute the Software or any Derivative Works. For the avoidance of doubt, this restriction does not prohibit:
+   (a) internal commercial use of the Software;
+   (b) the sale of products or services that are not themselves the Software or a Derivative Work; or
+   (c) the sale, licensing, or other commercial exploitation of outputs generated through use of the Software.
+
+5. You may not provide the Software or any Derivative Works to third parties as a hosted, managed, or cloud-based service, software-as-a-service (SaaS) offering, application programming interface (API), or otherwise make the functionality of the Software available to third parties over a network.
+
+For purposes of this license:
+
+"Software" means the copyrighted software made available under this license.
+
+"Derivative Works" means any work based upon, derived from, or incorporating the Software to the extent protected by applicable copyright law.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
