@@ -96,6 +96,30 @@ int main(int argc, char *argv[]){
     uint8_t *oid = NULL; // for surface attribution
     uint8_t* d_oid = NULL;
     
+    // ------------------------------- get device(s) information -----------------------------------
+    
+    int nDevices;
+    cudaGetDeviceCount(&nDevices);
+    if (nDevices == 0){
+    	printf("\n[!] FAILED: no CUDA devices found\n\n");
+    	return -1;
+    }
+    for (int i = 0; i < nDevices; ++i) {
+        cudaDeviceProp prop{};
+        cudaGetDeviceProperties(&prop, i);
+
+        std::cout << "\n Device Number: " << i << std::endl;
+        std::cout << " Device Name: " << prop.name << std::endl;
+        std::cout << " Compute Capability: " << prop.major << "." << prop.minor << std::endl;
+        std::cout << " Total Global Memory (bytes): " << prop.totalGlobalMem << std::endl;
+        std::cout << " Max Threads per Block: " << prop.maxThreadsPerBlock << std::endl;
+        std::cout << " Memory Clock Rate (kHz): " << prop.memoryClockRate << std::endl;
+        std::cout << " Memory Bus Width (bits): " << prop.memoryBusWidth << std::endl;
+        std::cout << " L2 Cache Size (bytes): " << prop.l2CacheSize << std::endl;
+        std::cout << " Shared Memory per Block (bytes): " << prop.sharedMemPerBlock << std::endl;
+		std::cout << " Shared Memory per SM (bytes): "    << prop.sharedMemPerMultiprocessor << std::endl;
+    }
+    
     // -------------------------------------- process OBJ scene ------------------------------------
     
     std::vector<std::string> names; // global naming
@@ -554,10 +578,19 @@ int main(int argc, char *argv[]){
     	fclose(file_oid);
 	}
 	
-	// Kernel launch parameters
-	dim3 TP(8,8,8);
-	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 	
+	/*
+	// occupancy check
+	int blockSize1D;
+	int minGridSize;
+	cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize1D, kernel_WENO_step0, 0, 0);
+	printf("\nOptimal block size (1D): %d\n", blockSize1D); // 512 on the laptop GTX 1050
+	printf("Minimum grid size for full occupancy: %d\n", minGridSize);
+	*/
+	
+	// Kernel launch parameters
+	dim3 TP(32,8,2); // row-major order. From the occupancy output right above, 32 * 8 * 2 = 512
+	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 	
 	// Copy initial data to device if not using p_time[]
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
