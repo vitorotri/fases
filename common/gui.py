@@ -218,6 +218,8 @@ class GLViewer(QOpenGLWidget):
         # pivot (orbit centre = mesh centre)
         self._pivot      = np.zeros(3, np.float32)
         self._scene_span = 1.0   # updated by load_mesh
+        self._domain_min = np.zeros(3, np.float32)  # scene AABB min
+        self._domain_max = np.ones(3,  np.float32)  # scene AABB max
         # cached GL matrices (for unprojection)
         self._mv  = np.eye(4, dtype=np.float64)
         self._proj= np.eye(4, dtype=np.float64)
@@ -248,6 +250,8 @@ class GLViewer(QOpenGLWidget):
             span = (mx - mn).max()
             self._pivot      = ctr.copy()
             self._scene_span = span if span > 0 else 1.0
+            self._domain_min = mn.copy()
+            self._domain_max = mx.copy()
             self._pan        = np.zeros(3, np.float32)
             self._dist       = span * 1.8 if span > 0 else 6.0
             self._yaw   = 35.0
@@ -713,6 +717,11 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
+    def _outside_domain(self, x, y, z):
+        """Return True if (x,y,z) lies outside the scene bounding box."""
+        p = np.array([x, y, z], np.float32)
+        return bool(np.any(p < self._domain_min) or np.any(p > self._domain_max))
+
     def _icon_scale(self, wx, wy, wz, px=28):
         """
         Return the world-space radius that corresponds to `px` screen pixels
@@ -734,13 +743,17 @@ class GLViewer(QOpenGLWidget):
 
     def _draw_sources(self):
         for pt in self._sources:
-            s = self._icon_scale(pt[0], pt[1], pt[2], px=22)
-            self._speaker_icon(pt[0], pt[1], pt[2], s, SRC_COLOR)
+            s   = self._icon_scale(pt[0], pt[1], pt[2], px=14)
+            col = (1.0, 0.15, 0.15) if self._outside_domain(pt[0], pt[1], pt[2]) \
+                  else SRC_COLOR
+            self._speaker_icon(pt[0], pt[1], pt[2], s, col)
 
     def _draw_receivers(self):
         for pt in self._receivers:
-            s = self._icon_scale(pt[0], pt[1], pt[2], px=22)
-            self._mic_icon(pt[0], pt[1], pt[2], s, REC_COLOR)
+            s   = self._icon_scale(pt[0], pt[1], pt[2], px=14)
+            col = (1.0, 0.15, 0.15) if self._outside_domain(pt[0], pt[1], pt[2]) \
+                  else REC_COLOR
+            self._mic_icon(pt[0], pt[1], pt[2], s, col)
 
     def _draw_placement_cursor(self):
         """Axis arrow + crosshair at _cursor_world."""
@@ -775,11 +788,15 @@ class GLViewer(QOpenGLWidget):
             glEnd()
 
         # preview icon — same constant screen size as placed icons
-        s = self._icon_scale(p[0], p[1], p[2], px=22)
+        s   = self._icon_scale(p[0], p[1], p[2], px=14)
+        col_override = (1.0, 0.15, 0.15) \
+                       if self._outside_domain(p[0], p[1], p[2]) else None
         if self._mode == self.MODE_SRC:
-            self._speaker_icon(p[0], p[1], p[2], s, SRC_COLOR)
+            self._speaker_icon(p[0], p[1], p[2], s,
+                               col_override if col_override else SRC_COLOR)
         else:
-            self._mic_icon(p[0], p[1], p[2], s, REC_COLOR)
+            self._mic_icon(p[0], p[1], p[2], s,
+                           col_override if col_override else REC_COLOR)
 
         glEnable(GL_LIGHTING)
 
