@@ -19,7 +19,6 @@ Key bindings (GL viewport):
     Escape         : cancel placement mode / deselect layer
     LMB click      : (normal mode) ray-pick layer
     Shift + LMB drag: inside-box look mode; lets you look straight up/down
-    Alt + LMB drag  : free tumble
     Ctrl + LMB drag : roll around view axis
 """
 
@@ -51,10 +50,10 @@ from OpenGL.GLU import *
 # ─────────────────────────────────────────────────────────────
 PAL = {
     "bg":        "#1a1d23", "panel":   "#20242c", "border":  "#2e3340",
-    "accent":    "#4fc3f7", "accent2": "#81d4fa", "warn":    "#ffb74d",
+    "accent":    "#7c5cfc", "accent2": "#a48bff", "warn":    "#ffb74d",
     "ok":        "#a5d6a7", "err":     "#ef9a9a", "text":    "#cfd8dc",
     "subtext":   "#78909c", "highlight":"#263238","btn":     "#2a3140",
-    "btn_hover": "#35404f", "layer_sel":"#1e3a4a",
+    "btn_hover": "#35404f", "layer_sel":"#251a55",
 }
 
 LAYER_COLORS = [
@@ -68,7 +67,7 @@ SRC_COLOR  = (1.00, 0.82, 0.10)
 REC_COLOR  = (0.20, 1.00, 0.55)
 SEL_OUTLINE= (1.00, 1.00, 1.00)
 
-OCTAVE_BANDS = [125, 250, 500, 1000, 2000, 4000]
+OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 
 # ─────────────────────────────────────────────────────────────
 #  OBJ parser  (mirrors parsing3D.h)
@@ -320,7 +319,7 @@ class GLViewer(QOpenGLWidget):
         # camera toward whatever you are looking at.
         glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.7, 0.7, 0.7, 1.0])
         glLightfv(GL_LIGHT0, GL_AMBIENT, [0.0, 0.0, 0.0, 1.0])
-        glClearColor(0.10, 0.12, 0.14, 1.0)
+        glClearColor(0.02, 0.02, 0.03, 1.0)
 
     def resizeGL(self, w, h):
         glViewport(0, 0, w, h)
@@ -1299,7 +1298,7 @@ class MainWindow(QMainWindow):
             QComboBox{{background:{PAL['btn']};color:{PAL['text']};
                 border:1px solid {PAL['border']};border-radius:3px;padding:2px 6px;}}
             QComboBox QAbstractItemView{{background:{PAL['panel']};color:{PAL['text']};}}
-            QSplitter::handle{{background:{PAL['border']};}}
+            QSplitter::handle{{width:0px;height:0px;background:transparent;border:none;margin:0;padding:0;}}
             QStatusBar{{background:{PAL['panel']};color:{PAL['subtext']};font-size:11px;}}
         """)
 
@@ -1310,6 +1309,7 @@ class MainWindow(QMainWindow):
         root_lay.setContentsMargins(6,6,6,6); root_lay.setSpacing(6)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(0)      # no visible/draggable handle
         root_lay.addWidget(splitter)
 
         # left — GL + status
@@ -1321,28 +1321,34 @@ class MainWindow(QMainWindow):
         self._gl.layerPicked.connect(self._on_layer_picked)
         self._gl.pointPlaced.connect(self._on_point_placed)
         self._gl.pointRemoved.connect(self._on_point_removed)
-        gl_vlay.addWidget(self._gl)
+        gl_vlay.addWidget(self._gl, stretch=1)
 
         # placement toolbar under the viewer
         place_bar = QHBoxLayout()
         place_bar.setSpacing(4)
+        place_bar.setContentsMargins(2, 1, 2, 1)
 
-        self._src_btn = QPushButton("📡  Place Source  [S]")
+        self._src_btn = QPushButton("Src [S]")
         self._src_btn.setCheckable(True)
+        self._src_btn.setFixedSize(90, 22)
         self._src_btn.clicked.connect(lambda: self._toggle_placement("source"))
         place_bar.addWidget(self._src_btn)
 
-        self._rec_btn = QPushButton("🎙  Place Receiver  [T]")
+        self._rec_btn = QPushButton("Rec [T]")
         self._rec_btn.setCheckable(True)
+        self._rec_btn.setFixedSize(90, 22)
         self._rec_btn.clicked.connect(lambda: self._toggle_placement("receiver"))
         place_bar.addWidget(self._rec_btn)
 
-        place_bar.addStretch()
-        hint = QLabel("Rotate: LMB Z-up   Alt+LMB free   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   R: reset   "
-                      "S: source  T: receiver   X/Y/Z: axis lock   RMB: delete   Esc: cancel")
-        hint.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
+        hint = QLabel("Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
+                      "R: reset   S: src   T: rec   X/Y/Z: lock   RMB: del   Esc: cancel")
+        hint.setStyleSheet(f"color:{PAL['subtext']};font-size:9px;")
         place_bar.addWidget(hint)
-        gl_vlay.addLayout(place_bar)
+        place_bar.addStretch()
+        bar_wrap = QWidget()
+        bar_wrap.setFixedHeight(24)
+        bar_wrap.setLayout(place_bar)
+        gl_vlay.addWidget(bar_wrap)
 
         splitter.addWidget(gl_wrap)
 
@@ -1351,6 +1357,8 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
+        self._tabs.setMinimumWidth(480)
+        splitter.setChildrenCollapsible(False)
 
         self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
         self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
