@@ -96,7 +96,7 @@ int main(int argc, char *argv[]){
     uint8_t *oid = NULL; // for surface attribution
     uint8_t* d_oid = NULL;
     
-    // ------------------------------- get device(s) information -----------------------------------
+    // ------------------------------- get Device(s) information -----------------------------------
     
     int nDevices;
     cudaGetDeviceCount(&nDevices);
@@ -589,7 +589,7 @@ int main(int argc, char *argv[]){
 	*/
 	
 	// Kernel launch parameters
-	dim3 TP(32,8,2); // row-major order. From the occupancy output right above, 32 * 8 * 2 = 512
+	dim3 TP(32,4,4); // row-major order. From the occupancy output right above, 32 * 4 * 4 = 512
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 	
 	// Copy initial data to device if not using p_time[]
