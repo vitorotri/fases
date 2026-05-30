@@ -43,7 +43,7 @@ __host__ float SPL(float p){
 
 // compute on regular variables
 // Total Variation of variable Q
-__host__ __device__ float TV(float *Q, int Nx, int Ny, int Nz, float h){
+__host__ __device__ float TV(float *__restrict__ Q, int Nx, int Ny, int Nz, float h){
 	float retval = 0.0;
 	for (int i = 0; i < Nx-1; i++){
 		for (int j = 0; j < Ny-1; j++){
@@ -108,7 +108,7 @@ float cubic_interp_1d(float fm1, float f0, float f1, float f2, float s){
 }
 
 __device__ __forceinline__
-float tricubic_interp(const float *f, int Nx, int Ny, int Nz, float Dx, float Dy, float Dz, float h){
+float tricubic_interp(const float *__restrict__ f, int Nx, int Ny, int Nz, float Dx, float Dy, float Dz, float h){
     // Convert physical position to grid coordinates
     
     float gx = Dx / h - 0.5;
@@ -259,7 +259,7 @@ __global__ void kernel_periodic_trick_z(float *S, uint8_t *oid, int Nx, int Ny, 
 	}
 }
 
-__global__ void kernel_periodic_trick_x(float *S, uint8_t *oid,
+__global__ void kernel_periodic_trick_x(float *__restrict__ S, uint8_t *__restrict__ oid,
                                         int Nx, int Ny, int Nz, float h)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -279,7 +279,7 @@ __global__ void kernel_periodic_trick_x(float *S, uint8_t *oid,
     }
 }
 
-__global__ void kernel_apply_periodic_x(float *p, float *u, float *v, float *w, int Nx, int Ny, int Nz){
+__global__ void kernel_apply_periodic_x(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, int Nx, int Ny, int Nz){
     int j = blockIdx.x * blockDim.x + threadIdx.x + 3;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 3;
 
@@ -318,7 +318,7 @@ __global__ void kernel_apply_periodic_x(float *p, float *u, float *v, float *w, 
     w[flat3(Nx-1, j, k, Nx, Ny)] = w[flat3(5, j, k, Nx, Ny)];
 }
 
-__global__ void kernel_apply_periodic_z(float *p, float *u, float *v, float *w, int Nx, int Ny, int Nz){
+__global__ void kernel_apply_periodic_z(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, int Nx, int Ny, int Nz){
     
     int i = blockIdx.x * blockDim.x + threadIdx.x + 3;
     int j = blockIdx.y * blockDim.y + threadIdx.y + 3;
@@ -360,7 +360,7 @@ __global__ void kernel_apply_periodic_z(float *p, float *u, float *v, float *w, 
 
 // non-implicit, solved with regular SSP-RK3, but coefficients alpha, beta and zeta are restricted in terms
 // of time-step dt in the fitting script
-__device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *A, float *zeta, float *B, float *C, float *alpha, float *beta, float *R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+__device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float *__restrict__ A, float *__restrict__ zeta, float *__restrict__ B, float *__restrict__ C, float *__restrict__ alpha, float *__restrict__ beta, float *__restrict__ R_inf, int K, int L, float a_SSP, float b_SSP, float c_SSP, float *__restrict__ phi_left, float *__restrict__ phi_middle, float *__restrict__ phi_right, float *__restrict__ psi_1_left, float *__restrict__ psi_1_middle, float *__restrict__ psi_1_right, float *__restrict__ psi_2_left, float *__restrict__ psi_2_middle, float *__restrict__ psi_2_right){
     float sum_A  = 0.0f;
     float sum_BC = 0.0f;
 
@@ -396,7 +396,7 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *u, float *v, float *w, float *p, int Nx, int Ny, int Nz, float h, float *S, uint8_t *oid, float rho, float c, int n, float dt, float *u_old, float *v_old, float *w_old, float *p_old, float tol, float *Rinf, float *Ak, float *zeta, float *Bl, float *Cl, float *alpha, float *beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *phi_left, float *phi_middle, float *phi_right, float *psi_1_left, float *psi_1_middle, float *psi_1_right, float *psi_2_left, float *psi_2_middle, float *psi_2_right){
+__global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, float *__restrict__ p, int Nx, int Ny, int Nz, float h, float *S, uint8_t *__restrict__ oid, float rho, float c, int n, float dt, float *__restrict__ u_old, float *__restrict__ v_old, float *__restrict__ w_old, float *__restrict__ p_old, float tol, float *__restrict__ Rinf, float *__restrict__ Ak, float *__restrict__ zeta, float *__restrict__ Bl, float *__restrict__ Cl, float *__restrict__ alpha, float *__restrict__ beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *__restrict__ phi_left, float *__restrict__ phi_middle, float *__restrict__ phi_right, float *__restrict__ psi_1_left, float *__restrict__ psi_1_middle, float *__restrict__ psi_1_right, float *__restrict__ psi_2_left, float *__restrict__ psi_2_middle, float *__restrict__ psi_2_right){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -570,7 +570,7 @@ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float 
 // 
 //
 __host__ __device__
-void sPML(float *p, float *p_old, float *u, float *u_old, float *v, float *v_old, float *w, float *w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML){
+void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ u, float *__restrict__ u_old, float *__restrict__ v, float *__restrict__ v_old, float *__restrict__ w, float *__restrict__ w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML){
 	
 	const float d_x = perc_x * (float)Nx;
     const float d_y = perc_y * (float)Ny;
@@ -639,7 +639,7 @@ void sPML(float *p, float *p_old, float *u, float *u_old, float *v, float *v_old
 
 // reconstruct in x, for k = 3
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_{i-1/2} instead of V_{i+1/2})
-__device__ float construct_Vi_12(float *u, int i, int j, int k, int Nx, int Ny, float *c_rl, int r, int idx){
+__device__ float construct_Vi_12(float *__restrict__ u, int i, int j, int k, int Nx, int Ny, float *__restrict__ c_rl, int r, int idx){
 	float retval = 0.0;
 	for (int l = 0; l <= 2; l++){
 		//if (r+idx > 3) printf("[!] Violation");
@@ -650,7 +650,7 @@ __device__ float construct_Vi_12(float *u, int i, int j, int k, int Nx, int Ny, 
 
 // reconstruct in y, for k = 3
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_{j-1/2} instead of V_{j+1/2})
-__device__ float construct_Vj_12(float *u, int i, int j, int k, int Nx, int Ny, float *c_rl, int r, int idx){
+__device__ float construct_Vj_12(float *__restrict__ u, int i, int j, int k, int Nx, int Ny, float *__restrict__ c_rl, int r, int idx){
 	float retval = 0.0;
 	for (int l = 0; l <= 2; l++){
 		retval += c_rl[flat(r+idx,l,12)]*u[flat3(i,j-r+l,k,Nx,Ny)];
@@ -660,7 +660,7 @@ __device__ float construct_Vj_12(float *u, int i, int j, int k, int Nx, int Ny, 
 
 // reconstruct in z, for k = 3
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_{k-1/2} instead of V_{k+1/2})
-__device__ float construct_Vk_12(float *u, int i, int j, int k, int Nx, int Ny, float *c_rl, int r, int idx){
+__device__ float construct_Vk_12(float *__restrict__ u, int i, int j, int k, int Nx, int Ny, float *__restrict__ c_rl, int r, int idx){
 	float retval = 0.0;
 	for (int l = 0; l <= 2; l++){
 		retval += c_rl[flat(r+idx,l,12)]*u[flat3(i,j,k-r+l,Nx,Ny)];
@@ -669,7 +669,7 @@ __device__ float construct_Vk_12(float *u, int i, int j, int k, int Nx, int Ny, 
 }
 
 // compute smoothness indicators in x
-__device__ float compute_beta_x(float *u, int r, int i, int j, int k, int Nx, int Ny, float *beta_rl){
+__device__ float compute_beta_x(float *__restrict__ u, int r, int i, int j, int k, int Nx, int Ny, float *__restrict__ beta_rl){
 	float b1, b2;
 	
 	b1 = u[flat3(i-r,j,k,Nx,Ny)] - 2*u[flat3(i-r+1,j,k,Nx,Ny)] + u[flat3(i-r+2,j,k,Nx,Ny)];
@@ -681,7 +681,7 @@ __device__ float compute_beta_x(float *u, int r, int i, int j, int k, int Nx, in
 }
 
 // compute smoothness indicators in y
-__device__ float compute_beta_y(float *u, int r, int i, int j, int k, int Nx, int Ny, float *beta_rl){
+__device__ float compute_beta_y(float *__restrict__ u, int r, int i, int j, int k, int Nx, int Ny, float *__restrict__ beta_rl){
 	float b1, b2;
 	
 	b1 = u[flat3(i,j-r,k,Nx,Ny)] - 2*u[flat3(i,j-r+1,k,Nx,Ny)] + u[flat3(i,j-r+2,k,Nx,Ny)];
@@ -693,7 +693,7 @@ __device__ float compute_beta_y(float *u, int r, int i, int j, int k, int Nx, in
 }
 
 // compute smoothness indicators in z
-__device__ float compute_beta_z(float *u, int r, int i, int j, int k, int Nx, int Ny, float *beta_rl){
+__device__ float compute_beta_z(float *__restrict__ u, int r, int i, int j, int k, int Nx, int Ny, float *__restrict__ beta_rl){
 	float b1, b2;
 	
 	b1 = u[flat3(i,j,k-r,Nx,Ny)] - 2*u[flat3(i,j,k-r+1,Nx,Ny)] + u[flat3(i,j,k-r+2,Nx,Ny)];
@@ -706,7 +706,7 @@ __device__ float compute_beta_z(float *u, int r, int i, int j, int k, int Nx, in
 
 // compute alpha[r]
 // if S = 0, compute alpha, if 1, compute alpha~
-__device__ float compute_alpha(float *dd, float *beta, float eps, int r, int SS){
+__device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta, float eps, int r, int SS){
 	//if (beta[r] != 0.0) printf("beta = %.17f\n", beta[r]);
 	float aux = beta[r] + eps;
 	int rr = SS*3 - SS*1 - r;
@@ -722,7 +722,7 @@ __device__ float compute_w(float *alpha, int r){
 
 // WENO algorithm in x
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_i- instead of V_i+)
-__device__ float WENO_x(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
+__device__ float WENO_x(float *__restrict__ V, float *__restrict__ dd, float *__restrict__ c_rl, float *__restrict__ beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
 	
 	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
 	float Vi_12[3];
@@ -758,7 +758,7 @@ __device__ float WENO_x(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 
 // WENO algorithm in y
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_j- instead of V_j+)
-__device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
+__device__ float WENO_y(float *__restrict__ V, float *__restrict__ dd, float *__restrict__ c_rl, float *__restrict__ beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
 	
 	// 1) Contruct point values V_{i+1/2}, V_{i-1/2}
 	float Vj_12[3];
@@ -794,7 +794,7 @@ __device__ float WENO_y(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 
 // WENO algorithm in z
 // idx = 0 or idx = 1 (default is 1, if 0, will compute V_k- instead of V_k+)
-__device__ float WENO_z(float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
+__device__ float WENO_z(float *__restrict__ V, float *__restrict__ dd, float *__restrict__ c_rl, float *__restrict__ beta_rl, int i, int j, int k, int Nx, int Ny, int idx, float eps){
 	
 	// 1) Contruct point values V_{k+1/2}, V_{k-1/2}
 	float Vk_12[3];
@@ -829,7 +829,7 @@ __device__ float WENO_z(float *V, float *dd, float *c_rl, float *beta_rl, int i,
 }
 
 // Compute final 4 V's for pluging WENO reconstructions in x flux
-__device__ void compute_Vs_x(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
+__device__ void compute_Vs_x(float *Q_V, float *__restrict__ V, float *__restrict__ dd, float *__restrict__ c_rl, float *__restrict__ beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
 	Q_V[0] = WENO_x(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 1, eps);
 	Q_V[1] = WENO_x(V, dd, c_rl, beta_rl, i+1, j, k, Nx, Ny, 0, eps);
 	Q_V[2] = WENO_x(V, dd, c_rl, beta_rl, i-1, j, k, Nx, Ny, 1, eps);
@@ -837,7 +837,7 @@ __device__ void compute_Vs_x(float *Q_V, float *V, float *dd, float *c_rl, float
 }
 
 // Compute final 4 V's for pluging WENO reconstructions in y flux
-__device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
+__device__ void compute_Vs_y(float *Q_V, float *__restrict__ V, float *__restrict__ dd, float *__restrict__ c_rl, float *__restrict__ beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
 	Q_V[0] = WENO_y(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 1, eps);
 	Q_V[1] = WENO_y(V, dd, c_rl, beta_rl, i, j+1, k, Nx, Ny, 0, eps);
 	Q_V[2] = WENO_y(V, dd, c_rl, beta_rl, i, j-1, k, Nx, Ny, 1, eps);
@@ -845,14 +845,14 @@ __device__ void compute_Vs_y(float *Q_V, float *V, float *dd, float *c_rl, float
 }
 
 // Compute final 4 V's for pluging WENO reconstructions in z flux
-__device__ void compute_Vs_z(float *Q_V, float *V, float *dd, float *c_rl, float *beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
+__device__ void compute_Vs_z(float *Q_V, float *__restrict__ V, float *__restrict__ dd, float *__restrict__ c_rl, float *__restrict__ beta_rl, int i, int j, int k, int Nx, int Ny, float eps){
 	Q_V[0] = WENO_z(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 1, eps);
 	Q_V[1] = WENO_z(V, dd, c_rl, beta_rl, i, j, k+1, Nx, Ny, 0, eps);
 	Q_V[2] = WENO_z(V, dd, c_rl, beta_rl, i, j, k-1, Nx, Ny, 1, eps);
 	Q_V[3] = WENO_z(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 0, eps);
 }
 
-__global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, float *u, float *v, float *w){
+__global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, float *__restrict__ u, float *v, float *w){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -893,7 +893,7 @@ __global__ void kernel_inject_source(float *p, float *p_time, int i_src, int j_s
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *__restrict__ c_rl, float eps, float *__restrict__ dd, float *__restrict__ beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -976,7 +976,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *p0, float *u0, 
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *__restrict__ c_rl, float eps, float *__restrict__ dd, float *__restrict__ beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1059,7 +1059,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *p0, float *u0, 
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *p0, float *u0, float *v0, float *w0, float *p1, float *u1, float *v1, float *w1, float *p2, float *u2, float *v2, float *w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *__restrict__ c_rl, float eps, float *__restrict__ dd, float *__restrict__ beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
