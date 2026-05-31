@@ -308,41 +308,65 @@ inline static vec3 voxel_center(const Grid3D& g, int i, int j, int k){
               g.origin.z + (k + 0.5f)*g.h.z);
 }
 
-inline static void compute_sdf_cpu(const Mesh3D& mesh, const Grid3D& grid, std::vector<float>& sdf_out){
+// Narrow-band SDF: exact signed distance within `band_radius` of the surface,
+// sign-correct clamp (+/- band_radius) elsewhere. Same result as compute_sdf_cpu
+// inside the band, ~100x faster. band_radius<0 => auto (8h).
+inline static void compute_sdf_cpu(const Mesh3D& mesh, const Grid3D& grid,
+                                              std::vector<float>& sdf_out,
+                                              float band_radius = -1.f)
+{
     const int Nx=grid.Nx, Ny=grid.Ny, Nz=grid.Nz;
-    sdf_out.assign((size_t)Nx*Ny*Nz, 0.f);
+    const size_t N=(size_t)Nx*(size_t)Ny*(size_t)Nz;
+    const float hx=grid.h.x, hy=grid.h.y, hz=grid.h.z;
+    if(band_radius < 0.f) band_radius = 8.f*hx;   // >= tol + (WENO stencil radius +1)*h
 
-    const vec3 rd = v3(1.f,0.f,0.f);
-    const float tmin = 1e-6f;
+    // 1) |distance|, initialized to the clamp value.
+    std::vector<float> absd(N, band_radius);
 
-    for(int k=0;k<Nz;++k){
-        for(int j=0;j<Ny;++j){
-            for(int i=0;i<Nx;++i){
-                const vec3 p = voxel_center(grid,i,j,k);
+    // 2) Scatter exact distance into the band from each triangle's expanded AABB.
+    for(const auto& t : mesh.tris){
+        const vec3 a=mesh.vertex_transformed(t.v0),
+                   b=mesh.vertex_transformed(t.v1),
+                   c=mesh.vertex_transformed(t.v2);
+        const float lox=std::min(a.x,std::min(b.x,c.x))-band_radius,
+                    loy=std::min(a.y,std::min(b.y,c.y))-band_radius,
+                    loz=std::min(a.z,std::min(b.z,c.z))-band_radius,
+                    hix=std::max(a.x,std::max(b.x,c.x))+band_radius,
+                    hiy=std::max(a.y,std::max(b.y,c.y))+band_radius,
+                    hiz=std::max(a.z,std::max(b.z,c.z))+band_radius;
+        int i0=(int)std::floor((lox-grid.origin.x)/hx-0.5f), i1=(int)std::ceil((hix-grid.origin.x)/hx-0.5f);
+        int j0=(int)std::floor((loy-grid.origin.y)/hy-0.5f), j1=(int)std::ceil((hiy-grid.origin.y)/hy-0.5f);
+        int k0=(int)std::floor((loz-grid.origin.z)/hz-0.5f), k1=(int)std::ceil((hiz-grid.origin.z)/hz-0.5f);
+        if(i0<0)i0=0; if(j0<0)j0=0; if(k0<0)k0=0;
+        if(i1>Nx-1)i1=Nx-1; if(j1>Ny-1)j1=Ny-1; if(k1>Nz-1)k1=Nz-1;
+        for(int k=k0;k<=k1;++k) for(int j=j0;j<=j1;++j) for(int i=i0;i<=i1;++i){
+            const vec3 p=voxel_center(grid,i,j,k);
+            const float d=std::sqrt(point_triangle_dist2(p,a,b,c));
+            const size_t idx=(size_t)k*Ny*Nx+(size_t)j*Nx+(size_t)i;
+            if(d<absd[idx]) absd[idx]=d;
+        }
+    }
 
-                float mind2 = FLT_MAX;
-                int hits = 0;
-
-                for(const auto& t : mesh.tris){
-                
-                	// Skip BoundingBox triangles (group 0)
-    				//if(t.group_id == 0) continue;
-
-                    const vec3 a = mesh.vertex_transformed(t.v0);
-                    const vec3 b = mesh.vertex_transformed(t.v1);
-                    const vec3 c = mesh.vertex_transformed(t.v2);
-
-                    mind2 = std::min(mind2, point_triangle_dist2(p,a,b,c));
-
-                    float tt;
-                    if(ray_triangle_intersect(p, rd, a,b,c, tmin, tt)) hits++;
-                }
-
-                float sd = std::sqrt(mind2);
-                if(!(hits & 1)) sd = -sd;
-				//else sd = -sd;
-                sdf_out[(size_t)k*Ny*Nx + (size_t)j*Nx + (size_t)i] = sd;
-            }
+    // 3) Sign via per-(j,k) scanline parity along +X (matches brute-force convention).
+    sdf_out.assign(N,0.f);
+    const float tmin=1e-6f; const vec3 rd=v3(1.f,0.f,0.f);
+    std::vector<float> xs; xs.reserve(64);
+    for(int k=0;k<Nz;++k) for(int j=0;j<Ny;++j){
+        const float y0=grid.origin.y+(j+0.5f)*hy, z0=grid.origin.z+(k+0.5f)*hz;
+        const vec3 ro=v3(grid.origin.x,y0,z0);
+        xs.clear();
+        for(const auto& t:mesh.tris){
+            const vec3 a=mesh.vertex_transformed(t.v0),
+                       b=mesh.vertex_transformed(t.v1),
+                       c=mesh.vertex_transformed(t.v2);
+            float tt; if(ray_triangle_intersect(ro,rd,a,b,c,0.0f,tt)) xs.push_back(ro.x+tt);
+        }
+        std::sort(xs.begin(),xs.end());
+        for(int i=0;i<Nx;++i){
+            const float xc=grid.origin.x+(i+0.5f)*hx;
+            const int ahead=(int)(xs.end()-std::upper_bound(xs.begin(),xs.end(),xc+tmin));
+            const size_t idx=(size_t)k*Ny*Nx+(size_t)j*Nx+(size_t)i;
+            float s=absd[idx]; if(!(ahead&1)) s=-s; sdf_out[idx]=s;
         }
     }
 }
@@ -457,6 +481,100 @@ inline static void free_mesh_device(vec3*& d_vertices, Tri*& d_tris){
     if(d_tris){ cudaFree(d_tris); d_tris=nullptr; }
 }
 
+#ifndef SDF_ROW_XCAP
+#define SDF_ROW_XCAP 64   // max +X surface crossings per row; overflow -> safe fallback
+#endif
+
+__global__ void k_fill_u32(unsigned int* a, size_t n, unsigned int val){
+    size_t i = (size_t)blockIdx.x*blockDim.x + threadIdx.x;
+    if(i<n) a[i]=val;
+}
+
+// one thread per triangle: scatter |distance| into the band via atomicMin
+__global__ void k_sdf_scatter(unsigned int* __restrict__ absu, Grid3D grid, dMesh3D mesh, float band){
+    int t = blockIdx.x*blockDim.x + threadIdx.x;
+    if(t>=mesh.ntris) return;
+    const Tri tri = mesh.d_tris[t];
+    const vec3 a=d_vertex_transformed(mesh,tri.v0), b=d_vertex_transformed(mesh,tri.v1), c=d_vertex_transformed(mesh,tri.v2);
+    const int Nx=grid.Nx,Ny=grid.Ny,Nz=grid.Nz;
+    const float hx=grid.h.x,hy=grid.h.y,hz=grid.h.z;
+    const float lox=fminf(a.x,fminf(b.x,c.x))-band, hix=fmaxf(a.x,fmaxf(b.x,c.x))+band;
+    const float loy=fminf(a.y,fminf(b.y,c.y))-band, hiy=fmaxf(a.y,fmaxf(b.y,c.y))+band;
+    const float loz=fminf(a.z,fminf(b.z,c.z))-band, hiz=fmaxf(a.z,fmaxf(b.z,c.z))+band;
+    int i0=(int)floorf((lox-grid.origin.x)/hx-0.5f), i1=(int)ceilf((hix-grid.origin.x)/hx-0.5f);
+    int j0=(int)floorf((loy-grid.origin.y)/hy-0.5f), j1=(int)ceilf((hiy-grid.origin.y)/hy-0.5f);
+    int k0=(int)floorf((loz-grid.origin.z)/hz-0.5f), k1=(int)ceilf((hiz-grid.origin.z)/hz-0.5f);
+    if(i0<0)i0=0; if(j0<0)j0=0; if(k0<0)k0=0;
+    if(i1>Nx-1)i1=Nx-1; if(j1>Ny-1)j1=Ny-1; if(k1>Nz-1)k1=Nz-1;
+    for(int k=k0;k<=k1;++k){ const float pz=grid.origin.z+(k+0.5f)*hz;
+      for(int j=j0;j<=j1;++j){ const float py=grid.origin.y+(j+0.5f)*hy;
+        for(int i=i0;i<=i1;++i){ const float px=grid.origin.x+(i+0.5f)*hx;
+            const vec3 p=v3(px,py,pz);
+            const float d=sqrtf(point_triangle_dist2(p,a,b,c));   // d >= 0
+            const size_t idx=(size_t)k*Ny*Nx+(size_t)j*Nx+(size_t)i;
+            atomicMin(&absu[idx], __float_as_uint(d));            // uint order == float order for d>=0
+        }
+      }
+    }
+}
+
+// one thread per (j,k) row: parity sign along +X, then finalize to signed float S
+__global__ void k_sdf_sign_finalize(const unsigned int* __restrict__ absu, float* __restrict__ S,
+                                     Grid3D grid, dMesh3D mesh){
+    const int Nx=grid.Nx,Ny=grid.Ny,Nz=grid.Nz;
+    int j = blockIdx.x*blockDim.x + threadIdx.x;
+    int k = blockIdx.y*blockDim.y + threadIdx.y;
+    if(j>=Ny || k>=Nz) return;
+    const float hx=grid.h.x,hy=grid.h.y,hz=grid.h.z, tmin=1e-6f;
+    const float y0=grid.origin.y+(j+0.5f)*hy, z0=grid.origin.z+(k+0.5f)*hz;
+    const vec3 ro=v3(grid.origin.x,y0,z0), rd=v3(1.f,0.f,0.f);
+
+    float xs[SDF_ROW_XCAP]; int nc=0; bool overflow=false;
+    for(int t=0;t<mesh.ntris;++t){
+        const Tri tri=mesh.d_tris[t];
+        const vec3 a=d_vertex_transformed(mesh,tri.v0),b=d_vertex_transformed(mesh,tri.v1),c=d_vertex_transformed(mesh,tri.v2);
+        float tt; if(ray_triangle_intersect(ro,rd,a,b,c,0.0f,tt)){ if(nc<SDF_ROW_XCAP) xs[nc++]=ro.x+tt; else {overflow=true; break;} }
+    }
+    if(!overflow){
+        for(int x=1;x<nc;++x){ float key=xs[x]; int y=x-1; while(y>=0&&xs[y]>key){xs[y+1]=xs[y];--y;} xs[y+1]=key; } // insertion sort
+        for(int i=0;i<Nx;++i){
+            const float xc=grid.origin.x+(i+0.5f)*hx;
+            int ahead=0; for(int q=nc-1;q>=0;--q){ if(xs[q]>xc+tmin) ++ahead; else break; }
+            const size_t idx=(size_t)k*Ny*Nx+(size_t)j*Nx+(size_t)i;
+            const float d=__uint_as_float(absu[idx]); S[idx]=(ahead&1)? d : -d;   // odd ahead => interior => +  (your convention)
+        }
+    } else { // robust per-voxel fallback (exactly your brute-force parity)
+        for(int i=0;i<Nx;++i){
+            const float xc=grid.origin.x+(i+0.5f)*hx; const vec3 p=v3(xc,y0,z0); int hits=0;
+            for(int t=0;t<mesh.ntris;++t){ const Tri tri=mesh.d_tris[t];
+                const vec3 a=d_vertex_transformed(mesh,tri.v0),b=d_vertex_transformed(mesh,tri.v1),c=d_vertex_transformed(mesh,tri.v2);
+                float tt; if(ray_triangle_intersect(p,rd,a,b,c,tmin,tt)) ++hits; }
+            const size_t idx=(size_t)k*Ny*Nx+(size_t)j*Nx+(size_t)i;
+            const float d=__uint_as_float(absu[idx]); S[idx]=(hits&1)? d : -d;
+        }
+    }
+}
+
+// Host driver: full narrow-band SDF on the GPU. grid.origin/h/N must match your CPU setup.
+inline static bool build_sdf_gpu_narrowband(const Mesh3D& mesh, const Grid3D& grid, float band, float* S_host){
+    const size_t N=(size_t)grid.Nx*grid.Ny*grid.Nz;
+    vec3* d_v=nullptr; Tri* d_t=nullptr; dMesh3D dm; std::string err;
+    if(!upload_mesh_to_device(mesh,dm,d_v,d_t,&err)) return false;
+    unsigned int* d_absu=nullptr; float* d_S=nullptr;
+    if(cudaMalloc(&d_absu,N*sizeof(unsigned int))!=cudaSuccess){ free_mesh_device(d_v,d_t); return false; }
+    if(cudaMalloc(&d_S,N*sizeof(float))!=cudaSuccess){ cudaFree(d_absu); free_mesh_device(d_v,d_t); return false; }
+
+    unsigned int ub; std::memcpy(&ub,&band,sizeof(ub));   // host-side __float_as_uint
+    { int TPB=256; unsigned B=(unsigned)((N+TPB-1)/TPB); k_fill_u32<<<B,TPB>>>(d_absu,N,ub); }
+    { int TPB=128; int B=(dm.ntris+TPB-1)/TPB;            k_sdf_scatter<<<B,TPB>>>(d_absu,grid,dm,band); }
+    { dim3 TP(16,16); dim3 B((grid.Ny+15)/16,(grid.Nz+15)/16); k_sdf_sign_finalize<<<B,TP>>>(d_absu,d_S,grid,dm); }
+
+    bool ok = (cudaDeviceSynchronize()==cudaSuccess);
+    if(ok) ok = (cudaMemcpy(S_host,d_S,N*sizeof(float),cudaMemcpyDeviceToHost)==cudaSuccess);
+    cudaFree(d_absu); cudaFree(d_S); free_mesh_device(d_v,d_t);
+    return ok;
+}
+
 #endif // __CUDACC__
 
 // ============================================================
@@ -557,52 +675,15 @@ inline static void build_sdf(Scene3D* sc, float h,
     (void)build_sdf_cpu(*sc, *Nx,*Ny,*Nz, h, S);
 
 #ifdef __CUDACC__
-    // CUDA override (if it succeeds)
-    const size_t N = (size_t)(*Nx)*(size_t)(*Ny)*(size_t)(*Nz);
-
-    float* d_sdf = nullptr;
-    cudaError_t ce = cudaMalloc((void**)&d_sdf, sizeof(float)*N);
-    if(ce != cudaSuccess) return; // keep CPU
-
-    vec3* d_verts=nullptr;
-    Tri*  d_tris=nullptr;
-    dMesh3D dmesh;
-    std::string err;
-
-    if(!upload_mesh_to_device(*sc, dmesh, d_verts, d_tris, &err)){
-        cudaFree(d_sdf);
-        return; // keep CPU
-    }
-
-    Grid3D grid;
-    grid.Nx=*Nx; grid.Ny=*Ny; grid.Nz=*Nz;
-    grid.h=v3(h,h,h);
-    grid.origin=dom_min;
-
-    dim3 TP(8,8,8);
-    dim3 BP((grid.Nx + TP.x - 1)/TP.x,
-            (grid.Ny + TP.y - 1)/TP.y,
-            (grid.Nz + TP.z - 1)/TP.z);
-
-    sdf3d_kernel_naive<<<BP,TP>>>(d_sdf, grid, dmesh);
-    ce = cudaDeviceSynchronize();
-    if(ce == cudaSuccess){
+    Grid3D grid; grid.Nx=*Nx; grid.Ny=*Ny; grid.Nz=*Nz; grid.h=v3(h,h,h); grid.origin=dom_min;
+    const float band = 8.f*h;          // keep >= tol + (WENO stencil radius + 1)*h ; tol=3h here
+    float* S_gpu = (float*)std::malloc(sizeof(float)*(size_t)(*Nx)*(*Ny)*(*Nz));
+    if(S_gpu && build_sdf_gpu_narrowband(*sc, grid, band, S_gpu)){
         if(*S) std::free(*S);
-        *S = (float*)std::malloc(sizeof(float)*N);
-        if(*S){
-            ce = cudaMemcpy(*S, d_sdf, sizeof(float)*N, cudaMemcpyDeviceToHost);
-            if(ce != cudaSuccess){
-                std::free(*S);
-                *S = nullptr;
-                (void)build_sdf_cpu(*sc, *Nx,*Ny,*Nz, h, S);
-            }
-        }else{
-            (void)build_sdf_cpu(*sc, *Nx,*Ny,*Nz, h, S);
-        }
+        *S = S_gpu;                     // GPU result wins
+    } else {
+        if(S_gpu) std::free(S_gpu);     // keep the CPU narrow-band result
     }
-
-    cudaFree(d_sdf);
-    free_mesh_device(d_verts, d_tris);
 #endif
 }
 
