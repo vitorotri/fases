@@ -279,6 +279,12 @@ class GLViewer(QOpenGLWidget):
             if g["name"] == name: g["visible"] = v
         self.update()
 
+    def is_layer_visible(self, name):
+        for g in self._groups:
+            if g["name"] == name:
+                return bool(g["visible"])
+        return False
+
     def set_bbox_visible(self, v):
         self._bbox_visible = v; self.update()
 
@@ -548,7 +554,12 @@ class GLViewer(QOpenGLWidget):
                 continue
             if self._selected_layer == g["name"]:
                 continue
-            draw_triangles(g, alpha=0.30)
+            # brighten unselected faces so colors read clearly
+            r, gr, b = g["color"]
+            bright = (min(1.0, r * 1.15 + 0.06),
+                      min(1.0, gr * 1.15 + 0.06),
+                      min(1.0, b * 1.15 + 0.06))
+            draw_triangles(g, alpha=0.55, color=bright)
         glDepthMask(GL_TRUE)
 
         # Pass B: selected layer, opaque and vivid (boosted same-hue color).
@@ -1141,6 +1152,8 @@ class MaterialPanel(QWidget):
             QHeaderView::section {{background:{PAL['panel']};color:{PAL['subtext']};
                 border:1px solid {PAL['border']};font-size:11px;}}
         """)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tbl.itemSelectionChanged.connect(self._on_row_selected)
         self._tbl.itemChanged.connect(lambda *_: self._on_edit())
         lay.addWidget(self._tbl, 1)
@@ -1164,9 +1177,9 @@ class MaterialPanel(QWidget):
         if not _HAS_MPL: return
         self._ax.clear()
         self._ax.set_facecolor("white")
-        self._ax.text(0.5, 0.5, "α per octave band",
+        self._ax.text(0.5, 0.5, r"$\alpha$ per octave band",
                       ha="center", va="center", color="#888",
-                      transform=self._ax.transAxes, fontsize=10)
+                      transform=self._ax.transAxes, fontsize=11)
         self._ax.set_xticks([]); self._ax.set_yticks([])
         self._fig.tight_layout()
         self._canvas.draw_idle()
@@ -1181,7 +1194,7 @@ class MaterialPanel(QWidget):
         self._ax.set_xticklabels([str(b) for b in OCTAVE_BANDS],
                                  rotation=45, fontsize=7)
         self._ax.set_ylim(0, 1.0)
-        self._ax.set_ylabel("α", fontsize=8)
+        self._ax.set_ylabel(r"$\alpha$", fontsize=11)
         self._ax.set_title(name, fontsize=9)
         self._ax.tick_params(labelsize=7)
         self._ax.grid(True, alpha=0.3)
@@ -1231,10 +1244,11 @@ class MaterialPanel(QWidget):
 
     # ── selection → plot ──
     def _on_row_selected(self):
-        r = self._tbl.currentRow()
-        if r < 0:
+        sel = self._tbl.selectionModel().selectedRows()
+        r = sel[0].row() if sel else self._tbl.currentRow()
+        if r < 0 or self._tbl.item(r, 0) is None:
             self._clear_plot(); return
-        name = self._tbl.item(r, 0).text() if self._tbl.item(r, 0) else ""
+        name = self._tbl.item(r, 0).text()
         vals = self._row_values(r)
         self._plot_row(name, vals)
 
@@ -1587,6 +1601,9 @@ class MainWindow(QMainWindow):
 
         # right — tabs
         self._tabs = QTabWidget()
+        self._tabs.setUsesScrollButtons(False)        # no arrows
+        self._tabs.tabBar().setExpanding(False)        # fit text, do not stretch
+        self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
@@ -1596,7 +1613,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
         self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
         src_idx = self._tabs.addTab(self._build_src_tab(), "Sources")
-        self._tabs.setTabIcon(src_idx, make_source_icon(color=PAL["accent2"]))
+        self._tabs.setTabIcon(src_idx, make_source_icon(color=PAL["subtext"]))
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
         self._tabs.addTab(self._build_run_tab(),     "▶  Run")
 
@@ -1707,6 +1724,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._layer_list)
 
         vis_row = QHBoxLayout()
+        toggle_btn = QPushButton("Toggle")
+        toggle_btn.clicked.connect(self._toggle_selected_vis)
+        vis_row.addWidget(toggle_btn)
         for lbl, fn in [("Show all", lambda: self._set_all_vis(True)),
                         ("Hide all", lambda: self._set_all_vis(False))]:
             b = QPushButton(lbl); b.clicked.connect(fn); vis_row.addWidget(b)
@@ -1910,12 +1930,22 @@ class MainWindow(QMainWindow):
         tbl = self._mat_panel._tbl
         for r in range(tbl.rowCount()):
             if tbl.item(r, 0) and tbl.item(r, 0).text() == name:
-                tbl.setCurrentCell(r, 1)
+                tbl.selectRow(r)
                 break
         self._sb.showMessage(f"Selected layer: {name}")
 
     def _set_all_vis(self, v):
         for g in self._groups: self._gl.set_layer_visible(g["name"], v)
+
+    def _toggle_selected_vis(self):
+        row = self._layer_list.currentRow()
+        if row < 0 or row >= len(self._groups):
+            self._sb.showMessage("Select a layer to toggle.")
+            return
+        name = self._groups[row]["name"]
+        new_vis = not self._gl.is_layer_visible(name)
+        self._gl.set_layer_visible(name, new_vis)
+        self._sb.showMessage(f"{name}: {'visible' if new_vis else 'hidden'}")
 
     def _save_config(self):
         if not self._proj_root:
