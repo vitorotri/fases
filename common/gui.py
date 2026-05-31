@@ -30,7 +30,8 @@ import numpy as np
 
 from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
-                              QPainter, QCursor)
+                              QPainter, QCursor, QKeySequence,
+                              QPixmap, QIcon, QPen)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
@@ -44,6 +45,14 @@ from PySide6.QtWidgets import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
 from OpenGL.GLU import *
+
+# Optional matplotlib for the absorption curve plot
+try:
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    _HAS_MPL = True
+except Exception:
+    _HAS_MPL = False
 
 # ─────────────────────────────────────────────────────────────
 #  Palette
@@ -204,6 +213,8 @@ class GLViewer(QOpenGLWidget):
         self._groups = []   # {name, tris, color, visible, is_bbox}
         self._bbox_visible  = True
         self._selected_layer = None
+        self._hover_world = None   # world coords under mouse for HUD
+
 
         # points
         self._sources   = []  # list of [x,y,z]
@@ -510,82 +521,50 @@ class GLViewer(QOpenGLWidget):
         glDisable(GL_BLEND)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
-        def draw_triangles(g):
+        def draw_triangles(g, alpha, color=None):
             tris = g["tris"]
             if len(tris) == 0:
                 return
-            r, gr, b = g["color"]
-            glColor4f(r, gr, b, 1.0)
+            r, gr, b = color if color else g["color"]
+            glColor4f(r, gr, b, alpha)
             glBegin(GL_TRIANGLES)
             for tri in tris:
                 for vi in tri:
                     glVertex3fv(verts[vi])
             glEnd()
 
-        def draw_wire(g, *, depth_test, alpha, width, color_scale=0.35):
-            tris = g["tris"]
-            if len(tris) == 0:
-                return
-            if depth_test:
-                glEnable(GL_DEPTH_TEST)
-            else:
-                glDisable(GL_DEPTH_TEST)
-            r, gr, b = g["color"]
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-            glLineWidth(width)
-            # darker same-hue wire: never changes the layer identity
-            glColor4f(max(0.0, r * color_scale),
-                      max(0.0, gr * color_scale),
-                      max(0.0, b * color_scale), alpha)
-            glBegin(GL_TRIANGLES)
-            for tri in tris:
-                for vi in tri:
-                    glVertex3fv(verts[vi])
-            glEnd()
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-            glEnable(GL_DEPTH_TEST)
-
-        # Pass 1: real opaque material surfaces, one color per OBJ group.
-        for g in self._groups:
-            if g["is_bbox"] or not g["visible"]:
-                continue
-            draw_triangles(g)
-
-        # Pass 2: readable global wireframe. First draw depth-tested edges for
-        # normal spatial reading, then draw a lighter non-depth-tested copy so
-        # hidden/internal geometry is still visible through the room shell.
+        # Semi-transparent faces, NO edges. Walls are see-through so interior
+        # layers (sphere, inner panels) are visible from outside. Selected
+        # layer is drawn opaque and vivid in its own hue.
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+
+        # Pass A: unselected layers, translucent, depth-write off so order
+        # does not matter and nothing hard-occludes anything else.
         glDepthMask(GL_FALSE)
         for g in self._groups:
             if g["is_bbox"] or not g["visible"]:
                 continue
-            draw_wire(g, depth_test=True,  alpha=0.85, width=1.15, color_scale=0.28)
+            if self._selected_layer == g["name"]:
+                continue
+            draw_triangles(g, alpha=0.30)
+        glDepthMask(GL_TRUE)
+
+        # Pass B: selected layer, opaque and vivid (boosted same-hue color).
         for g in self._groups:
             if g["is_bbox"] or not g["visible"]:
                 continue
-            draw_wire(g, depth_test=False, alpha=0.28, width=1.00, color_scale=0.55)
-        glDepthMask(GL_TRUE)
-        glDisable(GL_BLEND)
+            if self._selected_layer != g["name"]:
+                continue
+            r, gr, b = g["color"]
+            # vivid: push toward full saturation/brightness
+            vivid = (min(1.0, r * 1.25 + 0.10),
+                     min(1.0, gr * 1.25 + 0.10),
+                     min(1.0, b * 1.25 + 0.10))
+            draw_triangles(g, alpha=1.0, color=vivid)
 
-        # Pass 3: selected layer outline, always visible and unmistakable.
-        for g in self._groups:
-            if g["is_bbox"] or not g["visible"] or self._selected_layer != g["name"]:
-                continue
-            tris = g["tris"]
-            if len(tris) == 0:
-                continue
-            glDisable(GL_DEPTH_TEST)
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-            glLineWidth(2.8)
-            glColor4f(1.0, 1.0, 1.0, 1.0)
-            glBegin(GL_TRIANGLES)
-            for tri in tris:
-                for vi in tri:
-                    glVertex3fv(verts[vi])
-            glEnd()
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-            glEnable(GL_DEPTH_TEST)
+        glDisable(GL_BLEND)
 
         # Pass 4: boundary/bounding box, wire-only and non-occluding.
         if self._bbox_visible:
@@ -800,9 +779,35 @@ class GLViewer(QOpenGLWidget):
 
         glEnable(GL_LIGHTING)
 
+    def _unproject_hover(self, qpos):
+        """Unproject the mouse pixel onto the pivot-depth plane for a HUD readout."""
+        self.makeCurrent()
+        W, H = self.width(), self.height()
+        viewport = [int(0), int(0), int(W), int(H)]
+        try:
+            sx, sy, sz = gluProject(float(self._pivot[0]), float(self._pivot[1]),
+                                    float(self._pivot[2]), self._mv, self._proj, viewport)
+            world = gluUnProject(float(qpos.x()), float(H) - float(qpos.y()), float(sz),
+                                 self._mv, self._proj, viewport)
+            return np.array(world, np.float32)
+        except Exception:
+            return None
+
     def _draw_hud(self):
         """Overlay text using QPainter on top of GL."""
         if self._mode == self.MODE_NONE:
+            # show hover coordinates in the bottom-right corner
+            if self._hover_world is not None:
+                p = self._hover_world
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                painter.setFont(QFont("Monospace", 9))
+                painter.setPen(QColor(PAL["subtext"]))
+                txt = f"x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(txt)
+                painter.drawText(self.width() - tw - 10, self.height() - 10, txt)
+                painter.end()
             return
         p = self._cursor_world
         mode_str = "SOURCE" if self._mode == self.MODE_SRC else "RECEIVER"
@@ -847,6 +852,11 @@ class GLViewer(QOpenGLWidget):
         painter.end()
 
     # ── mouse / keyboard ────────────────────────────────────
+    def leaveEvent(self, e):
+        self._hover_world = None
+        self.update()
+        super().leaveEvent(e)
+
     def mousePressEvent(self, e):
         self._last_pos  = e.position()
         self._mouse_btn = e.button()
@@ -857,7 +867,9 @@ class GLViewer(QOpenGLWidget):
             # still update cursor world pos for HUD even without button
             if self._mode != self.MODE_NONE:
                 self._update_cursor_world(e.position())
-                self.update()
+            else:
+                self._hover_world = self._unproject_hover(e.position())
+            self.update()
             return
 
         dx = e.position().x() - self._last_pos.x()
@@ -1078,38 +1090,68 @@ class GLViewer(QOpenGLWidget):
 # ─────────────────────────────────────────────────────────────
 #  Material editor
 # ─────────────────────────────────────────────────────────────
-class MaterialEditor(QWidget):
+class MaterialPanel(QWidget):
+    """
+    Single panel for ALL material layers:
+      • matplotlib plot on top (white bg, cyan curve) — populated on selection
+      • one table: column 0 = layer name, columns 1..N = alpha per octave band
+      • vertical scrollbar when many layers
+      • Ctrl+V paste from Excel / space- or tab-separated text
+      • Save .mat (per selected row) and Run vectFIT
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._path = None
+        self._mat_dir = None       # input/mat directory
+        self._fit_dir = None       # input/fit directory
+        self._proj_root = None
+
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0,0,0,0); lay.setSpacing(4)
+        lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
 
-        hdr = QLabel("Absorption  α  per octave band")
-        hdr.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
-        lay.addWidget(hdr)
+        # ── plot area ──
+        if _HAS_MPL:
+            self._fig = Figure(figsize=(3, 1.6), facecolor="white")
+            self._canvas = FigureCanvas(self._fig)
+            self._canvas.setFixedHeight(150)
+            self._ax = self._fig.add_subplot(111)
+            self._clear_plot()
+            lay.addWidget(self._canvas)
+        else:
+            self._canvas = None
+            ph = QLabel("α per octave band\n(install matplotlib to see the curve)")
+            ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ph.setFixedHeight(150)
+            ph.setStyleSheet(f"background:white;color:#444;border:1px solid {PAL['border']};")
+            lay.addWidget(ph)
 
-        self._table = QTableWidget(1, len(OCTAVE_BANDS))
-        self._table.setHorizontalHeaderLabels([f"{b} Hz" for b in OCTAVE_BANDS])
-        self._table.verticalHeader().setVisible(False)
-        self._table.setFixedHeight(56)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.setStyleSheet(f"""
+        # ── table ──
+        cols = ["Layer"] + [f"{b} Hz" for b in OCTAVE_BANDS]
+        self._tbl = QTableWidget(0, len(cols))
+        self._tbl.setHorizontalHeaderLabels(cols)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        hh = self._tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for c in range(1, len(cols)):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+        self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
             QHeaderView::section {{background:{PAL['panel']};color:{PAL['subtext']};
                 border:1px solid {PAL['border']};font-size:11px;}}
         """)
-        lay.addWidget(self._table)
+        self._tbl.itemSelectionChanged.connect(self._on_row_selected)
+        self._tbl.itemChanged.connect(lambda *_: self._on_edit())
+        lay.addWidget(self._tbl, 1)
 
+        # ── buttons ──
         row = QHBoxLayout()
         self._save_btn = QPushButton("💾  Save .mat")
-        self._save_btn.clicked.connect(self.save)
-        self._save_btn.setEnabled(False)
+        self._save_btn.clicked.connect(self.save_selected)
         row.addWidget(self._save_btn)
         self._fit_btn = QPushButton("⚙  Run vectFIT")
-        self._fit_btn.clicked.connect(self.run_fit)
-        self._fit_btn.setEnabled(False)
+        self._fit_btn.clicked.connect(self.run_fit_selected)
         row.addWidget(self._fit_btn)
         lay.addLayout(row)
 
@@ -1117,60 +1159,187 @@ class MaterialEditor(QWidget):
         self._status.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
         lay.addWidget(self._status)
 
-    def load(self, mat_path):
-        self._path = mat_path
-        self._save_btn.setEnabled(True); self._fit_btn.setEnabled(True)
-        for col in range(len(OCTAVE_BANDS)):
-            self._table.setItem(0, col, QTableWidgetItem("0.10"))
-        if os.path.isfile(mat_path):
-            try:
-                vals = []
-                with open(mat_path) as f:
-                    for line in f:
-                        line = line.split("#")[0].strip()
-                        if line: vals += [float(x) for x in line.split()]
-                for col, v in enumerate(vals[:len(OCTAVE_BANDS)]):
-                    self._table.setItem(0, col, QTableWidgetItem(f"{v:.4f}"))
-                self._status.setText(f"Loaded: {os.path.basename(mat_path)}")
-            except Exception as ex:
-                self._status.setText(f"Parse error: {ex}")
-        else:
-            self._status.setText("New file (defaults loaded)")
+    # ── plot ──
+    def _clear_plot(self):
+        if not _HAS_MPL: return
+        self._ax.clear()
+        self._ax.set_facecolor("white")
+        self._ax.text(0.5, 0.5, "α per octave band",
+                      ha="center", va="center", color="#888",
+                      transform=self._ax.transAxes, fontsize=10)
+        self._ax.set_xticks([]); self._ax.set_yticks([])
+        self._fig.tight_layout()
+        self._canvas.draw_idle()
 
-    def get_values(self):
+    def _plot_row(self, name, vals):
+        if not _HAS_MPL: return
+        self._ax.clear()
+        self._ax.set_facecolor("white")
+        x = list(range(len(OCTAVE_BANDS)))
+        self._ax.plot(x, vals, color="#00b4d8", marker="o", linewidth=2)
+        self._ax.set_xticks(x)
+        self._ax.set_xticklabels([str(b) for b in OCTAVE_BANDS],
+                                 rotation=45, fontsize=7)
+        self._ax.set_ylim(0, 1.0)
+        self._ax.set_ylabel("α", fontsize=8)
+        self._ax.set_title(name, fontsize=9)
+        self._ax.tick_params(labelsize=7)
+        self._ax.grid(True, alpha=0.3)
+        self._fig.tight_layout()
+        self._canvas.draw_idle()
+
+    # ── population ──
+    def set_project(self, proj_root):
+        self._proj_root = proj_root
+        if proj_root:
+            self._mat_dir = os.path.join(proj_root, "input", "mat")
+            self._fit_dir = os.path.join(proj_root, "input", "fit")
+
+    def populate(self, layer_names):
+        """Fill table rows from layer names, loading existing .mat values."""
+        self._tbl.blockSignals(True)
+        self._tbl.setRowCount(0)
+        for name in layer_names:
+            if "boundary" in name.lower():
+                continue
+            vals = self._load_mat_values(name)
+            r = self._tbl.rowCount(); self._tbl.insertRow(r)
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self._tbl.setItem(r, 0, name_item)
+            for c, v in enumerate(vals):
+                self._tbl.setItem(r, c+1, QTableWidgetItem(f"{v:.4f}"))
+        self._tbl.blockSignals(False)
+        self._clear_plot()
+
+    def _load_mat_values(self, name):
+        vals = [0.10] * len(OCTAVE_BANDS)
+        if self._mat_dir:
+            p = os.path.join(self._mat_dir, name + ".mat")
+            if os.path.isfile(p):
+                try:
+                    got = []
+                    with open(p) as f:
+                        for line in f:
+                            line = line.split("#")[0].strip()
+                            if line: got += [float(x) for x in line.split()]
+                    for i in range(min(len(got), len(OCTAVE_BANDS))):
+                        vals[i] = got[i]
+                except Exception:
+                    pass
+        return vals
+
+    # ── selection → plot ──
+    def _on_row_selected(self):
+        r = self._tbl.currentRow()
+        if r < 0:
+            self._clear_plot(); return
+        name = self._tbl.item(r, 0).text() if self._tbl.item(r, 0) else ""
+        vals = self._row_values(r)
+        self._plot_row(name, vals)
+
+    def _on_edit(self):
+        r = self._tbl.currentRow()
+        if r >= 0:
+            self._on_row_selected()
+
+    def _row_values(self, r):
         vals = []
-        for col in range(len(OCTAVE_BANDS)):
-            item = self._table.item(0, col)
+        for c in range(1, len(OCTAVE_BANDS) + 1):
+            item = self._tbl.item(r, c)
             try: vals.append(float(item.text()) if item else 0.0)
             except ValueError: vals.append(0.0)
         return vals
 
-    def save(self):
-        if not self._path: return
-        vals = self.get_values()
-        os.makedirs(os.path.dirname(self._path), exist_ok=True)
-        with open(self._path, "w") as f:
+    # ── Ctrl+V paste (Excel / spaces / tabs) ──
+    def keyPressEvent(self, e):
+        if e.matches(QKeySequence.StandardKey.Paste):
+            self._paste_clipboard()
+            e.accept(); return
+        super().keyPressEvent(e)
+
+    def _paste_clipboard(self):
+        text = QApplication.clipboard().text()
+        if not text.strip():
+            return
+        start_row = max(self._tbl.currentRow(), 0)
+        start_col = max(self._tbl.currentColumn(), 1)  # never overwrite name col by default
+        self._tbl.blockSignals(True)
+        for dr, line in enumerate(text.splitlines()):
+            if not line.strip():
+                continue
+            # split on tab OR any whitespace
+            parts = line.split("\t") if "\t" in line else line.split()
+            rr = start_row + dr
+            if rr >= self._tbl.rowCount():
+                break
+            for dc, val in enumerate(parts):
+                cc = start_col + dc
+                if cc > len(OCTAVE_BANDS):
+                    break
+                val = val.strip()
+                try:
+                    float(val)
+                except ValueError:
+                    continue
+                self._tbl.setItem(rr, cc, QTableWidgetItem(val))
+        self._tbl.blockSignals(False)
+        self._on_row_selected()
+        self._status.setText("Pasted values from clipboard.")
+
+    # ── save / fit ──
+    def save_selected(self):
+        r = self._tbl.currentRow()
+        if r < 0:
+            self._status.setText("Select a layer row first."); return
+        if not self._mat_dir:
+            self._status.setText("Open a project folder first."); return
+        name = self._tbl.item(r, 0).text()
+        vals = self._row_values(r)
+        os.makedirs(self._mat_dir, exist_ok=True)
+        p = os.path.join(self._mat_dir, name + ".mat")
+        with open(p, "w") as f:
             f.write(f"# alpha per octave band: {OCTAVE_BANDS}\n")
             f.write("  ".join(f"{v:.4f}" for v in vals) + "\n")
-        self._status.setText(f"Saved → {os.path.basename(self._path)}")
+        self._status.setText(f"Saved → {name}.mat")
 
-    def run_fit(self):
-        if not self._path: return
-        self.save()
-        proj = Path(self._path).parents[3]
-        name = Path(self._path).stem
-        for script_name in ("vectFIT.py", "fminconFIT.py"):
-            script = proj.parent / "common" / script_name
-            if script.is_file(): break
-        else:
-            self._status.setText("vectFIT.py not found"); return
-        out = proj / "input" / "fit" / (name + ".fit")
-        cmd = [sys.executable, str(script), "--mat", self._path, "--out", str(out)]
-        self._status.setText("Running fit…")
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        out_bytes, _ = proc.communicate()
-        self._status.setText("Fit done." if proc.returncode == 0
-                             else f"Fit error (rc={proc.returncode})")
+    def save_all(self):
+        for r in range(self._tbl.rowCount()):
+            self._tbl.setCurrentCell(r, 1)
+            self.save_selected()
+
+    def run_fit_selected(self):
+        r = self._tbl.currentRow()
+        if r < 0:
+            self._status.setText("Select a layer row first."); return
+        if not self._proj_root:
+            self._status.setText("Open a project folder first."); return
+        self.save_selected()
+        name = self._tbl.item(r, 0).text()
+        common = os.path.join(os.path.dirname(self._proj_root), "common")
+        script = None
+        for sn in ("vectFIT.py", "fminconFIT.py"):
+            cand = os.path.join(common, sn)
+            if os.path.isfile(cand):
+                script = cand; break
+        if script is None:
+            self._status.setText("vectFIT.py / fminconFIT.py not found in common/"); return
+        os.makedirs(self._fit_dir, exist_ok=True)
+        mat = os.path.join(self._mat_dir, name + ".mat")
+        out = os.path.join(self._fit_dir, name + ".fit")
+        cmd = [sys.executable, script, "--mat", mat, "--out", out]
+        self._status.setText(f"Running {os.path.basename(script)} on {name}…")
+        QApplication.processEvents()
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, cwd=common)
+            if proc.returncode == 0:
+                self._status.setText(f"Fit done → {name}.fit")
+            else:
+                msg = (proc.stderr or proc.stdout or "").strip().splitlines()
+                tail = msg[-1] if msg else "unknown error"
+                self._status.setText(f"Fit failed (rc={proc.returncode}): {tail[:80]}")
+        except Exception as ex:
+            self._status.setText(f"Fit error: {ex}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1275,6 +1444,32 @@ class SolverThread(QThread):
 # ─────────────────────────────────────────────────────────────
 #  Main window
 # ─────────────────────────────────────────────────────────────
+def make_source_icon(size=18, color="#a48bff"):
+    """Build a small 'sound source' icon: a dot with two concentric wave arcs."""
+    from PySide6.QtCore import QRectF
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.6)
+    p.setPen(pen)
+    cx, cy = size * 0.32, size * 0.5
+    # central dot
+    p.setBrush(QColor(color))
+    rdot = size * 0.09
+    p.drawEllipse(QRectF(cx - rdot, cy - rdot, 2*rdot, 2*rdot))
+    # two concentric wave arcs opening to the right (−60°..+60°)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    for k in (1, 2):
+        rr = size * 0.18 * k
+        rect = QRectF(cx - rr, cy - rr, 2*rr, 2*rr)
+        # Qt angles are in 1/16 degree; start at -60°, span 120°
+        p.drawArc(rect, int(-60*16), int(120*16))
+    p.end()
+    return QIcon(pm)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1283,7 +1478,6 @@ class MainWindow(QMainWindow):
         self._proj_root  = None
         self._obj_path   = None
         self._groups     = []
-        self._mat_editors= {}
         self._apply_theme()
         self._build_ui()
 
@@ -1401,7 +1595,8 @@ class MainWindow(QMainWindow):
 
         self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
         self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
-        self._tabs.addTab(self._build_src_tab(),     "📡  Sources")
+        src_idx = self._tabs.addTab(self._build_src_tab(), "Sources")
+        self._tabs.setTabIcon(src_idx, make_source_icon(color=PAL["accent2"]))
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
         self._tabs.addTab(self._build_run_tab(),     "▶  Run")
 
@@ -1517,14 +1712,9 @@ class MainWindow(QMainWindow):
             b = QPushButton(lbl); b.clicked.connect(fn); vis_row.addWidget(b)
         vis_row.addStretch(); lay.addLayout(vis_row)
 
-        lay.addWidget(QLabel("Material — selected layer:"))
-        self._mat_stack = QScrollArea()
-        self._mat_stack.setWidgetResizable(True)
-        ph = QLabel("Select a layer to edit its material.")
-        ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ph.setStyleSheet(f"color:{PAL['subtext']};")
-        self._mat_stack.setWidget(ph)
-        lay.addWidget(self._mat_stack, 1)
+        lay.addWidget(QLabel("Material — α per octave band (click a row to plot; Ctrl+V to paste):"))
+        self._mat_panel = MaterialPanel()
+        lay.addWidget(self._mat_panel, 1)
         return w
 
     # ── Config tab ───────────────────────────────────────────
@@ -1676,29 +1866,20 @@ class MainWindow(QMainWindow):
         self._sb.showMessage(status)
 
     def _populate_layers(self, groups):
-        self._layer_list.clear(); self._mat_editors.clear()
+        self._layer_list.clear()
         for g in groups:
             name = g["name"]
             item = QListWidgetItem(name)
             if "boundary" in name.lower():
                 item.setForeground(QColor(PAL["subtext"]))
             self._layer_list.addItem(item)
-        if self._proj_root:
-            for g in groups:
-                name = g["name"]
-                if "boundary" in name.lower(): continue
-                mp = os.path.join(self._proj_root, "input", "mat", name+".mat")
-                ed = MaterialEditor(); ed.load(mp)
-                self._mat_editors[name] = ed
+        self._mat_panel.set_project(self._proj_root)
+        self._mat_panel.populate([g["name"] for g in groups])
 
     def _show_no_layer_selected(self):
-        ph = QLabel("Select a layer to edit its material.")
-        ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ph.setStyleSheet(f"color:{PAL['subtext']};")
-        old = self._mat_stack.takeWidget()
-        if old is not None:
-            old.setParent(None)
-        self._mat_stack.setWidget(ph)
+        # clear the material table selection -> plot resets to placeholder
+        self._mat_panel._tbl.clearSelection()
+        self._mat_panel._tbl.setCurrentCell(-1, -1)
 
     def _on_layer_picked(self, name):
         """Sync list selection when user clicks in the GL viewport."""
@@ -1712,6 +1893,7 @@ class MainWindow(QMainWindow):
                 self._layer_list.setCurrentRow(i)
                 break
         self._tabs.setCurrentIndex(0)
+        self._sb.showMessage(f"Selected layer: {name}")
 
     def _on_layer_row_changed(self, row):
         if row < 0 or row >= len(self._groups):
@@ -1721,22 +1903,16 @@ class MainWindow(QMainWindow):
         name = self._groups[row]["name"]
         self._gl.select_layer(name)
         if "boundary" in name.lower():
-            ph = QLabel("Boundary layer — no material assignment.")
-            ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ph.setStyleSheet(f"color:{PAL['subtext']};")
-            self._mat_stack.setWidget(ph); return
-        if name not in self._mat_editors:
-            mp = (os.path.join(self._proj_root, "input","mat",name+".mat")
-                  if self._proj_root else "")
-            ed = MaterialEditor()
-            if mp: ed.load(mp)
-            self._mat_editors[name] = ed
-        # Rescue widget from Qt ownership before swapping;
-        # otherwise Qt deletes it and the dict holds a dangling pointer.
-        old = self._mat_stack.takeWidget()
-        if old is not None:
-            old.setParent(None)
-        self._mat_stack.setWidget(self._mat_editors[name])
+            self._mat_panel._tbl.clearSelection()
+            self._mat_panel._tbl.setCurrentCell(-1, -1)
+            return
+        # select the matching row in the material table -> triggers plot
+        tbl = self._mat_panel._tbl
+        for r in range(tbl.rowCount()):
+            if tbl.item(r, 0) and tbl.item(r, 0).text() == name:
+                tbl.setCurrentCell(r, 1)
+                break
+        self._sb.showMessage(f"Selected layer: {name}")
 
     def _set_all_vis(self, v):
         for g in self._groups: self._gl.set_layer_visible(g["name"], v)
@@ -1830,7 +2006,7 @@ class MainWindow(QMainWindow):
         self._write_config(os.path.join(self._proj_root,"config","config.txt"))
         self._src_tbl.save_file(os.path.join(self._proj_root,"input","src","src.txt"))
         self._rec_tbl.save_file(os.path.join(self._proj_root,"input","rec","rec.txt"))
-        for ed in self._mat_editors.values(): ed.save()
+        self._mat_panel.save_all()
         scene = self._obj_path
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
