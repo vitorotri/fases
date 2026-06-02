@@ -75,18 +75,18 @@ PAL = {
 }
 
 LAYER_COLORS = [
-    (0.10, 0.55, 1.00),   # neon blue
-    (0.15, 0.95, 0.35),   # neon green
-    (1.00, 0.20, 0.25),   # neon red
-    (1.00, 0.55, 0.05),   # neon orange
-    (0.70, 0.25, 1.00),   # neon purple
-    (1.00, 0.90, 0.10),   # neon yellow
-    (0.10, 0.90, 0.90),   # neon cyan
-    (1.00, 0.30, 0.75),   # neon pink/magenta
-    (0.60, 1.00, 0.10),   # neon lime
-    (1.00, 0.40, 0.40),   # neon coral
-    (0.35, 0.60, 1.00),   # neon periwinkle
-    (0.85, 0.55, 1.00),   # neon lavender
+    (45/255,   2/255, 249/255),   # blue-violet
+    (100/255, 249/255,  2/255),   # green
+    (240/255,  25/255,  2/255),   # red
+    (249/255, 225/255,  2/255),   # yellow
+    (249/255,   2/255, 237/255),  # magenta
+    (2/255,   249/255, 230/255),  # cyan
+    (249/255, 130/255,   2/255),  # orange
+    (160/255,  2/255,  249/255),  # purple
+    (2/255,   130/255, 249/255),  # azure
+    (200/255, 249/255,   2/255),  # lime
+    (249/255,   2/255, 120/255),  # pink
+    (249/255, 160/255, 200/255),  # rose
 ]
 BBOX_COLOR = (0.35, 0.65, 1.0)
 SRC_COLOR  = (1.00, 1.00, 1.00)
@@ -420,26 +420,32 @@ class GLViewer(QOpenGLWidget):
         W, H = self.width(), self.height()
         size  = 80
         pad   = 14
-        cx    = pad + size // 2        # pixel centre of gizmo
-        cy_gl = pad + size // 2        # in GL coords (origin bottom-left)
+        box   = pad*2 + size
+        # bottom-RIGHT corner. cx/cy are in GL coords measured inside the box's
+        # own sub-viewport (origin at the box's lower-left), so they stay pad+size//2.
+        cx    = pad + size // 2
+        cy_gl = pad + size // 2
+        # the sub-viewport's lower-left in window coords:
+        vp_x  = W - box
+        vp_y  = 0
 
         L  = size * 0.36               # stick length in pixels
         br = size * 0.10               # ball radius in pixels
 
         axes = [
             ((1,0,0), (0.70, 1.00, 0.10), 'X'),   # bright lime / yellow-green
-            ((0,1,0), (0.55, 0.20, 0.95), 'Y'),   # royal purple
-            ((0,0,1), (1.00, 0.30, 0.55), 'Z'),   # bright pink
+            ((0,1,0), (250/255, 0/255, 135/255), 'Y'),  # vivid pink-magenta
+            ((0,0,1), (0.55, 0.20, 0.95), 'Z'),   # royal purple (swapped from Y)
         ]
 
         # ── carve out a sub-viewport, save everything ──────
-        glViewport(0, 0, pad*2+size, pad*2+size)
-        glScissor (0, 0, pad*2+size, pad*2+size)
+        glViewport(vp_x, vp_y, box, box)
+        glScissor (vp_x, vp_y, box, box)
         glEnable(GL_SCISSOR_TEST)
 
         glMatrixMode(GL_PROJECTION)
         glPushMatrix(); glLoadIdentity()
-        glOrtho(0, pad*2+size, 0, pad*2+size, -200, 200)
+        glOrtho(0, box, 0, box, -200, 200)
         glMatrixMode(GL_MODELVIEW)
         glPushMatrix(); glLoadIdentity()
 
@@ -510,12 +516,14 @@ class GLViewer(QOpenGLWidget):
         # ── labels via QPainter (no gluProject needed) ────
         painter = QPainter(self)
         painter.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
-        # QPainter y is flipped vs GL y
-        cy_qt = H - cy_gl
+        # QPainter origin is top-left of the window. The gizmo box sits at the
+        # bottom-right, so window-x = vp_x + local_x, window-y = H - local_y.
         for (ax,ay,az), col, label in axes:
             px, py = project_axis(ax, ay, az)
-            sx = int(cx  + px * L) + pad // 2
-            sy = int(cy_qt - py * L) - pad // 2
+            local_x = cx + px * L
+            local_y = cy_gl + py * L
+            sx = int(vp_x + local_x) + pad // 2
+            sy = int(H - local_y) - pad // 2
             painter.setPen(QColor(int(col[0]*255),
                                   int(col[1]*255),
                                   int(col[2]*255)))
@@ -846,16 +854,23 @@ class GLViewer(QOpenGLWidget):
             glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
             glEnd()
 
-        # preview icon — same constant screen size as placed icons
+        # preview: marker ball at the EXACT cross centre, icon offset to its right
         s   = self._icon_scale(p[0], p[1], p[2], px=14)
         col_override = (1.0, 0.15, 0.15) \
                        if self._outside_domain(p[0], p[1], p[2]) else None
+        icon_col = col_override if col_override else \
+                   (SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR)
+        # ball at centre
+        self._marker_ball(p[0], p[1], p[2], icon_col)
+        # icon offset 16 px to the right
+        try:
+            ix, iy, iz = self._screen_offset_world(p[0], p[1], p[2], 16)
+        except Exception:
+            ix, iy, iz = p[0], p[1], p[2]
         if self._mode == self.MODE_SRC:
-            self._speaker_icon(p[0], p[1], p[2], s,
-                               col_override if col_override else SRC_COLOR)
+            self._speaker_icon(ix, iy, iz, s, icon_col)
         else:
-            self._mic_icon(p[0], p[1], p[2], s,
-                           col_override if col_override else REC_COLOR)
+            self._mic_icon(ix, iy, iz, s, icon_col)
 
         glEnable(GL_LIGHTING)
 
@@ -884,9 +899,7 @@ class GLViewer(QOpenGLWidget):
                 painter.setFont(QFont("Monospace", 9))
                 painter.setPen(QColor(PAL["subtext"]))
                 txt = f"x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
-                fm = painter.fontMetrics()
-                tw = fm.horizontalAdvance(txt)
-                painter.drawText(self.width() - tw - 10, self.height() - 10, txt)
+                painter.drawText(10, self.height() - 10, txt)
                 painter.end()
             return
         p = self._cursor_world
@@ -1676,16 +1689,15 @@ class MainWindow(QMainWindow):
         bar_wrap.setLayout(place_bar)
         gl_vlay.addWidget(bar_wrap)
 
-        splitter.addWidget(gl_wrap)
-
-        # right — tabs
+        # tabs panel on the LEFT, GL viewport on the RIGHT
         self._tabs = QTabWidget()
         self._tabs.setUsesScrollButtons(False)        # no arrows
         self._tabs.tabBar().setExpanding(False)        # fit text, do not stretch
         self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
-        splitter.addWidget(self._tabs)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.addWidget(self._tabs)                 # index 0 = left
+        splitter.addWidget(gl_wrap)                    # index 1 = right
+        splitter.setStretchFactor(0, 2)                # tabs
+        splitter.setStretchFactor(1, 3)                # viewport
         self._tabs.setMinimumWidth(480)
         splitter.setChildrenCollapsible(False)
 
