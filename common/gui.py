@@ -46,13 +46,22 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
 from OpenGL.GLU import *
 
-# Optional matplotlib for the absorption curve plot
+# matplotlib for the absorption curve plot (ships with the program).
+# Force matplotlib's Qt backend to bind to PySide6 (not PyQt5/PySide2),
+# otherwise two different Qt bindings load at once and the app crashes.
+os.environ.setdefault("QT_API", "pyside6")
+# Backend/module names differ between matplotlib versions:
+#   >= 3.5 : backend "QtAgg",  module backend_qtagg
+#   <  3.5 : backend "Qt5Agg", module backend_qt5agg
+import matplotlib
+from matplotlib.figure import Figure
 try:
-    from matplotlib.figure import Figure
+    matplotlib.use("QtAgg")
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-    _HAS_MPL = True
 except Exception:
-    _HAS_MPL = False
+    matplotlib.use("Qt5Agg")
+    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+_HAS_MPL = True
 
 # ─────────────────────────────────────────────────────────────
 #  Palette
@@ -66,10 +75,18 @@ PAL = {
 }
 
 LAYER_COLORS = [
-    (0.90,0.35,0.35),(0.35,0.75,0.55),(0.45,0.65,0.95),
-    (0.95,0.75,0.35),(0.75,0.45,0.90),(0.35,0.90,0.90),
-    (0.95,0.55,0.75),(0.75,0.90,0.35),(0.60,0.80,0.60),
-    (0.90,0.60,0.40),(0.40,0.70,0.90),(0.80,0.40,0.70),
+    (0.85, 0.20, 0.20),   # LEGO red
+    (0.20, 0.55, 0.90),   # LEGO blue
+    (0.95, 0.75, 0.10),   # LEGO yellow
+    (0.30, 0.70, 0.35),   # LEGO green
+    (0.95, 0.50, 0.15),   # LEGO orange
+    (0.60, 0.35, 0.75),   # purple
+    (0.20, 0.70, 0.70),   # teal
+    (0.90, 0.45, 0.65),   # pink
+    (0.55, 0.40, 0.25),   # brown
+    (0.65, 0.75, 0.20),   # lime
+    (0.40, 0.45, 0.85),   # periwinkle
+    (0.85, 0.35, 0.45),   # coral
 ]
 BBOX_COLOR = (0.35, 0.65, 1.0)
 SRC_COLOR  = (1.00, 1.00, 1.00)
@@ -554,12 +571,8 @@ class GLViewer(QOpenGLWidget):
                 continue
             if self._selected_layer == g["name"]:
                 continue
-            # brighten unselected faces so colors read clearly
-            r, gr, b = g["color"]
-            bright = (min(1.0, r * 1.15 + 0.06),
-                      min(1.0, gr * 1.15 + 0.06),
-                      min(1.0, b * 1.15 + 0.06))
-            draw_triangles(g, alpha=0.55, color=bright)
+            # true LEGO color at moderate transparency (see-through walls)
+            draw_triangles(g, alpha=0.62)
         glDepthMask(GL_TRUE)
 
         # Pass B: selected layer, opaque and vivid (boosted same-hue color).
@@ -1110,6 +1123,8 @@ class MaterialPanel(QWidget):
       • Ctrl+V paste from Excel / space- or tab-separated text
       • Save .mat (per selected row) and Run vectFIT
     """
+    rowSelected = Signal(str)   # emitted with layer name when a row is selected
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._mat_dir = None       # input/mat directory
@@ -1243,19 +1258,27 @@ class MaterialPanel(QWidget):
         return vals
 
     # ── selection → plot ──
-    def _on_row_selected(self):
+    def _current_row(self):
         sel = self._tbl.selectionModel().selectedRows()
-        r = sel[0].row() if sel else self._tbl.currentRow()
+        return sel[0].row() if sel else self._tbl.currentRow()
+
+    def _replot_current(self):
+        r = self._current_row()
         if r < 0 or self._tbl.item(r, 0) is None:
-            self._clear_plot(); return
+            self._clear_plot(); return None
         name = self._tbl.item(r, 0).text()
-        vals = self._row_values(r)
-        self._plot_row(name, vals)
+        self._plot_row(name, self._row_values(r))
+        return name
+
+    def _on_row_selected(self):
+        # selection changed: replot AND notify the viewport
+        name = self._replot_current()
+        if name:
+            self.rowSelected.emit(name)
 
     def _on_edit(self):
-        r = self._tbl.currentRow()
-        if r >= 0:
-            self._on_row_selected()
+        # a value changed: only replot the curve, no reselection signal
+        self._replot_current()
 
     def _row_values(self, r):
         vals = []
@@ -1734,6 +1757,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(QLabel("Material — α per octave band (click a row to plot; Ctrl+V to paste):"))
         self._mat_panel = MaterialPanel()
+        self._mat_panel.rowSelected.connect(self._on_material_row_selected)
         lay.addWidget(self._mat_panel, 1)
         return w
 
@@ -1927,11 +1951,30 @@ class MainWindow(QMainWindow):
             self._mat_panel._tbl.setCurrentCell(-1, -1)
             return
         # select the matching row in the material table -> triggers plot
-        tbl = self._mat_panel._tbl
-        for r in range(tbl.rowCount()):
-            if tbl.item(r, 0) and tbl.item(r, 0).text() == name:
-                tbl.selectRow(r)
+        if not getattr(self, "_sync_guard", False):
+            self._sync_guard = True
+            tbl = self._mat_panel._tbl
+            for r in range(tbl.rowCount()):
+                if tbl.item(r, 0) and tbl.item(r, 0).text() == name:
+                    tbl.selectRow(r)
+                    break
+            self._sync_guard = False
+        self._sb.showMessage(f"Selected layer: {name}")
+
+    def _on_material_row_selected(self, name):
+        """Reverse path: a row picked in the material table highlights the
+        layer in the 3D viewport and in the layer list."""
+        if getattr(self, "_sync_guard", False) or not name:
+            return
+        self._sync_guard = True
+        # highlight in viewport
+        self._gl.select_layer(name)
+        # sync the layer list selection
+        for i in range(self._layer_list.count()):
+            if self._layer_list.item(i).text() == name:
+                self._layer_list.setCurrentRow(i)
                 break
+        self._sync_guard = False
         self._sb.showMessage(f"Selected layer: {name}")
 
     def _set_all_vis(self, v):
