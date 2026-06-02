@@ -905,7 +905,7 @@ class GLViewer(QOpenGLWidget):
         p = self._cursor_world
         mode_str = "SOURCE" if self._mode == self.MODE_SRC else "RECEIVER"
         mode_col = SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR
-        axis_str = f"  locked: {self._axis_lock}" if self._axis_lock else "  (press X / Y / Z to lock axis)"
+        axis_str = f"  locked: {self._axis_lock}" if self._axis_lock else "  (hold X / Y / Z + drag LMB to lock an axis)"
         coord_str = f"  x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
 
         painter = QPainter(self)
@@ -956,12 +956,18 @@ class GLViewer(QOpenGLWidget):
         self._drag_moved = False
 
     def mouseMoveEvent(self, e):
-        if self._last_pos is None:
-            # still update cursor world pos for HUD even without button
-            if self._mode != self.MODE_NONE:
-                self._update_cursor_world(e.position())
+        # ── placement mode: mouse moves the cursor with NO button needed ──
+        if self._mode != self.MODE_NONE:
+            if self._axis_lock:
+                self._slide_axis(e.position())     # slide along locked axis
             else:
-                self._hover_world = self._unproject_hover(e.position())
+                self._update_cursor_world(e.position())
+            self._last_pos = e.position()
+            self.update()
+            return
+
+        if self._last_pos is None:
+            self._hover_world = self._unproject_hover(e.position())
             self.update()
             return
 
@@ -970,12 +976,7 @@ class GLViewer(QOpenGLWidget):
         if abs(dx) > 1 or abs(dy) > 1:
             self._drag_moved = True
 
-        if self._mode != self.MODE_NONE and self._axis_lock:
-            # slide along locked axis
-            self._slide_axis(e.position(), dx, dy)
-        elif self._mode != self.MODE_NONE:
-            self._update_cursor_world(e.position())
-        else:
+        if True:
             if self._mouse_btn == Qt.MouseButton.LeftButton:
                 mods = e.modifiers()
                 if mods & Qt.KeyboardModifier.AltModifier:
@@ -1012,8 +1013,9 @@ class GLViewer(QOpenGLWidget):
         self._last_pos  = None
 
         if self._mode != self.MODE_NONE:
-            if not moved:
-                # confirm placement
+            # Place on LMB release (whether the user dragged along a locked
+            # axis or just clicked). Releasing the button commits the point.
+            if e.button() == Qt.MouseButton.LeftButton:
                 p = self._cursor_world.copy()
                 mode_name = "source" if self._mode == self.MODE_SRC else "receiver"
                 self.pointPlaced.emit(mode_name, float(p[0]), float(p[1]), float(p[2]))
@@ -1077,6 +1079,20 @@ class GLViewer(QOpenGLWidget):
                 self._set_axis_lock('Z'); e.accept(); return
         e.ignore()  # let MainWindow handle S / T for mode switching
 
+    def keyReleaseEvent(self, e):
+        # Axis lock behaves like a held modifier: releasing X/Y/Z unlocks.
+        if e.isAutoRepeat():
+            return
+        key = e.key()
+        if self._mode != self.MODE_NONE and key in (
+                Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
+            held = {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]
+            if self._axis_lock == held:
+                self._axis_lock = None
+                self.update()
+            e.accept(); return
+        e.ignore()
+
     def _do_point_remove(self, qpos):
         """Right-click: remove nearest source or receiver within 30 px."""
         self.makeCurrent()
@@ -1099,10 +1115,13 @@ class GLViewer(QOpenGLWidget):
             self.update()
 
     def _set_axis_lock(self, axis):
+        # Holding X/Y/Z freezes the other two coords at the CURRENT cursor point;
+        # the mouse then slides the point only along this axis.
+        if self._axis_lock == axis:
+            return
         self._axis_lock = axis
-        # freeze the two orthogonal coords at current cursor
-        # (already stored in _cursor_world)
-        self._place_pos = self._cursor_world.copy()
+        self._place_pos = self._cursor_world.copy()   # frozen base point
+        self._lock_anchor_px = QCursor.pos()          # mouse anchor (global)
         self.update()
 
     def _update_cursor_world(self, qpos):
@@ -1124,8 +1143,12 @@ class GLViewer(QOpenGLWidget):
         except Exception:
             pass
 
-    def _slide_axis(self, qpos, dx, dy):
-        """Move cursor only along the locked axis."""
+    def _slide_axis(self, qpos):
+        """
+        Slide the cursor ONLY along the locked axis; the two other coordinates
+        stay frozen at _place_pos. Displacement is the TOTAL mouse movement since
+        the key was pressed (anchor), so there is no drift and no jump at lock.
+        """
         ax = {'X': np.array([1,0,0],np.float32),
               'Y': np.array([0,1,0],np.float32),
               'Z': np.array([0,0,1],np.float32)}[self._axis_lock]
@@ -1133,23 +1156,25 @@ class GLViewer(QOpenGLWidget):
         W, H = self.width(), self.height()
         try:
             viewport = [int(0), int(0), int(W), int(H)]
-            # project two points on the axis to screen to get screen-space direction
             p0 = self._place_pos
             p1 = p0 + ax * 0.1
             s0 = np.array(gluProject(*p0.astype(float), self._mv, self._proj, viewport)[:2])
             s1 = np.array(gluProject(*p1.astype(float), self._mv, self._proj, viewport)[:2])
             screen_dir = s1 - s0
             slen = np.linalg.norm(screen_dir)
-            if slen < 1e-6: return
+            if slen < 1e-6:
+                return
             screen_dir /= slen
-            # project mouse delta onto screen axis direction
-            mouse_delta = np.array([dx, -dy], np.float32)
-            move = np.dot(mouse_delta, screen_dir)
-            # scale: how many metres per pixel
+            anchor = getattr(self, "_lock_anchor_px", None)
+            if anchor is None:
+                self._lock_anchor_px = QCursor.pos()
+                return
+            cur = QCursor.pos()
+            mdx = cur.x() - anchor.x()
+            mdy = -(cur.y() - anchor.y())
+            move = float(np.dot(np.array([mdx, mdy], np.float32), screen_dir))
             scale = self._dist * 0.004
             self._cursor_world = self._place_pos + ax * move * scale
-            # keep sliding base updated
-            self._place_pos = self._cursor_world.copy()
         except Exception:
             pass
 
@@ -1680,7 +1705,7 @@ class MainWindow(QMainWindow):
         place_bar.addWidget(self._rec_btn)
 
         hint = QLabel("Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
-                      "R: reset   S: src   T: rec   X/Y/Z: lock   RMB: del   Esc: cancel")
+                      "R: reset   S: src   T: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   RMB: del   Esc: cancel")
         hint.setStyleSheet(f"color:{PAL['subtext']};font-size:9px;")
         place_bar.addWidget(hint)
         place_bar.addStretch()
@@ -1702,10 +1727,10 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
 
         self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
-        self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
         src_idx = self._tabs.addTab(self._build_src_tab(), "Sources")
         self._tabs.setTabIcon(src_idx, make_source_icon(color=PAL["subtext"]))
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
+        self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
         self._tabs.addTab(self._build_run_tab(),     "▶  Run")
 
         # status bar
@@ -1720,7 +1745,7 @@ class MainWindow(QMainWindow):
                 self._rec_btn.setChecked(False)
                 self._gl.enter_placement_mode(GLViewer.MODE_SRC)
                 self._tabs.setCurrentIndex(2)
-                self._sb.showMessage("SOURCE placement: move mouse, X/Y/Z to lock axis, click to place, Esc to cancel")
+                self._sb.showMessage("SOURCE placement: drag LMB to position (hold X/Y/Z to lock an axis); release to place. Esc to cancel")
             else:
                 self._gl.exit_placement_mode()
                 self._sb.showMessage("Ready.")
@@ -1729,7 +1754,7 @@ class MainWindow(QMainWindow):
                 self._src_btn.setChecked(False)
                 self._gl.enter_placement_mode(GLViewer.MODE_REC)
                 self._tabs.setCurrentIndex(3)
-                self._sb.showMessage("RECEIVER placement: move mouse, X/Y/Z to lock axis, click to place, Esc to cancel")
+                self._sb.showMessage("RECEIVER placement: drag LMB to position (hold X/Y/Z to lock an axis); release to place. Esc to cancel")
             else:
                 self._gl.exit_placement_mode()
                 self._sb.showMessage("Ready.")
@@ -1740,7 +1765,7 @@ class MainWindow(QMainWindow):
         else:
             self._rec_tbl.add_point(x, y, z)
         self._refresh_gl_points()
-        self._sb.showMessage(f"Placed {mode} at ({x:.3f}, {y:.3f}, {z:.3f}) m  —  click to place another, Esc to finish")
+        self._sb.showMessage(f"Placed {mode} at ({x:.3f}, {y:.3f}, {z:.3f}) m  —  drag again to add another, Esc to finish")
 
     def _on_point_removed(self, kind, idx):
         tbl = self._src_tbl if kind == "source" else self._rec_tbl
@@ -1778,6 +1803,10 @@ class MainWindow(QMainWindow):
             e.accept(); return
         # forward R (reset) and X/Y/Z to GL
         self._gl.keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):
+        # Forward key releases (X/Y/Z axis-unlock) to the GL viewer.
+        self._gl.keyReleaseEvent(e)
 
     # ── Scene tab ────────────────────────────────────────────
     def _build_scene_tab(self):
@@ -1873,7 +1902,7 @@ class MainWindow(QMainWindow):
     def _build_src_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8)
         info = QLabel("Press S (or the toolbar button) to enter placement mode.\n"
-                      "Then optionally lock an axis with X/Y/Z and click to place.\n"
+                      "Then drag LMB to position; hold X/Y/Z to lock an axis; release to place.\n"
                       "Or add rows manually below.")
         info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         info.setWordWrap(True); lay.addWidget(info)
@@ -1890,7 +1919,7 @@ class MainWindow(QMainWindow):
     def _build_rec_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8)
         info = QLabel("Press E (or the toolbar button) to enter placement mode.\n"
-                      "Lock axis with X/Y/Z, click to place.  Esc to finish.")
+                      "Drag LMB to position; hold X/Y/Z to lock an axis; release to place. Esc to finish.")
         info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         info.setWordWrap(True); lay.addWidget(info)
         self._rec_tbl = PointTable(has_amplitude=False)
