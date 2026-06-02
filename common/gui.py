@@ -75,18 +75,18 @@ PAL = {
 }
 
 LAYER_COLORS = [
-    (0.85, 0.20, 0.20),   # LEGO red
-    (0.20, 0.55, 0.90),   # LEGO blue
-    (0.95, 0.75, 0.10),   # LEGO yellow
-    (0.30, 0.70, 0.35),   # LEGO green
-    (0.95, 0.50, 0.15),   # LEGO orange
-    (0.60, 0.35, 0.75),   # purple
-    (0.20, 0.70, 0.70),   # teal
-    (0.90, 0.45, 0.65),   # pink
-    (0.55, 0.40, 0.25),   # brown
-    (0.65, 0.75, 0.20),   # lime
-    (0.40, 0.45, 0.85),   # periwinkle
-    (0.85, 0.35, 0.45),   # coral
+    (0.10, 0.55, 1.00),   # neon blue
+    (0.15, 0.95, 0.35),   # neon green
+    (1.00, 0.20, 0.25),   # neon red
+    (1.00, 0.55, 0.05),   # neon orange
+    (0.70, 0.25, 1.00),   # neon purple
+    (1.00, 0.90, 0.10),   # neon yellow
+    (0.10, 0.90, 0.90),   # neon cyan
+    (1.00, 0.30, 0.75),   # neon pink/magenta
+    (0.60, 1.00, 0.10),   # neon lime
+    (1.00, 0.40, 0.40),   # neon coral
+    (0.35, 0.60, 1.00),   # neon periwinkle
+    (0.85, 0.55, 1.00),   # neon lavender
 ]
 BBOX_COLOR = (0.35, 0.65, 1.0)
 SRC_COLOR  = (1.00, 1.00, 1.00)
@@ -427,9 +427,9 @@ class GLViewer(QOpenGLWidget):
         br = size * 0.10               # ball radius in pixels
 
         axes = [
-            ((1,0,0), (0.95, 0.30, 0.30), 'X'),
-            ((0,1,0), (0.30, 0.88, 0.45), 'Y'),
-            ((0,0,1), (0.35, 0.55, 0.95), 'Z'),
+            ((1,0,0), (0.70, 1.00, 0.10), 'X'),   # bright lime / yellow-green
+            ((0,1,0), (0.55, 0.20, 0.95), 'Y'),   # royal purple
+            ((0,0,1), (1.00, 0.30, 0.55), 'Z'),   # bright pink
         ]
 
         # ── carve out a sub-viewport, save everything ──────
@@ -744,19 +744,75 @@ class GLViewer(QOpenGLWidget):
         except Exception:
             return max(self._scene_span * 0.03, 0.05)
 
+    def _screen_offset_world(self, x, y, z, dx_px, dy_px=0):
+        """Return the world point that is (dx_px, dy_px) screen pixels from (x,y,z)."""
+        W, H = self.width(), self.height()
+        viewport = [int(0), int(0), int(W), int(H)]
+        sx, sy, sz = gluProject(float(x), float(y), float(z),
+                                self._mv, self._proj, viewport)
+        w = gluUnProject(float(sx) + dx_px, float(sy) + dy_px, float(sz),
+                         self._mv, self._proj, viewport)
+        return float(w[0]), float(w[1]), float(w[2])
+
+    def _marker_ball(self, x, y, z, color, px=3):
+        """
+        Small solid camera-facing dot at the EXACT placed coordinate (centre).
+        Constant pixel size, always faces the camera.
+        """
+        r, g, b = color
+        W, H = self.width(), self.height()
+        viewport = [int(0), int(0), int(W), int(H)]
+        try:
+            sx, sy, sz = gluProject(float(x), float(y), float(z),
+                                    self._mv, self._proj, viewport)
+            centre = np.array([x, y, z], np.float64)
+            rx = np.array(gluUnProject(float(sx) + px, float(sy), float(sz),
+                                       self._mv, self._proj, viewport), np.float64)
+            uy = np.array(gluUnProject(float(sx), float(sy) + px, float(sz),
+                                       self._mv, self._proj, viewport), np.float64)
+            vx = rx - centre     # screen-right in world
+            vy = uy - centre     # screen-up in world
+        except Exception:
+            return
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        glColor4f(r, g, b, 1.0)
+        segs = 16
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex3f(centre[0], centre[1], centre[2])
+        for k in range(segs + 1):
+            a = 2 * math.pi * k / segs
+            p = centre + vx * math.cos(a) + vy * math.sin(a)
+            glVertex3f(p[0], p[1], p[2])
+        glEnd()
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
     def _draw_sources(self):
         for pt in self._sources:
             s   = self._icon_scale(pt[0], pt[1], pt[2], px=14)
             col = (1.0, 0.15, 0.15) if self._outside_domain(pt[0], pt[1], pt[2]) \
                   else SRC_COLOR
-            self._speaker_icon(pt[0], pt[1], pt[2], s, col)
+            # marker dot sits at the exact placed coordinate; icon drawn to its right
+            self._marker_ball(pt[0], pt[1], pt[2], col)
+            try:
+                ix, iy, iz = self._screen_offset_world(pt[0], pt[1], pt[2], 16)
+            except Exception:
+                ix, iy, iz = pt[0], pt[1], pt[2]
+            self._speaker_icon(ix, iy, iz, s, col)
 
     def _draw_receivers(self):
         for pt in self._receivers:
             s   = self._icon_scale(pt[0], pt[1], pt[2], px=14)
             col = (1.0, 0.15, 0.15) if self._outside_domain(pt[0], pt[1], pt[2]) \
                   else REC_COLOR
-            self._mic_icon(pt[0], pt[1], pt[2], s, col)
+            self._marker_ball(pt[0], pt[1], pt[2], col)
+            try:
+                ix, iy, iz = self._screen_offset_world(pt[0], pt[1], pt[2], 16)
+            except Exception:
+                ix, iy, iz = pt[0], pt[1], pt[2]
+            self._mic_icon(ix, iy, iz, s, col)
 
     def _draw_placement_cursor(self):
         """Axis arrow + crosshair at _cursor_world."""
@@ -768,7 +824,7 @@ class GLViewer(QOpenGLWidget):
                'Y': (0.3,1.0,0.3),
                'Z': (0.4,0.6,1.0)}[self._axis_lock]
 
-        glColor4f(*col, 0.9)
+        glColor4f(*col, 1.0)
         glLineWidth(1.5)
         d = self._dist * 0.04
 
@@ -784,7 +840,7 @@ class GLViewer(QOpenGLWidget):
             ext = self._dist * 1.5
             ax = {'X':(1,0,0),'Y':(0,1,0),'Z':(0,0,1)}[self._axis_lock]
             glLineWidth(2.0)
-            glColor4f(*col, 0.45)
+            glColor4f(*col, 1.0)
             glBegin(GL_LINES)
             glVertex3f(p[0]-ax[0]*ext, p[1]-ax[1]*ext, p[2]-ax[2]*ext)
             glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
