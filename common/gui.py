@@ -357,7 +357,7 @@ class GLViewer(QOpenGLWidget):
         # camera toward whatever you are looking at.
         glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.7, 0.7, 0.7, 1.0])
         glLightfv(GL_LIGHT0, GL_AMBIENT, [0.0, 0.0, 0.0, 1.0])
-        glClearColor(0.02, 0.02, 0.03, 1.0)
+        glClearColor(0.05, 0.055, 0.07, 1.0)
 
     def resizeGL(self, w, h):
         glViewport(0, 0, w, h)
@@ -580,7 +580,7 @@ class GLViewer(QOpenGLWidget):
             if self._selected_layer == g["name"]:
                 continue
             # true LEGO color at moderate transparency (see-through walls)
-            draw_triangles(g, alpha=0.62)
+            draw_triangles(g, alpha=0.82)
         glDepthMask(GL_TRUE)
 
         # Pass B: selected layer, opaque and vivid (boosted same-hue color).
@@ -1173,7 +1173,7 @@ class GLViewer(QOpenGLWidget):
             mdx = cur.x() - anchor.x()
             mdy = -(cur.y() - anchor.y())
             move = float(np.dot(np.array([mdx, mdy], np.float32), screen_dir))
-            scale = self._dist * 0.004
+            scale = self._dist * 0.0015
             self._cursor_world = self._place_pos + ax * move * scale
         except Exception:
             pass
@@ -1575,32 +1575,6 @@ class SolverThread(QThread):
 # ─────────────────────────────────────────────────────────────
 #  Main window
 # ─────────────────────────────────────────────────────────────
-def make_source_icon(size=18, color="#a48bff"):
-    """Build a small 'sound source' icon: a dot with two concentric wave arcs."""
-    from PySide6.QtCore import QRectF
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color))
-    pen.setWidthF(1.6)
-    p.setPen(pen)
-    cx, cy = size * 0.32, size * 0.5
-    # central dot
-    p.setBrush(QColor(color))
-    rdot = size * 0.09
-    p.drawEllipse(QRectF(cx - rdot, cy - rdot, 2*rdot, 2*rdot))
-    # two concentric wave arcs opening to the right (−60°..+60°)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    for k in (1, 2):
-        rr = size * 0.18 * k
-        rect = QRectF(cx - rr, cy - rr, 2*rr, 2*rr)
-        # Qt angles are in 1/16 degree; start at -60°, span 120°
-        p.drawArc(rect, int(-60*16), int(120*16))
-    p.end()
-    return QIcon(pm)
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1727,8 +1701,7 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
 
         self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
-        src_idx = self._tabs.addTab(self._build_src_tab(), "Sources")
-        self._tabs.setTabIcon(src_idx, make_source_icon(color=PAL["subtext"]))
+        self._tabs.addTab(self._build_src_tab(),     "🔊  Sources")
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
         self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
         self._tabs.addTab(self._build_run_tab(),     "▶  Run")
