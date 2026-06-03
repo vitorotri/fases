@@ -228,7 +228,7 @@ class GLViewer(QOpenGLWidget):
         # scene
         self._verts  = np.zeros((0,3), np.float32)
         self._groups = []   # {name, tris, color, visible, is_bbox}
-        self._bbox_visible  = True
+        self._bbox_visible  = False
         self._selected_layer = None
         self._hover_world = None   # world coords under mouse for HUD
 
@@ -432,10 +432,10 @@ class GLViewer(QOpenGLWidget):
         L  = size * 0.36               # stick length in pixels
         br = size * 0.10               # ball radius in pixels
 
-        axes = [
-            ((1,0,0), (0.70, 1.00, 0.10), 'X'),   # bright lime / yellow-green
-            ((0,1,0), (250/255, 0/255, 135/255), 'Y'),  # vivid pink-magenta
-            ((0,0,1), (0.55, 0.20, 0.95), 'Z'),   # royal purple (swapped from Y)
+        axes = [            
+            ((1,0,0), (0.55, 0.20, 0.95), 'X'),   # royal purple
+            ((0,1,0), (252/255, 5/255, 95/255), 'Y'),  # vivid pink-magenta
+            ((0,0,1), (0.70, 1.00, 0.10), 'Z'),   # bright lime / yellow-green
         ]
 
         # ── carve out a sub-viewport, save everything ──────
@@ -598,34 +598,47 @@ class GLViewer(QOpenGLWidget):
 
         glDisable(GL_BLEND)
 
-        # Pass 4: boundary/bounding box, wire-only and non-occluding.
+        # Pass 4: domain bounding box — explicit hexahedron from the origin
+        # (0,0,0) to (Lx, Ly, Lz), drawn as a white wireframe when enabled.
         if self._bbox_visible:
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            glDepthMask(GL_FALSE)
-            glDisable(GL_DEPTH_TEST)
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-            for g in self._groups:
-                if not g["is_bbox"] or not g["visible"]:
-                    continue
-                tris = g["tris"]
-                if len(tris) == 0:
-                    continue
-                r, gr, b = g["color"]
-                is_sel = (self._selected_layer == g["name"])
-                glLineWidth(1.2 if not is_sel else 2.2)
-                glColor4f(r, gr, b, 0.60 if not is_sel else 1.00)
-                glBegin(GL_TRIANGLES)
-                for tri in tris:
-                    for vi in tri:
-                        glVertex3fv(verts[vi])
-                glEnd()
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-            glDepthMask(GL_TRUE)
-            glEnable(GL_DEPTH_TEST)
+            self._draw_domain_box()
             glDisable(GL_BLEND)
 
         glEnable(GL_LIGHTING)
+
+    def _draw_domain_box(self):
+        """
+        White wireframe hexahedron of the simulation domain, spanning from the
+        origin (0,0,0) to (Lx, Ly, Lz). Lx/Ly/Lz are the scene extents taken
+        from the loaded geometry's bounding box (domain_max). Non-occluding.
+        """
+        Lx, Ly, Lz = (float(self._domain_max[0]),
+                      float(self._domain_max[1]),
+                      float(self._domain_max[2]))
+        # eight corners of the box (0..L on each axis)
+        c = [
+            (0,  0,  0),  (Lx, 0,  0),  (Lx, Ly, 0),  (0,  Ly, 0),   # bottom z=0
+            (0,  0,  Lz), (Lx, 0,  Lz), (Lx, Ly, Lz), (0,  Ly, Lz),  # top z=Lz
+        ]
+        edges = [
+            (0,1),(1,2),(2,3),(3,0),   # bottom square
+            (4,5),(5,6),(6,7),(7,4),   # top square
+            (0,4),(1,5),(2,6),(3,7),   # vertical pillars
+        ]
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)   # always visible, never occluded
+        glDepthMask(GL_FALSE)
+        glLineWidth(1.6)
+        glColor4f(1.0, 1.0, 1.0, 0.9)   # white wireframe
+        glBegin(GL_LINES)
+        for a, b in edges:
+            glVertex3f(*c[a])
+            glVertex3f(*c[b])
+        glEnd()
+        glDepthMask(GL_TRUE)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
     def _speaker_icon(self, x, y, z, scale, color):
         """Draw a stylised loudspeaker at world position (x,y,z)."""
         r, g, b = color
@@ -1804,8 +1817,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(grp_obj)
 
         bbox_row = QHBoxLayout()
-        self._bbox_chk = QCheckBox("Show Boundary (bounding box)")
-        self._bbox_chk.setChecked(True)
+        self._bbox_chk = QCheckBox("Show bounding box")
+        self._bbox_chk.setChecked(False)
         self._bbox_chk.toggled.connect(self._gl.set_bbox_visible)
         bbox_row.addWidget(self._bbox_chk); bbox_row.addStretch()
         lay.addLayout(bbox_row)
@@ -1966,17 +1979,10 @@ class MainWindow(QMainWindow):
         self._groups = groups
         names = [g["name"] for g in groups]
         print(f"[OBJ] Parsed {len(groups)} groups: {names}")
-        bbox_found = any("boundary" in n.lower() for n in names)
-        if not bbox_found:
-            print("[OBJ] WARNING: no group named 'Boundary' found. "
-                  "Boundary toggle will have no effect. "
-                  f"Group names: {names}")
         self._gl.load_mesh(verts, groups)
         self._populate_layers(groups)
         self._update_cmd_preview()
         status = f"Loaded {len(groups)} layer(s)  —  {len(verts)} vertices"
-        if not bbox_found:
-            status += "  ⚠ no Boundary group detected"
         self._sb.showMessage(status)
 
     def _populate_layers(self, groups):
