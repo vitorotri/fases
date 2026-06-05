@@ -147,6 +147,54 @@ def face_normals(verts, tris):
     return n / nlen
 
 
+def feature_edges(verts, tris, angle_thresh_deg=5.0, weld_tol=1e-5):
+    """
+    Return a list of (i, j) vertex-index pairs for the 'real' edges of a mesh:
+      • boundary edges  -> used by exactly one triangle
+      • crease edges    -> shared by two triangles whose normals differ by more
+                           than angle_thresh_deg
+    Coplanar interior diagonals (the triangulation lines inside a flat plane)
+    are skipped. Vertices are welded by position so duplicated coincident
+    vertices still register shared edges.
+    """
+    if len(tris) == 0:
+        return np.zeros((0, 2), np.int32)
+
+    # weld: map every vertex to a representative index by quantised position
+    q = np.round(verts / weld_tol).astype(np.int64)
+    _, inv = np.unique(q, axis=0, return_inverse=True)   # inv[v] = welded id
+    wtris = inv[tris]                                     # tris in welded ids
+
+    fn = face_normals(verts, tris)
+
+    edge_map = {}   # (a,b) sorted welded ids -> list of triangle indices
+    for ti, (a, b, c) in enumerate(wtris):
+        for e in ((a, b), (b, c), (c, a)):
+            key = (e[0], e[1]) if e[0] < e[1] else (e[1], e[0])
+            edge_map.setdefault(key, []).append(ti)
+
+    cos_thr = math.cos(math.radians(angle_thresh_deg))
+    # remember one original (unwelded) vertex pair per welded edge for drawing
+    rep = {}
+    for ti, tri in enumerate(tris):
+        wa, wb, wc = wtris[ti]
+        for (oa, ob), (a, b) in zip(((tri[0],tri[1]),(tri[1],tri[2]),(tri[2],tri[0])),
+                                    ((wa,wb),(wb,wc),(wc,wa))):
+            key = (a, b) if a < b else (b, a)
+            rep.setdefault(key, (oa, ob))
+
+    out = []
+    for key, tlist in edge_map.items():
+        if len(tlist) == 1:
+            out.append(rep[key])                 # boundary edge
+        elif len(tlist) >= 2:
+            n0, n1 = fn[tlist[0]], fn[tlist[1]]
+            if abs(float(np.dot(n0, n1))) < cos_thr:
+                out.append(rep[key])             # crease edge (real corner)
+            # else: coplanar -> internal diagonal, skip
+    return np.array(out, np.int32) if out else np.zeros((0, 2), np.int32)
+
+
 # ─────────────────────────────────────────────────────────────
 #  Ray / triangle math
 # ─────────────────────────────────────────────────────────────
@@ -268,6 +316,7 @@ class GLViewer(QOpenGLWidget):
                 "name":    g["name"],
                 "tris":    g["tris"],
                 "normals": face_normals(verts, g["tris"]) if len(g["tris"]) else None,
+                "edges":   feature_edges(verts, g["tris"]) if len(g["tris"]) else None,
                 "color":   color,
                 "visible": True,
                 "is_bbox": is_bbox,
@@ -451,6 +500,7 @@ class GLViewer(QOpenGLWidget):
 
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
+        glDisable(GL_BLEND)            # gizmo is fully opaque, never faded
         glLineWidth(2.0)
 
         # yaw and pitch as radians for tip projection
@@ -479,29 +529,18 @@ class GLViewer(QOpenGLWidget):
             glVertex2f(cx + px*L, cy_gl + py*L)
         glEnd()
 
-        # ── draw balls as two crossed filled circles ───────
+        # ── draw balls as a single solid filled circle in the exact axis color ──
         segs = 20
         for (ax,ay,az), col, _ in axes:
             px, py = project_axis(ax, ay, az)
             tx = cx + px * L
             ty = cy_gl + py * L
             glColor3f(*col)
-            # circle 1: in XY plane of screen
             glBegin(GL_TRIANGLE_FAN)
             glVertex2f(tx, ty)
             for k in range(segs + 1):
                 a = 2 * math.pi * k / segs
                 glVertex2f(tx + br * math.cos(a), ty + br * math.sin(a))
-            glEnd()
-            # circle 2: slightly smaller, tilted (gives depth illusion)
-            glColor3f(min(col[0]*1.3,1), min(col[1]*1.3,1), min(col[2]*1.3,1))
-            r2 = br * 0.55
-            glBegin(GL_TRIANGLE_FAN)
-            glVertex2f(tx - br*0.2, ty + br*0.2)
-            for k in range(segs + 1):
-                a = 2 * math.pi * k / segs
-                glVertex2f(tx - br*0.2 + r2*math.cos(a),
-                           ty + br*0.2 + r2*math.sin(a))
             glEnd()
 
         glEnable(GL_DEPTH_TEST)
@@ -571,30 +610,44 @@ class GLViewer(QOpenGLWidget):
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
-        # Pass A: unselected layers, translucent, depth-write off so order
+        # Pass A: unselected layers — single transparent grey fill + white
+        # feature-edge wireframe (boundary + crease edges only; coplanar
+        # triangulation diagonals are excluded). Depth-write off so order
         # does not matter and nothing hard-occludes anything else.
+        GREY = (0.62, 0.62, 0.62)
         glDepthMask(GL_FALSE)
         for g in self._groups:
             if g["is_bbox"] or not g["visible"]:
                 continue
             if self._selected_layer == g["name"]:
                 continue
-            # true LEGO color at moderate transparency (see-through walls)
-            draw_triangles(g, alpha=0.82)
+            # transparent grey planes
+            draw_triangles(g, alpha=0.22, color=GREY)
+        # white feature-edge wireframe on top of the grey fills
+        glColor4f(1.0, 1.0, 1.0, 0.9)
+        glLineWidth(1.3)
+        for g in self._groups:
+            if g["is_bbox"] or not g["visible"]:
+                continue
+            if self._selected_layer == g["name"]:
+                continue
+            edges = g.get("edges")
+            if edges is None or len(edges) == 0:
+                continue
+            glBegin(GL_LINES)
+            for i, j in edges:
+                glVertex3fv(verts[i])
+                glVertex3fv(verts[j])
+            glEnd()
         glDepthMask(GL_TRUE)
 
-        # Pass B: selected layer, opaque and vivid (boosted same-hue color).
+        # Pass B: selected layer — SAME base color as unselected, just opaque.
         for g in self._groups:
             if g["is_bbox"] or not g["visible"]:
                 continue
             if self._selected_layer != g["name"]:
                 continue
-            r, gr, b = g["color"]
-            # vivid: push toward full saturation/brightness
-            vivid = (min(1.0, r * 1.25 + 0.10),
-                     min(1.0, gr * 1.25 + 0.10),
-                     min(1.0, b * 1.25 + 0.10))
-            draw_triangles(g, alpha=1.0, color=vivid)
+            draw_triangles(g, alpha=1.0)   # same g["color"], full opacity
 
         glDisable(GL_BLEND)
 
