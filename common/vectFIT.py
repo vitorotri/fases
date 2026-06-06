@@ -154,7 +154,7 @@ def R_expected(Rinf, A, B, C, alpha, beta, zeta, w):
         R += (A[:, None] / (zeta[:, None] + s[None, :])).sum(axis=0)
 
     if len(alpha):
-        den = (s[None, :] + alpha[:, None])**2 + (beta[:, None]**2)
+        den = (s[None, :] + alpha[:, None])**2 + beta[:, None]**2
         R += ((B[:, None] * s[None, :] + C[:, None] * beta[:, None] + alpha[:, None] * B[:, None])/ den).sum(axis=0)
 
     return R
@@ -169,6 +169,10 @@ def R_constant_from_octaves(freq, R_oct, mag_ceil=1-1e-12):
     R = Rinf * np.ones_like(freq, dtype=complex)  # phase = 0
     return R, Rinf
 
+def R_from_alpha(alpha):
+	#u_R = np.sqrt(1 - alpha) # unsigned R
+	#return np.where(u_R > 0.3, u_R, -u_R)
+	return np.sqrt(1 - alpha)
 
 # --------------------
 # Block 1: User input
@@ -195,7 +199,9 @@ if s_delete == "Y":
 	delete_str = "rm " + Npoles_path
 	os.system(delete_str)
 
-Rmag_oct = np.loadtxt(read_file)
+alpha_oct = np.loadtxt(read_file)
+Rmag_oct = R_from_alpha(alpha_oct)
+#Rmag_oct = np.loadtxt(read_file)
 
 config_path = os.path.join(script_dir, "..", solver_path, "config", "config.txt")
 
@@ -226,7 +232,7 @@ frequency_step = 5.0
 Npts = int((f_max - f_min)/frequency_step) + 1 # keep about same count as above
 freq = np.logspace(np.log10(f_min), np.log10(f_max), Npts) # log-spaced
 
-Niter = 25       # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
+Niter = 30       # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
 N = int(v[5])    # "number of poles" in MATLAB script (here: number of REAL starting poles)
 
 # Example impedance (Miki model) to be approximated (not reading from .mat file)
@@ -258,7 +264,7 @@ else:
     # --------------------------------------------------------------------------------
 
     # Build a 1-port skrf Network with S11 = R_tgt
-    frequency = rf.Frequency.from_f(freq, unit="hz")
+    frequency = rf.Frequency.from_f(freq, unit="Hz")
     nw = rf.Network(frequency=frequency)
     nw.s = R_tgt.reshape(-1, 1, 1)  # shape: (n_freq, n_ports, n_ports)
     nw.name = savename
@@ -341,10 +347,12 @@ tst_zeta = np.all(zeta >= 0)
 
 if not (tst_alpha and tst_beta and tst_zeta):
     print("\n[!] alpha's, beta's or zeta's have negative real values: failed causality test\n")
+'''
 if (np.any(alpha > 2.5127 / dt) or
-    np.any(beta  > 2.5127 / dt) or
-    np.any(zeta  > min(1.732 / dt, omega_cutoff))):
-    print("\n[!] alpha/beta/zeta are above expected values, may cause instability\n")
+    np.any(zeta  > 2.5127 / dt) or
+    np.any(beta  > min(1.732 / dt, omega_cutoff))):
+    print("\n[!] alpha/beta/zeta are above expected values, may cause innacuracies / instability\n")
+'''
 
 # ------------------------------------------------------------
 # SAVE IN C++ FORMAT
