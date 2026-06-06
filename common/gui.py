@@ -20,6 +20,7 @@ Key bindings (GL viewport):
     LMB click      : (normal mode) ray-pick layer
     Shift + LMB drag: inside-box look mode; lets you look straight up/down
     Ctrl + LMB drag : roll around view axis
+    Ctrl+Z          : undo last source/receiver placement, move, or removal
 """
 
 import sys, os, math
@@ -31,7 +32,7 @@ import numpy as np
 from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor, QKeySequence,
-                              QPixmap, QIcon, QPen)
+                              QPixmap, QIcon, QPen, QShortcut)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
@@ -1835,6 +1836,24 @@ class PointTable(QWidget):
             except (TypeError, ValueError): pass
         return pts
 
+    def set_points(self, pts, emit_changed=True):
+        """Replace all rows without losing the table's source/receiver shape.
+        Used by Ctrl+Z point undo; source rows keep x/y/z/p0, receiver rows x/y/z.
+        """
+        self._tbl.blockSignals(True)
+        self._tbl.setRowCount(0)
+        cols = self._tbl.columnCount()
+        for pt in pts:
+            vals = list(pt[:cols])
+            if len(vals) < cols:
+                vals += ([1.0] if self._has_amp else [0.0])[:cols - len(vals)]
+            r = self._tbl.rowCount(); self._tbl.insertRow(r)
+            for c, v in enumerate(vals[:cols]):
+                self._tbl.setItem(r, c, QTableWidgetItem(f"{float(v):.4g}"))
+        self._tbl.blockSignals(False)
+        if emit_changed:
+            self.changed.emit()
+
     def load_file(self, path):
         self._tbl.setRowCount(0)
         if not os.path.isfile(path): return
@@ -1887,6 +1906,10 @@ class MainWindow(QMainWindow):
         self._proj_root  = None
         self._obj_path   = None
         self._groups     = []
+        # Lightweight point undo history.  Each entry stores only the numeric
+        # source/receiver rows before a change, so undoing back to the first
+        # placed point is cheap even for many points.
+        self._point_undo_stack = []
         self._apply_theme()
         self._build_ui()
 
@@ -1985,7 +2008,7 @@ class MainWindow(QMainWindow):
 
         hint = QLabel("Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
                       "R: reset   S: src   T: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   "
-                      "G then LMB-drag: move point (hold X/Y/Z to lock)   RMB: del   Esc: cancel")
+                      "G then LMB-drag: move point (hold X/Y/Z to lock)   RMB: del   Ctrl+Z: undo   Esc: cancel")
         hint.setStyleSheet(f"color:{PAL['subtext']};font-size:9px;")
         place_bar.addWidget(hint)
         place_bar.addStretch()
@@ -2017,6 +2040,32 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._sb)
         self._sb.showMessage("Ready.  Open a project folder to begin.")
 
+        self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self._undo_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._undo_shortcut.activated.connect(self._undo_point_change)
+
+    # ── point undo ───────────────────────────────────────────
+    def _snapshot_point_state(self):
+        return {
+            "sources":   [tuple(p) for p in self._src_tbl.get_points()],
+            "receivers": [tuple(p) for p in self._rec_tbl.get_points()],
+        }
+
+    def _remember_points_for_undo(self):
+        snap = self._snapshot_point_state()
+        if not self._point_undo_stack or self._point_undo_stack[-1] != snap:
+            self._point_undo_stack.append(snap)
+
+    def _undo_point_change(self):
+        if not self._point_undo_stack:
+            self._sb.showMessage("Nothing to undo for sources/receivers.")
+            return
+        snap = self._point_undo_stack.pop()
+        self._src_tbl.set_points(snap["sources"], emit_changed=False)
+        self._rec_tbl.set_points(snap["receivers"], emit_changed=False)
+        self._refresh_gl_points()
+        self._sb.showMessage("Undid last source/receiver change.")
+
     # ── placement mode ───────────────────────────────────────
     def _toggle_placement(self, kind):
         if kind == "source":
@@ -2039,6 +2088,7 @@ class MainWindow(QMainWindow):
                 self._sb.showMessage("Ready.")
 
     def _on_point_placed(self, mode, x, y, z):
+        self._remember_points_for_undo()
         if mode == "source":
             self._src_tbl.add_point(x, y, z, 1.0)
         else:
@@ -2048,12 +2098,14 @@ class MainWindow(QMainWindow):
 
     def _on_point_moved(self, kind, idx, x, y, z):
         # Drag-to-move finished: write the new coordinates into the table row.
+        self._remember_points_for_undo()
         tbl = self._src_tbl if kind == "source" else self._rec_tbl
         tbl.update_point(idx, x, y, z)
         self._refresh_gl_points()
         self._sb.showMessage(f"Moved {kind} #{idx} to ({x:.3f}, {y:.3f}, {z:.3f}) m")
 
     def _on_point_removed(self, kind, idx):
+        self._remember_points_for_undo()
         tbl = self._src_tbl if kind == "source" else self._rec_tbl
         tbl._tbl.blockSignals(True)
         tbl._tbl.removeRow(idx)
@@ -2063,6 +2115,9 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, e):
         """Global key bindings. S=source, T=receiver, R=reset, X/Y/Z=axis lock."""
+        if e.matches(QKeySequence.StandardKey.Undo):
+            self._undo_point_change()
+            e.accept(); return
         key = e.key()
         if key == Qt.Key.Key_S:
             checked = not self._src_btn.isChecked()
@@ -2413,7 +2468,10 @@ class MainWindow(QMainWindow):
     def _load_src(self):
         start = os.path.join(self._proj_root,"input","src") if self._proj_root else ""
         p, _ = QFileDialog.getOpenFileName(self,"Load src.txt",start,"Text (*.txt)")
-        if p: self._src_tbl.load_file(p); self._refresh_gl_points()
+        if p:
+            self._remember_points_for_undo()
+            self._src_tbl.load_file(p)
+            self._refresh_gl_points()
 
     def _save_rec(self):
         if not self._proj_root: return
@@ -2423,7 +2481,10 @@ class MainWindow(QMainWindow):
     def _load_rec(self):
         start = os.path.join(self._proj_root,"input","rec") if self._proj_root else ""
         p, _ = QFileDialog.getOpenFileName(self,"Load rec.txt",start,"Text (*.txt)")
-        if p: self._rec_tbl.load_file(p); self._refresh_gl_points()
+        if p:
+            self._remember_points_for_undo()
+            self._rec_tbl.load_file(p)
+            self._refresh_gl_points()
 
     def _refresh_gl_points(self):
         self._gl.set_sources(  [(p[0],p[1],p[2]) for p in self._src_tbl.get_points()])
