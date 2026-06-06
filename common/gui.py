@@ -93,6 +93,15 @@ SRC_COLOR  = (1.00, 1.00, 1.00)
 REC_COLOR  = (1.00, 1.00, 1.00)
 SEL_OUTLINE= (1.00, 1.00, 1.00)
 
+# Single source of truth for the X/Y/Z axis colours, shared by the corner
+# gizmo, the placement cursor, and the drag-to-move axis guides so they always
+# match. (RGB 0..1.)
+AXIS_COLORS = {
+    'X': (0.55, 0.20, 0.95),          # royal purple
+    'Y': (252/255, 5/255, 95/255),    # vivid pink-magenta
+    'Z': (0.70, 1.00, 0.10),          # bright lime
+}
+
 OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 
 # ─────────────────────────────────────────────────────────────
@@ -249,6 +258,7 @@ class GLViewer(QOpenGLWidget):
     layerPicked   = Signal(str)    # emitted on ray-pick
     pointPlaced   = Signal(str, float, float, float)  # mode, x, y, z
     pointRemoved  = Signal(str, int)                   # kind, index
+    pointMoved    = Signal(str, int, float, float, float)  # kind, index, x, y, z
     coordsChanged = Signal(float, float, float)        # live HUD coords
 
     # placement modes
@@ -272,6 +282,17 @@ class GLViewer(QOpenGLWidget):
         self._pan   = np.zeros(3, np.float32)
         self._last_pos  = None
         self._mouse_btn = None
+        # Drag-to-move state for already-placed sources/receivers.
+        # A point is grabbed only when the user holds the "grab" key (G) at
+        # mouse-press time, so the (cheap) closest-point search runs once per
+        # press rather than on every mouse-move.
+        self._drag_kind = None    # "source"/"receiver" while dragging, else None
+        self._drag_idx  = -1      # index into the corresponding list
+        self._grab_held = False   # True while "edit positions" (G) mode is armed
+        # Axis constraint while dragging a point (mirrors placement's X/Y/Z lock).
+        self._drag_axis      = None            # None / 'X' / 'Y' / 'Z'
+        self._drag_axis_base = None            # point position when axis was locked
+        self._drag_anchor_px = None            # mouse global pos when axis was locked
 
         # scene
         self._verts  = np.zeros((0,3), np.float32)
@@ -377,6 +398,13 @@ class GLViewer(QOpenGLWidget):
     def exit_placement_mode(self):
         self._mode      = self.MODE_NONE
         self._axis_lock = None
+        # also cancel any armed/in-progress point-edit (G) mode
+        self._grab_held = False
+        self._drag_kind = None
+        self._drag_idx  = -1
+        self._drag_axis = None
+        self._drag_axis_base = None
+        self._drag_anchor_px = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
@@ -455,6 +483,9 @@ class GLViewer(QOpenGLWidget):
         self._draw_receivers()
         if self._mode != self.MODE_NONE:
             self._draw_placement_cursor()
+        elif self._drag_kind is not None and self._drag_idx >= 0:
+            # show the same axis guide + coordinate readout while moving a point
+            self._draw_drag_guide()
         self._draw_hud()
 
     # ── drawing helpers ──────────────────────────────────────
@@ -476,9 +507,9 @@ class GLViewer(QOpenGLWidget):
     
         # Add alpha (0.5 = 50% transparency) to each color
         axes = [            
-            ((1,0,0), (0.55, 0.20, 0.95, 0.7), 'X'),   # royal purple with alpha
-            ((0,1,0), (252/255, 5/255, 95/255, 0.8), 'Y'),  # vivid pink-magenta with alpha
-            ((0,0,1), (0.70, 1.00, 0.10, 0.7), 'Z'),   # bright lime with alpha
+            ((1,0,0), AXIS_COLORS['X'] + (0.7,),  'X'),
+            ((0,1,0), AXIS_COLORS['Y'] + (0.85,), 'Y'),
+            ((0,0,1), AXIS_COLORS['Z'] + (0.7,),  'Z'),
         ]
     
         glViewport(vp_x, vp_y, box, box)
@@ -886,10 +917,8 @@ class GLViewer(QOpenGLWidget):
         p = self._cursor_world
         glDisable(GL_LIGHTING)
 
-        col = {None: (1.0,1.0,1.0),
-               'X': (1.0,0.3,0.3),
-               'Y': (0.3,1.0,0.3),
-               'Z': (0.4,0.6,1.0)}[self._axis_lock]
+        col = (1.0, 1.0, 1.0) if self._axis_lock is None \
+              else AXIS_COLORS[self._axis_lock]
 
         glColor4f(*col, 1.0)
         glLineWidth(1.5)
@@ -933,6 +962,43 @@ class GLViewer(QOpenGLWidget):
 
         glEnable(GL_LIGHTING)
 
+    def _draw_drag_guide(self):
+        """
+        While moving an existing point with G + LMB, draw the same crosshair and
+        (when an axis is locked) the axis guide line, using the shared axis
+        colours. Mirrors the placement cursor so the two interactions feel alike.
+        """
+        lst = self._sources if self._drag_kind == "source" else self._receivers
+        if not (0 <= self._drag_idx < len(lst)):
+            return
+        p = lst[self._drag_idx]
+        glDisable(GL_LIGHTING)
+
+        col = (1.0, 1.0, 1.0) if self._drag_axis is None \
+              else AXIS_COLORS[self._drag_axis]
+        glColor4f(col[0], col[1], col[2], 1.0)
+        glLineWidth(1.5)
+        d = self._dist * 0.04
+
+        # crosshair at the point
+        glBegin(GL_LINES)
+        glVertex3f(p[0]-d, p[1], p[2]); glVertex3f(p[0]+d, p[1], p[2])
+        glVertex3f(p[0], p[1]-d, p[2]); glVertex3f(p[0], p[1]+d, p[2])
+        glVertex3f(p[0], p[1], p[2]-d); glVertex3f(p[0], p[1], p[2]+d)
+        glEnd()
+
+        # axis guide line when a drag axis is locked
+        if self._drag_axis:
+            ext = self._dist * 1.5
+            ax = {'X':(1,0,0), 'Y':(0,1,0), 'Z':(0,0,1)}[self._drag_axis]
+            glLineWidth(2.0)
+            glBegin(GL_LINES)
+            glVertex3f(p[0]-ax[0]*ext, p[1]-ax[1]*ext, p[2]-ax[2]*ext)
+            glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
+            glEnd()
+
+        glEnable(GL_LIGHTING)
+
     def _unproject_hover(self, qpos):
         """Unproject the mouse pixel onto the pivot-depth plane for a HUD readout."""
         self.makeCurrent()
@@ -950,7 +1016,31 @@ class GLViewer(QOpenGLWidget):
     def _draw_hud(self):
         """Overlay text using QPainter on top of GL."""
         if self._mode == self.MODE_NONE:
-            # show hover coordinates in the bottom-right corner
+            # While moving an existing point with G, show a top banner with the
+            # live coordinates and the locked axis, mirroring placement.
+            if self._drag_kind is not None and self._drag_idx >= 0:
+                lst = self._sources if self._drag_kind == "source" else self._receivers
+                if 0 <= self._drag_idx < len(lst):
+                    p = lst[self._drag_idx]
+                    mode_str = "MOVE " + ("SOURCE" if self._drag_kind == "source"
+                                          else "RECEIVER")
+                    axis_str = (f"  locked: {self._drag_axis}" if self._drag_axis
+                                else "  (hold X / Y / Z to lock an axis)")
+                    coord_str = f"  x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
+                    painter = QPainter(self)
+                    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                    from PySide6.QtCore import QRect
+                    painter.fillRect(QRect(0, 0, self.width(), 28),
+                                     QColor(20, 25, 35, 210))
+                    painter.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+                    painter.setPen(QColor(PAL["accent"]))
+                    painter.drawText(8, 18, f"● {mode_str}")
+                    painter.setFont(QFont("Monospace", 10))
+                    painter.setPen(QColor(PAL["text"]))
+                    painter.drawText(140, 18, axis_str + coord_str)
+                    painter.end()
+                return
+            # otherwise: show hover coordinates in the bottom-left corner
             if self._hover_world is not None:
                 p = self._hover_world
                 painter = QPainter(self)
@@ -1013,6 +1103,11 @@ class GLViewer(QOpenGLWidget):
         self._last_pos  = e.position()
         self._mouse_btn = e.button()
         self._drag_moved = False
+        # If G is held and LMB is pressed in normal mode, grab the nearest
+        # placed source/receiver instead of rotating the camera.
+        if (self._grab_held and e.button() == Qt.MouseButton.LeftButton
+                and self._mode == self.MODE_NONE):
+            self._begin_point_drag(e.position())
 
     def mouseMoveEvent(self, e):
         # ── placement mode: mouse moves the cursor with NO button needed ──
@@ -1021,6 +1116,14 @@ class GLViewer(QOpenGLWidget):
                 self._slide_axis(e.position())     # slide along locked axis
             else:
                 self._update_cursor_world(e.position())
+            self._last_pos = e.position()
+            self.update()
+            return
+
+        # ── dragging an already-placed point: move it, do not rotate camera ──
+        if self._drag_kind is not None and self._drag_idx >= 0:
+            self._drag_point_to(e.position())
+            self._drag_moved = True
             self._last_pos = e.position()
             self.update()
             return
@@ -1070,6 +1173,23 @@ class GLViewer(QOpenGLWidget):
         moved = getattr(self, '_drag_moved', False)
         self._mouse_btn = None
         self._last_pos  = None
+
+        # Finish a point drag: emit the final position so the table updates,
+        # then auto-disarm "edit positions" mode (one move per G activation).
+        if self._drag_kind is not None and self._drag_idx >= 0:
+            lst = self._sources if self._drag_kind == "source" else self._receivers
+            if 0 <= self._drag_idx < len(lst):
+                p = lst[self._drag_idx]
+                self.pointMoved.emit(self._drag_kind, self._drag_idx,
+                                     float(p[0]), float(p[1]), float(p[2]))
+            self._drag_kind = None
+            self._drag_idx  = -1
+            self._drag_axis      = None
+            self._drag_axis_base = None
+            self._drag_anchor_px = None
+            self._grab_held = False                      # G mode off after a move
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
 
         if self._mode != self.MODE_NONE:
             # Place on LMB release (whether the user dragged along a locked
@@ -1129,6 +1249,21 @@ class GLViewer(QOpenGLWidget):
             self._pan = np.zeros(3, np.float32)
             self.update()
             e.accept(); return
+        # "G" toggles "edit positions" mode: press once to arm, press again to
+        # disarm. While armed, LMB grabs and drags the nearest placed point.
+        # The mode also self-deactivates after a completed move (see release).
+        if key == Qt.Key.Key_G and self._mode == self.MODE_NONE:
+            self._grab_held = not self._grab_held
+            self.setCursor(Qt.CursorShape.OpenHandCursor if self._grab_held
+                           else Qt.CursorShape.ArrowCursor)
+            e.accept(); return
+        # X/Y/Z while dragging a point -> constrain movement to that axis.
+        if self._drag_kind is not None and key in (
+                Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
+            self._set_drag_axis({Qt.Key.Key_X:'X', Qt.Key.Key_Y:'Y',
+                                 Qt.Key.Key_Z:'Z'}[key])
+            e.accept(); return
+        # X/Y/Z during placement -> placement axis lock (unchanged).
         if self._mode != self.MODE_NONE:
             if key == Qt.Key.Key_X:
                 self._set_axis_lock('X'); e.accept(); return
@@ -1143,6 +1278,15 @@ class GLViewer(QOpenGLWidget):
         if e.isAutoRepeat():
             return
         key = e.key()
+        # Releasing X/Y/Z while dragging a point -> back to free movement.
+        if self._drag_kind is not None and key in (
+                Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
+            held = {Qt.Key.Key_X:'X', Qt.Key.Key_Y:'Y', Qt.Key.Key_Z:'Z'}[key]
+            if self._drag_axis == held:
+                self._drag_axis      = None
+                self._drag_axis_base = None
+                self._drag_anchor_px = None
+            e.accept(); return
         if self._mode != self.MODE_NONE and key in (
                 Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
             held = {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]
@@ -1172,6 +1316,96 @@ class GLViewer(QOpenGLWidget):
             best_list.pop(best_idx)
             self.pointRemoved.emit(best_kind, best_idx)
             self.update()
+
+    def _begin_point_drag(self, qpos):
+        """
+        Grab the nearest placed source/receiver within a screen-space radius so
+        it can be dragged. Called once on LMB press while G is held, so the
+        closest-point search is not repeated on every mouse-move (keeps it light).
+        """
+        self.makeCurrent()
+        W, H = self.width(), self.height()
+        viewport = [int(0), int(0), int(W), int(H)]
+        best_dist, best_kind, best_idx = 30.0, None, -1   # 30 px grab radius
+        for lst, kind in [(self._sources, "source"), (self._receivers, "receiver")]:
+            for i, pt in enumerate(lst):
+                try:
+                    sx, sy, _ = gluProject(float(pt[0]), float(pt[1]), float(pt[2]),
+                                           self._mv, self._proj, viewport)
+                    d = math.hypot(sx - qpos.x(), (H - sy) - qpos.y())
+                    if d < best_dist:
+                        best_dist, best_kind, best_idx = d, kind, i
+                except Exception:
+                    pass
+        if best_kind is not None:
+            self._drag_kind = best_kind
+            self._drag_idx  = best_idx
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def _set_drag_axis(self, axis):
+        """Lock the in-progress point drag to a single world axis. Freezes the
+        other two coordinates at the point's current position and anchors the
+        mouse, so movement maps cleanly onto that axis."""
+        lst = self._sources if self._drag_kind == "source" else self._receivers
+        if not (0 <= self._drag_idx < len(lst)):
+            return
+        self._drag_axis      = axis
+        self._drag_axis_base = list(lst[self._drag_idx])   # frozen base point
+        self._drag_anchor_px = QCursor.pos()               # mouse anchor (global)
+
+    def _drag_point_to(self, qpos):
+        """
+        Move the grabbed point. With no axis constraint, the point follows the
+        mouse on the screen-plane at its current depth. With an axis locked
+        (X/Y/Z held), it slides only along that world axis from the locked base,
+        driven by the total mouse movement since the lock (driftless).
+        """
+        lst = self._sources if self._drag_kind == "source" else self._receivers
+        if not (0 <= self._drag_idx < len(lst)):
+            return
+        self.makeCurrent()
+        W, H = self.width(), self.height()
+        viewport = [int(0), int(0), int(W), int(H)]
+
+        # ── axis-constrained movement ──
+        if self._drag_axis is not None and self._drag_axis_base is not None:
+            ax = {'X': np.array([1,0,0], np.float32),
+                  'Y': np.array([0,1,0], np.float32),
+                  'Z': np.array([0,0,1], np.float32)}[self._drag_axis]
+            base = np.array(self._drag_axis_base, np.float32)
+            try:
+                # screen-space direction of the axis at the base point
+                s0 = np.array(gluProject(*base.astype(float),
+                              self._mv, self._proj, viewport)[:2])
+                s1 = np.array(gluProject(*(base + ax*0.1).astype(float),
+                              self._mv, self._proj, viewport)[:2])
+                sdir = s1 - s0
+                slen = np.linalg.norm(sdir)
+                if slen < 1e-6:
+                    return
+                sdir /= slen
+                anchor = self._drag_anchor_px or QCursor.pos()
+                cur = QCursor.pos()
+                mdx = cur.x() - anchor.x()
+                mdy = -(cur.y() - anchor.y())
+                move = float(np.dot(np.array([mdx, mdy], np.float32), sdir))
+                scale = self._dist * 0.0015
+                newp = base + ax * move * scale
+                lst[self._drag_idx] = [float(newp[0]), float(newp[1]), float(newp[2])]
+            except Exception:
+                pass
+            return
+
+        # ── free screen-plane movement ──
+        cur = lst[self._drag_idx]
+        try:
+            _, _, sz = gluProject(float(cur[0]), float(cur[1]), float(cur[2]),
+                                  self._mv, self._proj, viewport)
+            world = gluUnProject(float(qpos.x()), float(H) - float(qpos.y()),
+                                 float(sz), self._mv, self._proj, viewport)
+            lst[self._drag_idx] = [float(world[0]), float(world[1]), float(world[2])]
+        except Exception:
+            pass
 
     def _set_axis_lock(self, axis):
         # Holding X/Y/Z freezes the other two coords at the CURRENT cursor point;
@@ -1572,6 +1806,17 @@ class PointTable(QWidget):
     def add_point(self, x, y, z, amp=1.0):
         self._add(x, y, z, amp)
 
+    def update_point(self, idx, x, y, z):
+        """Overwrite the x/y/z of an existing row (used by drag-to-move).
+        The amplitude column, if present, is left unchanged."""
+        if not (0 <= idx < self._tbl.rowCount()):
+            return
+        self._tbl.blockSignals(True)
+        for c, v in enumerate((x, y, z)):
+            self._tbl.setItem(idx, c, QTableWidgetItem(f"{v:.4g}"))
+        self._tbl.blockSignals(False)
+        self.changed.emit()
+
     def _remove(self):
         rows = sorted({i.row() for i in self._tbl.selectedItems()}, reverse=True)
         for r in rows: self._tbl.removeRow(r)
@@ -1717,6 +1962,7 @@ class MainWindow(QMainWindow):
         self._gl = GLViewer()
         self._gl.layerPicked.connect(self._on_layer_picked)
         self._gl.pointPlaced.connect(self._on_point_placed)
+        self._gl.pointMoved.connect(self._on_point_moved)
         self._gl.pointRemoved.connect(self._on_point_removed)
         gl_vlay.addWidget(self._gl, stretch=1)
 
@@ -1738,7 +1984,8 @@ class MainWindow(QMainWindow):
         place_bar.addWidget(self._rec_btn)
 
         hint = QLabel("Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
-                      "R: reset   S: src   T: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   RMB: del   Esc: cancel")
+                      "R: reset   S: src   T: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   "
+                      "G then LMB-drag: move point (hold X/Y/Z to lock)   RMB: del   Esc: cancel")
         hint.setStyleSheet(f"color:{PAL['subtext']};font-size:9px;")
         place_bar.addWidget(hint)
         place_bar.addStretch()
@@ -1798,6 +2045,13 @@ class MainWindow(QMainWindow):
             self._rec_tbl.add_point(x, y, z)
         self._refresh_gl_points()
         self._sb.showMessage(f"Placed {mode} at ({x:.3f}, {y:.3f}, {z:.3f}) m  —  drag again to add another, Esc to finish")
+
+    def _on_point_moved(self, kind, idx, x, y, z):
+        # Drag-to-move finished: write the new coordinates into the table row.
+        tbl = self._src_tbl if kind == "source" else self._rec_tbl
+        tbl.update_point(idx, x, y, z)
+        self._refresh_gl_points()
+        self._sb.showMessage(f"Moved {kind} #{idx} to ({x:.3f}, {y:.3f}, {z:.3f}) m")
 
     def _on_point_removed(self, kind, idx):
         tbl = self._src_tbl if kind == "source" else self._rec_tbl
