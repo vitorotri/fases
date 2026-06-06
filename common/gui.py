@@ -460,112 +460,105 @@ class GLViewer(QOpenGLWidget):
     # ── drawing helpers ──────────────────────────────────────
     def _draw_gizmo(self):
         """
-        Fixed top-left axis gizmo.
-        Drawn entirely in a small orthographic sub-viewport so it never
-        disturbs the scene camera matrices.
-        Balls = two crossed screen-aligned filled circles per tip.
-        Labels = QPainter pixel text, positions derived from pure trig.
+        Fixed top-left axis gizmo with transparency.
         """
         W, H = self.width(), self.height()
         size  = 80
         pad   = 14
         box   = pad*2 + size
-        # bottom-RIGHT corner. cx/cy are in GL coords measured inside the box's
-        # own sub-viewport (origin at the box's lower-left), so they stay pad+size//2.
         cx    = pad + size // 2
         cy_gl = pad + size // 2
-        # the sub-viewport's lower-left in window coords:
         vp_x  = W - box
         vp_y  = 0
-
-        L  = size * 0.36               # stick length in pixels
-        br = size * 0.10               # ball radius in pixels
-
+    
+        L  = size * 0.36
+        br = size * 0.10
+    
+        # Add alpha (0.5 = 50% transparency) to each color
         axes = [            
-            ((1,0,0), (0.55, 0.20, 0.95), 'X'),   # royal purple
-            ((0,1,0), (252/255, 5/255, 95/255), 'Y'),  # vivid pink-magenta
-            ((0,0,1), (0.70, 1.00, 0.10), 'Z'),   # bright lime / yellow-green
+            ((1,0,0), (0.55, 0.20, 0.95, 0.7), 'X'),   # royal purple with alpha
+            ((0,1,0), (252/255, 5/255, 95/255, 0.8), 'Y'),  # vivid pink-magenta with alpha
+            ((0,0,1), (0.70, 1.00, 0.10, 0.7), 'Z'),   # bright lime with alpha
         ]
-
-        # ── carve out a sub-viewport, save everything ──────
+    
         glViewport(vp_x, vp_y, box, box)
         glScissor (vp_x, vp_y, box, box)
         glEnable(GL_SCISSOR_TEST)
-
+    
         glMatrixMode(GL_PROJECTION)
         glPushMatrix(); glLoadIdentity()
         glOrtho(0, box, 0, box, -200, 200)
         glMatrixMode(GL_MODELVIEW)
         glPushMatrix(); glLoadIdentity()
-
+    
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
-        glDisable(GL_BLEND)            # gizmo is fully opaque, never faded
+        
+        # ── ENABLE BLENDING FOR TRANSPARENCY ────────────────
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)  # Standard alpha blending
+        # ───────────────────────────────────────────────────
+    
         glLineWidth(2.0)
-
-        # yaw and pitch as radians for tip projection
+    
         yaw_r   = math.radians(self._yaw)
         pitch_r = math.radians(self._pitch)
-
-        # project 3-D axis direction onto the 2-D gizmo plane
-        # using the same rotation the scene camera applies
+    
         def project_axis(ax, ay, az):
-            # rotate by yaw around Z (same vertical-axis orbit as the scene)
             x1 = ax * math.cos(yaw_r) - ay * math.sin(yaw_r)
             y1 = ax * math.sin(yaw_r) + ay * math.cos(yaw_r)
             z1 = az
-            # rotate by pitch around X
             x2 = x1
             y2 = y1 * math.cos(pitch_r) - z1 * math.sin(pitch_r)
-            # z2 unused (depth)
-            return x2, y2   # screen-space direction
-
+            return x2, y2
+    
         # ── draw sticks ───────────────────────────────────
         glBegin(GL_LINES)
         for (ax,ay,az), col, _ in axes:
             px, py = project_axis(ax, ay, az)
-            glColor3f(*col)
+            # Use glColor4f for RGBA instead of glColor3f
+            glColor4f(*col)  
             glVertex2f(cx, cy_gl)
             glVertex2f(cx + px*L, cy_gl + py*L)
         glEnd()
-
-        # ── draw balls as a single solid filled circle in the exact axis color ──
+    
+        # ── draw balls ────────────────────────────────────
         segs = 20
         for (ax,ay,az), col, _ in axes:
             px, py = project_axis(ax, ay, az)
             tx = cx + px * L
             ty = cy_gl + py * L
-            glColor3f(*col)
+            glColor4f(*col)  # Use glColor4f for RGBA
             glBegin(GL_TRIANGLE_FAN)
             glVertex2f(tx, ty)
             for k in range(segs + 1):
                 a = 2 * math.pi * k / segs
                 glVertex2f(tx + br * math.cos(a), ty + br * math.sin(a))
             glEnd()
-
+    
+        # ── DISABLE BLENDING AFTER GIZMO ──────────────────
+        glDisable(GL_BLEND)
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
-
-        # ── restore matrices and full viewport ────────────
+    
         glMatrixMode(GL_PROJECTION); glPopMatrix()
         glMatrixMode(GL_MODELVIEW);  glPopMatrix()
         glDisable(GL_SCISSOR_TEST)
         glViewport(0, 0, W, H)
-
-        # ── labels via QPainter (no gluProject needed) ────
+    
+        # ── labels via QPainter ───────────────────────────
         painter = QPainter(self)
         painter.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
-        # QPainter origin is top-left of the window. The gizmo box sits at the
-        # bottom-right, so window-x = vp_x + local_x, window-y = H - local_y.
         for (ax,ay,az), col, label in axes:
             px, py = project_axis(ax, ay, az)
             local_x = cx + px * L
             local_y = cy_gl + py * L
             sx = int(vp_x + local_x) + pad // 2
             sy = int(H - local_y) - pad // 2
+            # QPainter still uses opaque colors for text
             painter.setPen(QColor(int(col[0]*255),
-                                  int(col[1]*255),
-                                  int(col[2]*255)))
+                                int(col[1]*255),
+                                int(col[2]*255)))
             painter.drawText(sx + int(br) + 2, sy + 4, label)
         painter.end()
 
