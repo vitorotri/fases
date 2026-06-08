@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QDoubleSpinBox,
     QGroupBox, QScrollArea, QAbstractItemView,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QStatusBar
+    QStatusBar, QSlider, QMenu
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
@@ -1835,6 +1835,10 @@ class PointTable(QWidget):
                 border:1px solid {PAL['border']};}}
         """)
         self._tbl.itemChanged.connect(lambda: self.changed.emit())
+        # Right-click a cell -> fill the same value into rows above/below in
+        # that column (handy for setting a common amplitude or coordinate).
+        self._tbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tbl.customContextMenuRequested.connect(self._show_cell_menu)
         lay.addWidget(self._tbl)
         btn_row = QHBoxLayout()
         for label, fn in [("＋ Add", self._add), ("－ Remove", self._remove)]:
@@ -1852,6 +1856,47 @@ class PointTable(QWidget):
 
     def add_point(self, x, y, z, amp=1.0):
         self._add(x, y, z, amp)
+
+    def _show_cell_menu(self, pos):
+        """Right-click context menu on a cell: offer to copy this cell's value
+        to all rows above or below it, in the same column."""
+        item = self._tbl.itemAt(pos)
+        if item is None:
+            return
+        row, col = item.row(), item.column()
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{ background:{PAL['panel']}; color:{PAL['text']};
+                     border:1px solid {PAL['border']}; padding:4px; }}
+            QMenu::item {{ padding:5px 18px; border-radius:3px; }}
+            QMenu::item:selected {{ background:{PAL['accent']}; color:{PAL['bg']}; }}
+        """)
+        act_above = menu.addAction("Apply value to rows above")
+        act_below = menu.addAction("Apply value to rows below")
+        chosen = menu.exec(self._tbl.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_above:
+            self._fill_column(row, col, direction="above")
+        elif chosen is act_below:
+            self._fill_column(row, col, direction="below")
+
+    def _fill_column(self, row, col, direction):
+        """Copy the value at (row, col) into every cell above or below it in the
+        same column. Emits one change at the end."""
+        src_item = self._tbl.item(row, col)
+        if src_item is None:
+            return
+        value = src_item.text()
+        if direction == "above":
+            rows = range(0, row)
+        else:  # below
+            rows = range(row + 1, self._tbl.rowCount())
+        self._tbl.blockSignals(True)
+        for r in rows:
+            self._tbl.setItem(r, col, QTableWidgetItem(value))
+        self._tbl.blockSignals(False)
+        self.changed.emit()
 
     def update_point(self, idx, x, y, z):
         """Overwrite the x/y/z of an existing row (used by drag-to-move).
