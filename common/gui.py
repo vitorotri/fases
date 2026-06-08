@@ -92,6 +92,7 @@ LAYER_COLORS = [
 BBOX_COLOR = (0.35, 0.65, 1.0)
 SRC_COLOR  = (1.00, 1.00, 1.00)
 REC_COLOR  = (1.00, 1.00, 1.00)
+HL_COLOR   = (1.00, 0.85, 0.10)   # highlight tint for a selected/hovered point
 SEL_OUTLINE= (1.00, 1.00, 1.00)
 
 # Single source of truth for the X/Y/Z axis colours, shared by the corner
@@ -260,6 +261,7 @@ class GLViewer(QOpenGLWidget):
     pointPlaced   = Signal(str, float, float, float)  # mode, x, y, z
     pointRemoved  = Signal(str, int)                   # kind, index
     pointMoved    = Signal(str, int, float, float, float)  # kind, index, x, y, z
+    pointHovered  = Signal(str, int)                   # kind, index (G-mode hover)
     coordsChanged = Signal(float, float, float)        # live HUD coords
 
     # placement modes
@@ -306,6 +308,11 @@ class GLViewer(QOpenGLWidget):
         # points
         self._sources   = []  # list of [x,y,z]
         self._receivers = []  # list of [x,y,z]
+        # Index of the highlighted source/receiver (-1 = none). Driven either by
+        # table selection or by G-mode hover, so the user can tell which point
+        # in the scene corresponds to which table row.
+        self._hl_src = -1
+        self._hl_rec = -1
 
         # placement state
         self._mode      = self.MODE_NONE
@@ -390,6 +397,13 @@ class GLViewer(QOpenGLWidget):
     def set_receivers(self, pts):
         self._receivers = [list(p[:3]) for p in pts]; self.update()
 
+    def set_highlight(self, kind, idx):
+        """Highlight a source/receiver by index in the 3D scene. kind is
+        'source' / 'receiver' / None (None clears both)."""
+        self._hl_src = idx if kind == "source"   else -1
+        self._hl_rec = idx if kind == "receiver" else -1
+        self.update()
+
     def enter_placement_mode(self, mode):
         self._mode      = mode
         self._axis_lock = None
@@ -406,6 +420,8 @@ class GLViewer(QOpenGLWidget):
         self._drag_axis = None
         self._drag_axis_base = None
         self._drag_anchor_px = None
+        self._hl_src = -1
+        self._hl_rec = -1
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
@@ -889,12 +905,15 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def _draw_sources(self):
-        for pt in self._sources:
+        for i, pt in enumerate(self._sources):
             s   = self._icon_scale(pt[0], pt[1], pt[2], px=14)
-            col = (1.0, 0.15, 0.15) if self._outside_domain(pt[0], pt[1], pt[2]) \
-                  else SRC_COLOR
-            # marker dot sits at the exact placed coordinate; icon drawn to its right
-            self._marker_ball(pt[0], pt[1], pt[2], col)
+            hl  = (i == self._hl_src)
+            if self._outside_domain(pt[0], pt[1], pt[2]):
+                col = (1.0, 0.15, 0.15)
+            else:
+                col = HL_COLOR if hl else SRC_COLOR
+            # highlighted point gets a larger marker dot so it stands out
+            self._marker_ball(pt[0], pt[1], pt[2], col, px=6 if hl else 3)
             try:
                 ix, iy, iz = self._screen_offset_world(pt[0], pt[1], pt[2], 16)
             except Exception:
@@ -902,11 +921,14 @@ class GLViewer(QOpenGLWidget):
             self._speaker_icon(ix, iy, iz, s, col)
 
     def _draw_receivers(self):
-        for pt in self._receivers:
+        for i, pt in enumerate(self._receivers):
             s   = self._icon_scale(pt[0], pt[1], pt[2], px=14)
-            col = (1.0, 0.15, 0.15) if self._outside_domain(pt[0], pt[1], pt[2]) \
-                  else REC_COLOR
-            self._marker_ball(pt[0], pt[1], pt[2], col)
+            hl  = (i == self._hl_rec)
+            if self._outside_domain(pt[0], pt[1], pt[2]):
+                col = (1.0, 0.15, 0.15)
+            else:
+                col = HL_COLOR if hl else REC_COLOR
+            self._marker_ball(pt[0], pt[1], pt[2], col, px=6 if hl else 3)
             try:
                 ix, iy, iz = self._screen_offset_world(pt[0], pt[1], pt[2], 16)
             except Exception:
@@ -1129,6 +1151,18 @@ class GLViewer(QOpenGLWidget):
             self.update()
             return
 
+        # ── G-mode hover (no button held): highlight nearest point + table row.
+        # Must run on plain mouse-tracking moves, so it is gated on button state
+        # rather than on _last_pos (which persists between interactions).
+        if (self._grab_held and self._mode == self.MODE_NONE
+                and self._mouse_btn is None and self._drag_kind is None):
+            kind, idx = self._find_nearest_point(e.position(), radius=30.0)
+            self.set_highlight(kind, idx)
+            self.pointHovered.emit(kind if kind else "", idx)
+            self._hover_world = self._unproject_hover(e.position())
+            self.update()
+            return
+
         if self._last_pos is None:
             self._hover_world = self._unproject_hover(e.position())
             self.update()
@@ -1189,6 +1223,8 @@ class GLViewer(QOpenGLWidget):
             self._drag_axis_base = None
             self._drag_anchor_px = None
             self._grab_held = False                      # G mode off after a move
+            self._hl_src = -1
+            self._hl_rec = -1
             self.setCursor(Qt.CursorShape.ArrowCursor)
             return
 
@@ -1257,6 +1293,10 @@ class GLViewer(QOpenGLWidget):
             self._grab_held = not self._grab_held
             self.setCursor(Qt.CursorShape.OpenHandCursor if self._grab_held
                            else Qt.CursorShape.ArrowCursor)
+            if not self._grab_held:
+                # leaving edit mode clears the hover highlight
+                self.set_highlight(None, -1)
+                self.pointHovered.emit("", -1)
             e.accept(); return
         # X/Y/Z while dragging a point -> constrain movement to that axis.
         if self._drag_kind is not None and key in (
@@ -1318,16 +1358,13 @@ class GLViewer(QOpenGLWidget):
             self.pointRemoved.emit(best_kind, best_idx)
             self.update()
 
-    def _begin_point_drag(self, qpos):
-        """
-        Grab the nearest placed source/receiver within a screen-space radius so
-        it can be dragged. Called once on LMB press while G is held, so the
-        closest-point search is not repeated on every mouse-move (keeps it light).
-        """
+    def _find_nearest_point(self, qpos, radius=30.0):
+        """Return (kind, idx) of the nearest source/receiver within `radius`
+        screen pixels of qpos, or (None, -1). Shared by grab and G-mode hover."""
         self.makeCurrent()
         W, H = self.width(), self.height()
         viewport = [int(0), int(0), int(W), int(H)]
-        best_dist, best_kind, best_idx = 30.0, None, -1   # 30 px grab radius
+        best_dist, best_kind, best_idx = radius, None, -1
         for lst, kind in [(self._sources, "source"), (self._receivers, "receiver")]:
             for i, pt in enumerate(lst):
                 try:
@@ -1338,9 +1375,18 @@ class GLViewer(QOpenGLWidget):
                         best_dist, best_kind, best_idx = d, kind, i
                 except Exception:
                     pass
-        if best_kind is not None:
-            self._drag_kind = best_kind
-            self._drag_idx  = best_idx
+        return best_kind, best_idx
+
+    def _begin_point_drag(self, qpos):
+        """
+        Grab the nearest placed source/receiver within a screen-space radius so
+        it can be dragged. Called once on LMB press while G is held, so the
+        closest-point search is not repeated on every mouse-move (keeps it light).
+        """
+        kind, idx = self._find_nearest_point(qpos, radius=30.0)
+        if kind is not None:
+            self._drag_kind = kind
+            self._drag_idx  = idx
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def _set_drag_axis(self, axis):
@@ -1986,6 +2032,7 @@ class MainWindow(QMainWindow):
         self._gl.layerPicked.connect(self._on_layer_picked)
         self._gl.pointPlaced.connect(self._on_point_placed)
         self._gl.pointMoved.connect(self._on_point_moved)
+        self._gl.pointHovered.connect(self._on_point_hovered)
         self._gl.pointRemoved.connect(self._on_point_removed)
         gl_vlay.addWidget(self._gl, stretch=1)
 
@@ -2095,6 +2142,31 @@ class MainWindow(QMainWindow):
             self._rec_tbl.add_point(x, y, z)
         self._refresh_gl_points()
         self._sb.showMessage(f"Placed {mode} at ({x:.3f}, {y:.3f}, {z:.3f}) m  —  drag again to add another, Esc to finish")
+
+    def _on_table_row_selected(self, kind):
+        """A row was selected in a point table -> highlight it in the 3D scene.
+        Guarded so the reverse (G-hover -> select row) does not loop."""
+        if getattr(self, "_pt_sync_guard", False):
+            return
+        tbl = self._src_tbl if kind == "source" else self._rec_tbl
+        sel = tbl._tbl.selectionModel().selectedRows()
+        idx = sel[0].row() if sel else -1
+        self._gl.set_highlight(kind if idx >= 0 else None, idx)
+
+    def _on_point_hovered(self, kind, idx):
+        """G-mode hover over a point -> select its row in the matching table
+        so the user sees which one it is. Guarded against feedback loops."""
+        self._pt_sync_guard = True
+        if kind == "source":
+            self._src_tbl._tbl.selectRow(idx) if idx >= 0 else \
+                self._src_tbl._tbl.clearSelection()
+        elif kind == "receiver":
+            self._rec_tbl._tbl.selectRow(idx) if idx >= 0 else \
+                self._rec_tbl._tbl.clearSelection()
+        else:
+            self._src_tbl._tbl.clearSelection()
+            self._rec_tbl._tbl.clearSelection()
+        self._pt_sync_guard = False
 
     def _on_point_moved(self, kind, idx, x, y, z):
         # Drag-to-move finished: write the new coordinates into the table row.
@@ -2249,6 +2321,8 @@ class MainWindow(QMainWindow):
         info.setWordWrap(True); lay.addWidget(info)
         self._src_tbl = PointTable(has_amplitude=True)
         self._src_tbl.changed.connect(self._refresh_gl_points)
+        self._src_tbl._tbl.itemSelectionChanged.connect(
+            lambda: self._on_table_row_selected("source"))
         lay.addWidget(self._src_tbl)
         br = QHBoxLayout()
         for lbl, fn in [("📂  Load src.txt", self._load_src),
@@ -2265,6 +2339,8 @@ class MainWindow(QMainWindow):
         info.setWordWrap(True); lay.addWidget(info)
         self._rec_tbl = PointTable(has_amplitude=False)
         self._rec_tbl.changed.connect(self._refresh_gl_points)
+        self._rec_tbl._tbl.itemSelectionChanged.connect(
+            lambda: self._on_table_row_selected("receiver"))
         lay.addWidget(self._rec_tbl)
         br = QHBoxLayout()
         for lbl, fn in [("📂  Load rec.txt", self._load_rec),
