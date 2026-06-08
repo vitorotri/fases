@@ -29,7 +29,7 @@ import subprocess
 
 import numpy as np
 
-from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF
+from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF, QEvent
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor, QKeySequence,
                               QPixmap, QIcon, QPen, QShortcut)
@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox,
     QListWidget, QListWidgetItem, QTabWidget, QTextEdit,
-    QFileDialog, QMessageBox, QDoubleSpinBox,
+    QFileDialog, QMessageBox, QDoubleSpinBox, QAbstractSpinBox,
     QGroupBox, QScrollArea, QAbstractItemView,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar, QSlider, QMenu
@@ -2003,6 +2003,32 @@ class MainWindow(QMainWindow):
         self._point_undo_stack = []
         self._apply_theme()
         self._build_ui()
+        # Tab / Shift+Tab cycle through the tabs (with wrap-around). Installed as
+        # an application-wide filter so the keys are caught regardless of which
+        # child widget has focus; see eventFilter for the guard that preserves
+        # normal Tab behaviour while editing text/number fields.
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, obj, e):
+        """Cycle tabs with Tab / Shift+Tab (periodic wrap-around).
+
+        Guard: while the user is editing a text or number field (a QLineEdit,
+        spin box, or text edit currently has focus), Tab keeps its normal
+        meaning (move between fields / table cells). Everywhere else, Tab moves
+        to the next tab and Shift+Tab (delivered as Key_Backtab) to the previous.
+        """
+        if e.type() == QEvent.Type.KeyPress and e.key() in (
+                Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            fw = QApplication.focusWidget()
+            editing = isinstance(fw, (QLineEdit, QAbstractSpinBox, QTextEdit))
+            if not editing and hasattr(self, "_tabs"):
+                n = self._tabs.count()
+                if n > 0:
+                    cur  = self._tabs.currentIndex()
+                    step = -1 if e.key() == Qt.Key.Key_Backtab else 1
+                    self._tabs.setCurrentIndex((cur + step) % n)
+                return True   # consume so focus traversal does not also fire
+        return super().eventFilter(obj, e)
 
     def _apply_theme(self):
         pal = QPalette()
@@ -2112,7 +2138,9 @@ class MainWindow(QMainWindow):
         # tabs panel on the LEFT, GL viewport on the RIGHT
         self._tabs = QTabWidget()
         self._tabs.setUsesScrollButtons(False)        # no arrows
-        self._tabs.tabBar().setExpanding(False)        # fit text, do not stretch
+        # Expand the tabs to fill the panel width so the last tab (Run) ends
+        # flush with the panel's right edge, leaving no empty strip after it.
+        self._tabs.tabBar().setExpanding(True)
         self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
         splitter.addWidget(self._tabs)                 # index 0 = left
         splitter.addWidget(gl_wrap)                    # index 1 = right
