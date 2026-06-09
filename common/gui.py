@@ -96,7 +96,7 @@ HL_COLOR   = (1.00, 0.85, 0.10)   # highlight tint for a selected/hovered point
 SEL_OUTLINE= (1.00, 1.00, 1.00)
 # Transparency of the SELECTED (highlighted) layer's fill, 0.0 (invisible) ..
 # 1.0 (fully opaque). Edit this value to taste.
-SEL_ALPHA  = 0.9
+SEL_ALPHA  = 1.00
 
 # Single source of truth for the X/Y/Z axis colours, shared by the corner
 # gizmo, the placement cursor, and the drag-to-move axis guides so they always
@@ -598,29 +598,23 @@ class GLViewer(QOpenGLWidget):
         glViewport(0, 0, W, H)
     
         # ── labels via QPainter ───────────────────────────
+        # The gizmo is rendered in a sub-viewport at (vp_x, 0) sized box×box with
+        # glOrtho(0,box,0,box), so a gizmo-local point (gx, gy) maps to window
+        # coords (vp_x + gx, H - gy). Each label sits just BEYOND its ball, along
+        # the axis direction, so the letter lines up with the axis it names.
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         painter.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
         fm = painter.fontMetrics()
-        # place each label just OUTSIDE its ball, along the axis direction, so
-        # the letter sits in line with the axis it names (not a fixed offset).
-        label_gap = br + 6          # distance from ball centre to label centre
         for (ax,ay,az), col, label in axes:
             px, py = project_axis(ax, ay, az)
-            tip_x = cx + px * L
-            tip_y = cy_gl + py * L
-            # radial unit direction in screen space (py is GL-up, flip for QPainter)
             mag = math.hypot(px, py) or 1.0
             ux, uy = px / mag, py / mag
-            lx = tip_x + ux * label_gap
-            ly = tip_y + uy * label_gap
-            # convert to QPainter window coords and centre the glyph on (lx,ly)
-            wx = vp_x + lx + pad // 2
-            wy = (H - ly) - pad // 2
-            wx -= fm.horizontalAdvance(label) / 2.0
-            wy += fm.ascent() / 2.0
-            painter.setPen(QColor(int(col[0]*255),
-                                  int(col[1]*255),
-                                  int(col[2]*255)))
+            gx = cx + px * L + ux * (br + 8)     # tip + just past the ball
+            gy = cy_gl + py * L + uy * (br + 8)
+            wx = vp_x + gx - fm.horizontalAdvance(label) / 2.0
+            wy = (H - gy) + fm.ascent() / 2.0 - 1
+            painter.setPen(QColor(int(col[0]*255), int(col[1]*255), int(col[2]*255)))
             painter.drawText(int(wx), int(wy), label)
         painter.end()
 
@@ -1587,7 +1581,7 @@ class MaterialPanel(QWidget):
         if _HAS_MPL:
             self._fig = Figure(figsize=(3, 1.6), facecolor="white")
             self._canvas = FigureCanvas(self._fig)
-            self._canvas.setFixedHeight(150)
+            self._canvas.setFixedHeight(100)
             self._ax = self._fig.add_subplot(111)
             self._clear_plot()
             lay.addWidget(self._canvas)
@@ -1595,7 +1589,7 @@ class MaterialPanel(QWidget):
             self._canvas = None
             ph = QLabel("α per octave band\n(install matplotlib to see the curve)")
             ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ph.setFixedHeight(150)
+            ph.setFixedHeight(100)
             ph.setStyleSheet(f"background:white;color:#444;border:1px solid {PAL['border']};")
             lay.addWidget(ph)
 
@@ -1620,6 +1614,7 @@ class MaterialPanel(QWidget):
         self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tbl.itemSelectionChanged.connect(self._on_row_selected)
         self._tbl.itemChanged.connect(lambda *_: self._on_edit())
+        self._tbl.setMinimumHeight(280)   # taller alpha-table area
         lay.addWidget(self._tbl, 1)
 
         # ── buttons ──
@@ -1837,11 +1832,20 @@ class PointTable(QWidget):
     def __init__(self, has_amplitude=False, parent=None):
         super().__init__(parent)
         self._has_amp = has_amplitude
-        cols = ["x (m)", "y (m)", "z (m)"] + (["p₀ (Pa)"] if has_amplitude else [])
+        # Column 0 is an editable Name (defaults to the row number). The numeric
+        # columns follow; get_points()/save_file deliberately skip the name so
+        # the solver file format (x y z [p0]) is unchanged.
+        cols = ["Name", "x (m)", "y (m)", "z (m)"] + (["p₀ (Pa)"] if has_amplitude else [])
+        self._coff = 1            # numeric coordinates start at this column
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
         self._tbl = QTableWidget(0, len(cols))
         self._tbl.setHorizontalHeaderLabels(cols)
-        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        hh = self._tbl.horizontalHeader()
+        # Name column a bit wider (interactive), coordinate columns share the rest.
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        for c in range(1, len(cols)):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+        self._tbl.setColumnWidth(0, 90)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
@@ -1860,12 +1864,14 @@ class PointTable(QWidget):
             b = QPushButton(label); b.clicked.connect(fn); btn_row.addWidget(b)
         lay.addLayout(btn_row)
 
-    def _add(self, x=1.0, y=1.0, z=1.0, amp=1.0):
+    def _add(self, x=1.0, y=1.0, z=1.0, amp=1.0, name=None):
         self._tbl.blockSignals(True)
         r = self._tbl.rowCount(); self._tbl.insertRow(r)
+        # column 0: editable name, default to the 1-based row number
+        self._tbl.setItem(r, 0, QTableWidgetItem(name if name else str(r + 1)))
         vals = [x, y, z] + ([amp] if self._has_amp else [])
         for c, v in enumerate(vals):
-            self._tbl.setItem(r, c, QTableWidgetItem(f"{v:.4g}"))
+            self._tbl.setItem(r, self._coff + c, QTableWidgetItem(f"{v:.4g}"))
         self._tbl.blockSignals(False)
         self.changed.emit()
 
@@ -1915,12 +1921,12 @@ class PointTable(QWidget):
 
     def update_point(self, idx, x, y, z):
         """Overwrite the x/y/z of an existing row (used by drag-to-move).
-        The amplitude column, if present, is left unchanged."""
+        The name and amplitude columns are left unchanged."""
         if not (0 <= idx < self._tbl.rowCount()):
             return
         self._tbl.blockSignals(True)
         for c, v in enumerate((x, y, z)):
-            self._tbl.setItem(idx, c, QTableWidgetItem(f"{v:.4g}"))
+            self._tbl.setItem(idx, self._coff + c, QTableWidgetItem(f"{v:.4g}"))
         self._tbl.blockSignals(False)
         self.changed.emit()
 
@@ -1930,11 +1936,13 @@ class PointTable(QWidget):
         self.changed.emit()
 
     def get_points(self):
+        """Return numeric rows (x, y, z[, p0]); the Name column is skipped so
+        the 3D view, undo, and saved solver files stay purely numeric."""
         pts = []
         for r in range(self._tbl.rowCount()):
             try:
                 row = []
-                for c in range(self._tbl.columnCount()):
+                for c in range(self._coff, self._tbl.columnCount()):
                     item = self._tbl.item(r, c)
                     if item is None: raise ValueError("empty cell")
                     row.append(float(item.text()))
@@ -1943,19 +1951,19 @@ class PointTable(QWidget):
         return pts
 
     def set_points(self, pts, emit_changed=True):
-        """Replace all rows without losing the table's source/receiver shape.
-        Used by Ctrl+Z point undo; source rows keep x/y/z/p0, receiver rows x/y/z.
-        """
+        """Replace all rows from numeric tuples (x, y, z[, p0]). Names reset to
+        the row number. Used by Ctrl+Z point undo."""
+        ncoord = self._tbl.columnCount() - self._coff   # numeric columns
         self._tbl.blockSignals(True)
         self._tbl.setRowCount(0)
-        cols = self._tbl.columnCount()
         for pt in pts:
-            vals = list(pt[:cols])
-            if len(vals) < cols:
-                vals += ([1.0] if self._has_amp else [0.0])[:cols - len(vals)]
+            vals = list(pt[:ncoord])
+            if len(vals) < ncoord:
+                vals += [1.0 if self._has_amp else 0.0] * (ncoord - len(vals))
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
-            for c, v in enumerate(vals[:cols]):
-                self._tbl.setItem(r, c, QTableWidgetItem(f"{float(v):.4g}"))
+            self._tbl.setItem(r, 0, QTableWidgetItem(str(r + 1)))
+            for c, v in enumerate(vals[:ncoord]):
+                self._tbl.setItem(r, self._coff + c, QTableWidgetItem(f"{float(v):.4g}"))
         self._tbl.blockSignals(False)
         if emit_changed:
             self.changed.emit()
@@ -1963,14 +1971,16 @@ class PointTable(QWidget):
     def load_file(self, path):
         self._tbl.setRowCount(0)
         if not os.path.isfile(path): return
+        ncoord = self._tbl.columnCount() - self._coff
         with open(path) as f:
             for line in f:
                 line = line.split("#")[0].strip()
                 if not line: continue
                 vals = line.split()
                 r = self._tbl.rowCount(); self._tbl.insertRow(r)
-                for c, v in enumerate(vals[:self._tbl.columnCount()]):
-                    self._tbl.setItem(r, c, QTableWidgetItem(v))
+                self._tbl.setItem(r, 0, QTableWidgetItem(str(r + 1)))  # default name
+                for c, v in enumerate(vals[:ncoord]):
+                    self._tbl.setItem(r, self._coff + c, QTableWidgetItem(v))
 
     def save_file(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2238,7 +2248,7 @@ class MainWindow(QMainWindow):
             if self._src_btn.isChecked():
                 self._rec_btn.setChecked(False)
                 self._gl.enter_placement_mode(GLViewer.MODE_SRC)
-                self._tabs.setCurrentIndex(2)
+                self._tabs.setCurrentIndex(1)   # Sources tab
                 self._sb.showMessage("SOURCE placement: drag LMB to position (hold X/Y/Z to lock an axis); release to place. Esc to cancel")
             else:
                 self._gl.exit_placement_mode()
@@ -2247,7 +2257,7 @@ class MainWindow(QMainWindow):
             if self._rec_btn.isChecked():
                 self._src_btn.setChecked(False)
                 self._gl.enter_placement_mode(GLViewer.MODE_REC)
-                self._tabs.setCurrentIndex(3)
+                self._tabs.setCurrentIndex(2)   # Receivers tab
                 self._sb.showMessage("RECEIVER placement: drag LMB to position (hold X/Y/Z to lock an axis); release to place. Esc to cancel")
             else:
                 self._gl.exit_placement_mode()
@@ -2371,7 +2381,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(QLabel("Layers  — click in viewport or list to select:"))
         self._layer_list = QListWidget()
-        self._layer_list.setMaximumHeight(170)
+        self._layer_list.setMaximumHeight(90)
         self._layer_list.currentRowChanged.connect(self._on_layer_row_changed)
         lay.addWidget(self._layer_list)
 
