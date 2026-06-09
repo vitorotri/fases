@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox,
-    QListWidget, QListWidgetItem, QTabWidget, QTextEdit,
+    QListWidget, QListWidgetItem, QTabWidget, QTabBar, QTextEdit,
     QFileDialog, QMessageBox, QDoubleSpinBox, QAbstractSpinBox,
     QGroupBox, QScrollArea, QAbstractItemView,
     QTableWidget, QTableWidgetItem, QHeaderView,
@@ -1989,6 +1989,41 @@ class SolverThread(QThread):
 # ─────────────────────────────────────────────────────────────
 #  Main window
 # ─────────────────────────────────────────────────────────────
+class FillTabBar(QTabBar):
+    """
+    A tab bar that stretches its tabs to fill the FULL width of the tab widget
+    so the last tab ends flush with the panel's right edge (no trailing gap),
+    WITHOUT ever shrinking a tab below the width its label needs (so text and
+    emoji are never clipped). Only surplus space is distributed; if the tabs
+    already need more than the panel width, each keeps its natural width.
+    This is done explicitly because QTabBar.setExpanding(True) is style-dependent
+    and does not stretch the tabs on every platform.
+    """
+    def tabSizeHint(self, index):
+        hint = super().tabSizeHint(index)
+        n = self.count()
+        if n <= 0:
+            return hint
+        # natural widths needed by each tab's content
+        nat = [super(FillTabBar, self).tabSizeHint(i).width() for i in range(n)]
+        total = self.parentWidget().width() if self.parentWidget() else self.width()
+        surplus = total - sum(nat)
+        if surplus > 0:
+            # spread surplus evenly; the last tab absorbs the rounding remainder
+            add = surplus // n
+            extra = (surplus - add * (n - 1)) if index == n - 1 else add
+            hint.setWidth(nat[index] + extra)
+        else:
+            # not enough room: keep natural width so nothing is clipped
+            hint.setWidth(nat[index])
+        return hint
+
+    def resizeEvent(self, e):
+        # re-evaluate tab widths whenever the bar is resized
+        super().resizeEvent(e)
+        self.updateGeometry()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2063,7 +2098,7 @@ class MainWindow(QMainWindow):
             QCheckBox::indicator:checked{{background:{PAL['accent']};border-color:{PAL['accent']};}}
             QTabWidget::pane{{border:1px solid {PAL['border']};background:{PAL['panel']};}}
             QTabBar::tab{{background:{PAL['btn']};color:{PAL['subtext']};
-                border:1px solid {PAL['border']};padding:6px 14px;
+                border:1px solid {PAL['border']};padding:6px 8px;
                 border-bottom:none;border-top-left-radius:4px;border-top-right-radius:4px;}}
             QTabBar::tab:selected{{background:{PAL['panel']};color:{PAL['accent']};}}
             QTabBar::tab:hover{{color:{PAL['text']};}}
@@ -2089,10 +2124,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root_lay = QHBoxLayout(central)
         root_lay.setContentsMargins(6,6,6,6); root_lay.setSpacing(6)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(0)      # no visible/draggable handle
-        root_lay.addWidget(splitter)
 
         # left — GL + status
         gl_wrap = QWidget()
@@ -2137,17 +2168,17 @@ class MainWindow(QMainWindow):
 
         # tabs panel on the LEFT, GL viewport on the RIGHT
         self._tabs = QTabWidget()
+        # Custom tab bar that divides the full width across the tabs so the last
+        # tab ends flush with the panel edge (set BEFORE adding any tabs).
+        self._tabs.setTabBar(FillTabBar())
         self._tabs.setUsesScrollButtons(False)        # no arrows
-        # Expand the tabs to fill the panel width so the last tab (Run) ends
-        # flush with the panel's right edge, leaving no empty strip after it.
-        self._tabs.tabBar().setExpanding(True)
         self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
-        splitter.addWidget(self._tabs)                 # index 0 = left
-        splitter.addWidget(gl_wrap)                    # index 1 = right
-        splitter.setStretchFactor(0, 2)                # tabs
-        splitter.setStretchFactor(1, 3)                # viewport
-        self._tabs.setMinimumWidth(480)
-        splitter.setChildrenCollapsible(False)
+        # Fixed-width panel: not user-resizable (no splitter handle to drag) and
+        # its width never changes on maximize, so the tabs always fill it exactly.
+        self._tabs.setFixedWidth(480)
+        # Layout order: panel (fixed) on the left, GL viewport (stretches) right.
+        root_lay.addWidget(self._tabs)                 # left, fixed width
+        root_lay.addWidget(gl_wrap, stretch=1)         # right, takes the rest
 
         self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
         self._tabs.addTab(self._build_src_tab(),     "🔊  Sources")
