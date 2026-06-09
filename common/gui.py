@@ -94,6 +94,9 @@ SRC_COLOR  = (1.00, 1.00, 1.00)
 REC_COLOR  = (1.00, 1.00, 1.00)
 HL_COLOR   = (1.00, 0.85, 0.10)   # highlight tint for a selected/hovered point
 SEL_OUTLINE= (1.00, 1.00, 1.00)
+# Transparency of the SELECTED (highlighted) layer's fill, 0.0 (invisible) ..
+# 1.0 (fully opaque). Edit this value to taste.
+SEL_ALPHA  = 0.9
 
 # Single source of truth for the X/Y/Z axis colours, shared by the corner
 # gizmo, the placement cursor, and the drag-to-move axis guides so they always
@@ -597,17 +600,28 @@ class GLViewer(QOpenGLWidget):
         # ── labels via QPainter ───────────────────────────
         painter = QPainter(self)
         painter.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+        fm = painter.fontMetrics()
+        # place each label just OUTSIDE its ball, along the axis direction, so
+        # the letter sits in line with the axis it names (not a fixed offset).
+        label_gap = br + 6          # distance from ball centre to label centre
         for (ax,ay,az), col, label in axes:
             px, py = project_axis(ax, ay, az)
-            local_x = cx + px * L
-            local_y = cy_gl + py * L
-            sx = int(vp_x + local_x) + pad // 2
-            sy = int(H - local_y) - pad // 2
-            # QPainter still uses opaque colors for text
+            tip_x = cx + px * L
+            tip_y = cy_gl + py * L
+            # radial unit direction in screen space (py is GL-up, flip for QPainter)
+            mag = math.hypot(px, py) or 1.0
+            ux, uy = px / mag, py / mag
+            lx = tip_x + ux * label_gap
+            ly = tip_y + uy * label_gap
+            # convert to QPainter window coords and centre the glyph on (lx,ly)
+            wx = vp_x + lx + pad // 2
+            wy = (H - ly) - pad // 2
+            wx -= fm.horizontalAdvance(label) / 2.0
+            wy += fm.ascent() / 2.0
             painter.setPen(QColor(int(col[0]*255),
-                                int(col[1]*255),
-                                int(col[2]*255)))
-            painter.drawText(sx + int(br) + 2, sy + 4, label)
+                                  int(col[1]*255),
+                                  int(col[2]*255)))
+            painter.drawText(int(wx), int(wy), label)
         painter.end()
 
     def _draw_mesh(self):
@@ -682,13 +696,14 @@ class GLViewer(QOpenGLWidget):
             glEnd()
         glDepthMask(GL_TRUE)
 
-        # Pass B: selected layer — SAME base color as unselected, just opaque.
+        # Pass B: selected layer — SAME base color as unselected. Its opacity is
+        # controlled by the editable module constant SEL_ALPHA.
         for g in self._groups:
             if g["is_bbox"] or not g["visible"]:
                 continue
             if self._selected_layer != g["name"]:
                 continue
-            draw_triangles(g, alpha=1.0)   # same g["color"], full opacity
+            draw_triangles(g, alpha=SEL_ALPHA)   # same g["color"], editable alpha
 
         glDisable(GL_BLEND)
 
