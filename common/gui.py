@@ -96,7 +96,7 @@ HL_COLOR   = (1.00, 0.85, 0.10)   # highlight tint for a selected/hovered point
 SEL_OUTLINE= (1.00, 1.00, 1.00)
 # Transparency of the SELECTED (highlighted) layer's fill, 0.0 (invisible) ..
 # 1.0 (fully opaque). Edit this value to taste.
-SEL_ALPHA  = 1.00
+SEL_ALPHA  = 0.9
 
 # Single source of truth for the X/Y/Z axis colours, shared by the corner
 # gizmo, the placement cursor, and the drag-to-move axis guides so they always
@@ -113,14 +113,34 @@ OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 #  OBJ parser  (mirrors parsing3D.h)
 # ─────────────────────────────────────────────────────────────
 def parse_obj(path: str):
+    """
+    Parse vertices and grouped faces from an OBJ file.
+
+    Group handling: an object may be introduced by an ``o`` line, a ``g`` line,
+    or BOTH (some exporters emit ``o chair1`` immediately followed by
+    ``g chair1``). We therefore do NOT start a fresh group on every o/g line —
+    that would create a duplicate (often empty) group for each o+g pair. Instead
+    we only open a new group when the RESOLVED name actually changes, and we
+    drop any group that ends up with no faces. Group names that carry several
+    tokens (e.g. ``g Mesh1 ceiling Model``) resolve to the second token, which
+    is the human-readable layer name used elsewhere in the GUI.
+    """
     vertices, groups = [], []
     cur_name, cur_tris = None, []
 
+    def resolve_name(parts):
+        # "g Mesh1 ceiling Model" -> "ceiling"; "o chair1"/"g chair1" -> "chair1"
+        if len(parts) >= 2:
+            return parts[1]
+        if parts:
+            return parts[0]
+        return "unnamed"
+
     def flush():
-        if cur_name is not None:
+        # only keep groups that actually contain geometry
+        if cur_name is not None and cur_tris:
             groups.append({"name": cur_name,
-                           "tris": np.array(cur_tris, np.int32) if cur_tris
-                                   else np.empty((0,3), np.int32)})
+                           "tris": np.array(cur_tris, np.int32)})
 
     with open(path) as f:
         for raw in f:
@@ -131,10 +151,14 @@ def parse_obj(path: str):
             if tok[0] == "v":
                 vertices.append((float(tok[1]), float(tok[2]), float(tok[3])))
             elif tok[0] in ("o", "g"):
-                flush(); cur_tris = []
-                parts = tok[1:]
-                cur_name = (parts[1] if len(parts) >= 2 else
-                            parts[0] if parts else "unnamed")
+                new_name = resolve_name(tok[1:])
+                # Only begin a new group if the name truly changes. An o/g pair
+                # naming the same object (o chair1 then g chair1) is treated as
+                # one group, so it is not duplicated.
+                if new_name != cur_name:
+                    flush()
+                    cur_tris = []
+                    cur_name = new_name
             elif tok[0] == "f":
                 face = []
                 for t in tok[1:]:
@@ -1573,15 +1597,17 @@ class MaterialPanel(QWidget):
         self._mat_dir = None       # input/mat directory
         self._fit_dir = None       # input/fit directory
         self._proj_root = None
+        from PySide6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
 
         # ── plot area ──
         if _HAS_MPL:
-            self._fig = Figure(figsize=(3, 1.6), facecolor="white")
+            self._fig = Figure(figsize=(3, 2.8), facecolor="white")
             self._canvas = FigureCanvas(self._fig)
-            self._canvas.setFixedHeight(100)
+            self._canvas.setMinimumHeight(240)
             self._ax = self._fig.add_subplot(111)
             self._clear_plot()
             lay.addWidget(self._canvas)
@@ -1589,7 +1615,7 @@ class MaterialPanel(QWidget):
             self._canvas = None
             ph = QLabel("α per octave band\n(install matplotlib to see the curve)")
             ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ph.setFixedHeight(100)
+            ph.setMinimumHeight(240)
             ph.setStyleSheet(f"background:white;color:#444;border:1px solid {PAL['border']};")
             lay.addWidget(ph)
 
@@ -1614,7 +1640,10 @@ class MaterialPanel(QWidget):
         self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tbl.itemSelectionChanged.connect(self._on_row_selected)
         self._tbl.itemChanged.connect(lambda *_: self._on_edit())
-        self._tbl.setMinimumHeight(280)   # taller alpha-table area
+        from PySide6.QtWidgets import QSizePolicy
+        self._tbl.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                QSizePolicy.Policy.Expanding)
+        self._tbl.setMinimumHeight(140)   # table fills remaining space
         lay.addWidget(self._tbl, 1)
 
         # ── buttons ──
@@ -2381,7 +2410,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(QLabel("Layers  — click in viewport or list to select:"))
         self._layer_list = QListWidget()
-        self._layer_list.setMaximumHeight(90)
+        self._layer_list.setMaximumHeight(100)
         self._layer_list.currentRowChanged.connect(self._on_layer_row_changed)
         lay.addWidget(self._layer_list)
 
