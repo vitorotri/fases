@@ -1630,32 +1630,37 @@ class MaterialPanel(QWidget):
             lay.addWidget(self._canvas)
         else:
             self._canvas = None
-            ph = QLabel("α per octave band\n(install matplotlib to see the curve)")
+            ph = QLabel("α per octave band [Hz]\n(install matplotlib to see the curve)")
             ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
             ph.setMinimumHeight(240)
             ph.setStyleSheet(f"background:white;color:#444;border:1px solid {PAL['border']};")
             lay.addWidget(ph)
 
         # ── table ──
-        cols = ["Layer"] + [f"{b} Hz" for b in OCTAVE_BANDS]
+        cols = ["Layer"] + [str(b) for b in OCTAVE_BANDS]
         self._tbl = QTableWidget(0, len(cols))
         self._tbl.setHorizontalHeaderLabels(cols)
+        for c, b in enumerate(OCTAVE_BANDS, start=1):   # unit on hover
+            it = self._tbl.horizontalHeaderItem(c)
+            if it is not None:
+                it.setToolTip(f"{b} Hz")
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         hh = self._tbl.horizontalHeader()
-        # Keep the Layer column narrow so the frequency columns are never
-        # squeezed. A long layer name is truncated with an ellipsis (the full
-        # name shows on hover — tooltip set in populate()), while every
-        # α/frequency column is held wide enough to show its full "<f> Hz"
-        # header and value. setMinimumSectionSize guarantees no column — header
-        # or value — is ever clipped; a horizontal scrollbar appears instead.
+        # The Scene-tab panel is a fixed 480 px (~458 px usable), so eight
+        # "8000 Hz" labels cannot all fit and would force a horizontal scrollbar.
+        # We show the band centre frequency as the number only (unit is in the
+        # column-group label above and on each header's hover tooltip); every
+        # number then renders in full with NO scrollbar. The Layer column is
+        # fixed and narrow — long names elide to "…" with the full name on hover
+        # — so the frequency columns share all the remaining width evenly.
         self._tbl.setTextElideMode(Qt.TextElideMode.ElideRight)
-        hh.setMinimumSectionSize(58)        # fits "8000 Hz" at 11px
+        hh.setMinimumSectionSize(44)        # fits the widest band number ("8000")
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         for c in range(1, len(cols)):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
-        hh.resizeSection(0, 80)
+        hh.resizeSection(0, 90)
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
@@ -1691,7 +1696,7 @@ class MaterialPanel(QWidget):
         if not _HAS_MPL: return
         self._ax.clear()
         self._ax.set_facecolor("white")
-        self._ax.text(0.5, 0.5, r"$\alpha$ per octave band",
+        self._ax.text(0.5, 0.5, r"$\alpha$ per octave band [Hz]",
                       ha="center", va="center", color="#888",
                       transform=self._ax.transAxes, fontsize=11)
         self._ax.set_xticks([]); self._ax.set_yticks([])
@@ -1707,6 +1712,7 @@ class MaterialPanel(QWidget):
         self._ax.set_xticks(x)
         self._ax.set_xticklabels([str(b) for b in OCTAVE_BANDS],
                                  rotation=45, fontsize=7)
+        self._ax.set_xlabel("Frequency [Hz]", fontsize=8)
         self._ax.set_ylim(0, 1.0)
         self._ax.set_ylabel(r"$\alpha$", fontsize=11)
         self._ax.set_title(name, fontsize=9)
@@ -2471,7 +2477,7 @@ class MainWindow(QMainWindow):
             b = QPushButton(lbl); b.clicked.connect(fn); vis_row.addWidget(b)
         vis_row.addStretch(); lay.addLayout(vis_row)
 
-        lay.addWidget(QLabel("Material — α per octave band (click a row to plot; Ctrl+V to paste):"))
+        lay.addWidget(QLabel("Material — α per octave band [Hz] (click a row to plot; Ctrl+V to paste):"))
         self._mat_panel = MaterialPanel()
         self._mat_panel.rowSelected.connect(self._on_material_row_selected)
         lay.addWidget(self._mat_panel, 1)
