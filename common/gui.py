@@ -23,8 +23,9 @@ Key bindings (GL viewport):
     Ctrl+Z          : undo last source/receiver placement, move, or removal
 """
 
-import sys, os, math
+import sys, os, math, glob
 from pathlib import Path
+from datetime import datetime
 import subprocess
 
 import numpy as np
@@ -39,7 +40,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QCheckBox,
     QListWidget, QListWidgetItem, QTabWidget, QTabBar, QTextEdit,
     QFileDialog, QMessageBox, QDoubleSpinBox, QAbstractSpinBox,
-    QGroupBox, QScrollArea, QAbstractItemView,
+    QGroupBox, QScrollArea, QAbstractItemView, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar, QSlider, QMenu
 )
@@ -108,6 +109,27 @@ AXIS_COLORS = {
 }
 
 OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
+
+# ─────────────────────────────────────────────────────────────
+#  Project layout
+# ─────────────────────────────────────────────────────────────
+# Relative subdirectories scaffolded by "New project". A phases project is a
+# self-contained CASE directory: the solver is launched from its root and reads
+# everything through the fixed file contract (config/, input/*). Edit this list
+# if your layout changes.
+#
+# NOTE: shared *source/build* code — core/, include/, common/, scripts/ — is
+# deliberately NOT scaffolded per project, since those are shared across cases.
+# If you instead want each project to be a full solver-tree copy, add them here.
+PROJECT_SUBDIRS = [
+    "config",
+    "input/mat", "input/fit", "input/src", "input/rec",
+    "output",
+]
+# Manifest file at the project root: the single source of truth that ties a
+# directory together (scene path, binary, layer set, …). #-commented key=value,
+# same style as config.txt so it stays human-readable and hand-editable.
+MANIFEST_NAME = "project.txt"
 
 # ─────────────────────────────────────────────────────────────
 #  OBJ parser  (mirrors parsing3D.h)
@@ -683,26 +705,30 @@ class GLViewer(QOpenGLWidget):
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
-        # Pass A: unselected layers — single transparent grey fill + white
-        # feature-edge wireframe (boundary + crease edges only; coplanar
-        # triangulation diagonals are excluded). Depth-write off so order
-        # does not matter and nothing hard-occludes anything else.
+        # Depth-write off for the whole mesh overlay so nothing hard-occludes
+        # anything else and draw order alone controls layering.
         GREY = (0.62, 0.62, 0.62)
         glDepthMask(GL_FALSE)
+
+        # Pass A: FILLS first. Unselected layers get a transparent grey plane;
+        # the selected layer gets its own vivid hue at SEL_ALPHA. Drawing every
+        # fill BEFORE the wireframe is what keeps the highlighted layer BEHIND
+        # the white wireframe instead of painting over it.
         for g in self._groups:
             if g["is_bbox"] or not g["visible"]:
                 continue
             if self._selected_layer == g["name"]:
-                continue
-            # transparent grey planes
-            draw_triangles(g, alpha=0.22, color=GREY)
-        # white feature-edge wireframe on top of the grey fills
+                draw_triangles(g, alpha=SEL_ALPHA)            # selected: own colour
+            else:
+                draw_triangles(g, alpha=0.22, color=GREY)     # others: grey
+
+        # Pass B: white feature-edge wireframe for ALL visible layers (the
+        # selected one included), drawn last so the edges always sit on top of
+        # every fill, including the highlighted layer.
         glColor4f(1.0, 1.0, 1.0, 0.9)
         glLineWidth(1.3)
         for g in self._groups:
             if g["is_bbox"] or not g["visible"]:
-                continue
-            if self._selected_layer == g["name"]:
                 continue
             edges = g.get("edges")
             if edges is None or len(edges) == 0:
@@ -713,15 +739,6 @@ class GLViewer(QOpenGLWidget):
                 glVertex3fv(verts[j])
             glEnd()
         glDepthMask(GL_TRUE)
-
-        # Pass B: selected layer — SAME base color as unselected. Its opacity is
-        # controlled by the editable module constant SEL_ALPHA.
-        for g in self._groups:
-            if g["is_bbox"] or not g["visible"]:
-                continue
-            if self._selected_layer != g["name"]:
-                continue
-            draw_triangles(g, alpha=SEL_ALPHA)   # same g["color"], editable alpha
 
         glDisable(GL_BLEND)
 
@@ -1627,9 +1644,18 @@ class MaterialPanel(QWidget):
         self._tbl.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         hh = self._tbl.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        # Keep the Layer column narrow so the frequency columns are never
+        # squeezed. A long layer name is truncated with an ellipsis (the full
+        # name shows on hover — tooltip set in populate()), while every
+        # α/frequency column is held wide enough to show its full "<f> Hz"
+        # header and value. setMinimumSectionSize guarantees no column — header
+        # or value — is ever clipped; a horizontal scrollbar appears instead.
+        self._tbl.setTextElideMode(Qt.TextElideMode.ElideRight)
+        hh.setMinimumSectionSize(58)        # fits "8000 Hz" at 11px
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         for c in range(1, len(cols)):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+        hh.resizeSection(0, 80)
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
@@ -1648,8 +1674,8 @@ class MaterialPanel(QWidget):
 
         # ── buttons ──
         row = QHBoxLayout()
-        self._save_btn = QPushButton("💾  Save .mat")
-        self._save_btn.clicked.connect(self.save_selected)
+        self._save_btn = QPushButton("💾  Save all .mat")
+        self._save_btn.clicked.connect(self.save_all)
         row.addWidget(self._save_btn)
         self._fit_btn = QPushButton("⚙  Run vectFIT")
         self._fit_btn.clicked.connect(self.run_fit_selected)
@@ -1706,10 +1732,11 @@ class MaterialPanel(QWidget):
             vals = self._load_mat_values(name)
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
             name_item = QTableWidgetItem(name)
+            name_item.setToolTip(name)   # full name on hover (cell may be elided)
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._tbl.setItem(r, 0, name_item)
             for c, v in enumerate(vals):
-                self._tbl.setItem(r, c+1, QTableWidgetItem(f"{v:.4f}"))
+                self._tbl.setItem(r, c+1, QTableWidgetItem(f"{v:.2f}"))
         self._tbl.blockSignals(False)
         self._clear_plot()
 
@@ -1814,9 +1841,26 @@ class MaterialPanel(QWidget):
         self._status.setText(f"Saved → {name}.mat")
 
     def save_all(self):
+        """Write a .mat file for EVERY layer row in one pass, independent of the
+        current selection (does not move the selected row or change the plot)."""
+        if not self._mat_dir:
+            self._status.setText("Open a project folder first."); return
+        if self._tbl.rowCount() == 0:
+            self._status.setText("No materials to save."); return
+        os.makedirs(self._mat_dir, exist_ok=True)
+        n = 0
         for r in range(self._tbl.rowCount()):
-            self._tbl.setCurrentCell(r, 1)
-            self.save_selected()
+            item = self._tbl.item(r, 0)
+            if item is None:
+                continue
+            name = item.text()
+            vals = self._row_values(r)
+            p = os.path.join(self._mat_dir, name + ".mat")
+            with open(p, "w") as f:
+                f.write(f"# alpha per octave band: {OCTAVE_BANDS}\n")
+                f.write("  ".join(f"{v:.4f}" for v in vals) + "\n")
+            n += 1
+        self._status.setText(f"Saved {n} material file(s) → {self._mat_dir}")
 
     def run_fit_selected(self):
         r = self._tbl.currentRow()
@@ -2384,12 +2428,16 @@ class MainWindow(QMainWindow):
         w = QWidget(); lay = QVBoxLayout(w); lay.setSpacing(8)
 
         grp_proj = QGroupBox("Project")
-        g_lay = QHBoxLayout(grp_proj)
+        pv = QVBoxLayout(grp_proj)
         self._proj_label = QLabel("not set")
         self._proj_label.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
-        g_lay.addWidget(self._proj_label, 1)
-        btn = QPushButton("Open 3D-solver/"); btn.clicked.connect(self._open_project)
-        g_lay.addWidget(btn)
+        pv.addWidget(self._proj_label)
+        pb = QHBoxLayout()
+        for lbl, fn in [("🆕  New",  self._new_project),
+                        ("📂  Open", self._open_project),
+                        ("💾  Save", self._save_project)]:
+            b = QPushButton(lbl); b.clicked.connect(fn); pb.addWidget(b)
+        pv.addLayout(pb)
         lay.addWidget(grp_proj)
 
         grp_obj = QGroupBox("Scene file (.obj)")
@@ -2543,34 +2591,206 @@ class MainWindow(QMainWindow):
         return w
 
     # ── slots ────────────────────────────────────────────────
+    # ── project: manifest helpers ────────────────────────────
+    def _manifest_path(self, root=None):
+        return os.path.join(root or self._proj_root, MANIFEST_NAME)
+
+    def _read_manifest(self, path):
+        """Parse a `key = value` manifest (#-comments ignored) into a dict.
+        Missing/garbled files yield an empty dict — callers fall back to the
+        canonical file-contract paths, so old projects without a manifest still
+        open fine."""
+        d = {}
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.split("#")[0].strip()
+                    if not line or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    d[k.strip()] = v.strip()
+        except OSError:
+            pass
+        return d
+
+    def _write_manifest(self):
+        """Write/refresh the manifest from current GUI state. Written
+        atomically (temp file + os.replace) so a crash mid-save can't leave a
+        half-written manifest. `created` is preserved across saves.
+
+        Paths are stored ABSOLUTE — the C solver reads its inputs by absolute
+        path, so the manifest records them the same way (no working-directory
+        ambiguity). Trade-off: moving the project folder invalidates the stored
+        paths; re-open or Save once to refresh them."""
+        if not self._proj_root:
+            return
+        root     = os.path.abspath(self._proj_root)
+        path     = self._manifest_path()
+        existing = self._read_manifest(path) if os.path.isfile(path) else {}
+        created  = existing.get("created") or f"{datetime.now():%Y-%m-%d %H:%M}"
+        scene    = os.path.abspath(self._obj_path) if self._obj_path else ""
+        binary   = self._bin_le.text() if hasattr(self, "_bin_le") else ""
+        if binary and not os.path.isabs(binary):
+            binary = os.path.abspath(os.path.join(root, binary))
+        layers   = " ".join(g["name"] for g in self._groups
+                            if "boundary" not in g["name"].lower())
+        dmax     = getattr(self._gl, "_domain_max", None)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write("# phases project manifest  —  written by gui.py\n")
+            f.write("# All paths are absolute (the solver reads inputs by absolute path).\n")
+            f.write(f"name      = {os.path.basename(os.path.normpath(root))}\n")
+            f.write(f"root      = {root}\n")
+            f.write(f"created   = {created}\n")
+            f.write(f"saved     = {datetime.now():%Y-%m-%d %H:%M}\n")
+            f.write(f"scene     = {scene}\n")
+            f.write(f"binary    = {binary}\n")
+            f.write(f"config    = {os.path.join(root, 'config', 'config.txt')}\n")
+            f.write(f"sources   = {os.path.join(root, 'input', 'src', 'src.txt')}\n")
+            f.write(f"receivers = {os.path.join(root, 'input', 'rec', 'rec.txt')}\n")
+            f.write(f"matdir    = {os.path.join(root, 'input', 'mat')}\n")
+            f.write(f"layers    = {layers}\n")
+            if dmax is not None:
+                f.write("# domain extent (Lx Ly Lz) is derived from the scene AABB; informational only:\n")
+                f.write(f"# domain  = {float(dmax[0]):.6g} {float(dmax[1]):.6g} {float(dmax[2]):.6g}\n")
+        os.replace(tmp, path)
+
+    # ── project: create / open / save ────────────────────────
+    def _new_project(self):
+        """Scaffold a fresh project directory tree, seed a default config and
+        empty src/rec, write the manifest, and make it the active project."""
+        parent = QFileDialog.getExistingDirectory(self, "Choose location for new project")
+        if not parent:
+            return
+        name, ok = QInputDialog.getText(self, "New project", "Project name:",
+                                        text="new_project")
+        if not ok or not name.strip():
+            return
+        root = os.path.join(parent, name.strip())
+        if os.path.isdir(root) and os.listdir(root):
+            if QMessageBox.question(
+                    self, "Folder not empty",
+                    f"{root}\nalready exists and is not empty.\nScaffold into it anyway?"
+                ) != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            for sub in PROJECT_SUBDIRS:
+                os.makedirs(os.path.join(root, sub), exist_ok=True)
+        except OSError as ex:
+            QMessageBox.critical(self, "Create failed", str(ex)); return
+
+        self._proj_root = root
+        self._proj_label.setText(root)
+        # seed the file contract so the project is immediately runnable-shaped
+        self._write_config(os.path.join(root, "config", "config.txt"))
+        self._src_tbl.save_file(os.path.join(root, "input", "src", "src.txt"))
+        self._rec_tbl.save_file(os.path.join(root, "input", "rec", "rec.txt"))
+        self._mat_panel.set_project(root)
+        if self._obj_path and os.path.isfile(self._obj_path):
+            # A scene was already loaded before the project existed — keep it and
+            # re-populate under the new project so its path lands in the manifest.
+            self._load_obj_path(self._obj_path)   # also calls _write_manifest()
+            self._sb.showMessage(f"Created project: {root}")
+        else:
+            self._obj_path = None
+            self._groups   = []
+            self._write_manifest()
+            self._sb.showMessage(f"Created project: {root}  —  load an OBJ to add geometry.")
+        self._update_cmd_preview()
+
     def _open_project(self):
-        d = QFileDialog.getExistingDirectory(self, "Select 3D-solver directory")
-        if not d: return
-        self._proj_root = d; self._proj_label.setText(d)
-        for rel, fn in [("config/config.txt", self._load_config_from),
-                        ("input/src/src.txt",  self._src_tbl.load_file),
-                        ("input/rec/rec.txt",  self._rec_tbl.load_file)]:
-            p = os.path.join(d, rel)
-            if os.path.isfile(p): fn(p)
-        self._refresh_gl_points(); self._update_cmd_preview()
-        self._sb.showMessage(f"Project: {d}")
+        """Open a project directory and restore its full state. Reads the
+        manifest when present (scene path, binary), then loads config, sources,
+        receivers, and the scene OBJ — which in turn repopulates layers and
+        their materials. Projects with no manifest fall back to the canonical
+        file-contract paths and a lone input/scene/*.obj, so they still open."""
+        d = QFileDialog.getExistingDirectory(self, "Open project directory")
+        if not d:
+            return
+        self._proj_root = d
+        self._proj_label.setText(d)
+        man = self._read_manifest(self._manifest_path())
+
+        def resolve(rel):
+            return rel if os.path.isabs(rel) else os.path.join(d, rel)
+
+        # binary
+        if man.get("binary") and hasattr(self, "_bin_le"):
+            self._bin_le.setText(man["binary"])
+
+        # config / sources / receivers (manifest path if given, else canonical)
+        cfg = resolve(man.get("config", "config/config.txt"))
+        if os.path.isfile(cfg):
+            self._load_config_from(cfg)
+        srcp = resolve(man.get("sources", "input/src/src.txt"))
+        if os.path.isfile(srcp):
+            self._src_tbl.load_file(srcp)
+        recp = resolve(man.get("receivers", "input/rec/rec.txt"))
+        if os.path.isfile(recp):
+            self._rec_tbl.load_file(recp)
+        self._refresh_gl_points()
+
+        # scene: manifest 'scene' first (absolute), else any .obj that happens
+        # to sit under input/scene/ (kept as a convenience; not auto-created).
+        scene = man.get("scene", "")
+        scene = resolve(scene) if scene else ""
+        if not (scene and os.path.isfile(scene)):
+            cand  = sorted(glob.glob(os.path.join(d, "input", "scene", "*.obj")))
+            scene = cand[0] if cand else ""   # first by name if several present
+        if scene and os.path.isfile(scene):
+            self._load_obj_path(scene)          # repopulates layers + materials
+        else:
+            self._mat_panel.set_project(d)      # wire materials for a later OBJ
+
+        # Persist the manifest now so opening a project always records current
+        # state (scene path included) even if no .mat/config was touched.
+        self._write_manifest()
+        self._update_cmd_preview()
+        self._sb.showMessage(f"Opened project: {d}")
+
+    def _save_project(self):
+        """Explicit, atomic save of the whole project: config, materials,
+        sources, receivers, and the manifest."""
+        if not self._proj_root:
+            QMessageBox.warning(self, "No project",
+                                "Create or open a project first."); return
+        self._write_config(os.path.join(self._proj_root, "config", "config.txt"))
+        self._src_tbl.save_file(os.path.join(self._proj_root, "input", "src", "src.txt"))
+        self._rec_tbl.save_file(os.path.join(self._proj_root, "input", "rec", "rec.txt"))
+        self._mat_panel.save_all()
+        self._write_manifest()
+        self._sb.showMessage(f"Saved project → {self._proj_root}")
 
     def _load_obj(self):
-        start = os.path.join(self._proj_root, "input", "scene") if self._proj_root else ""
+        # input/scene/ is no longer auto-created (the scene can live anywhere and
+        # is referenced by absolute path), so start at the project root — or
+        # input/scene if it happens to exist.
+        start = ""
+        if self._proj_root:
+            cand = os.path.join(self._proj_root, "input", "scene")
+            start = cand if os.path.isdir(cand) else self._proj_root
         path, _ = QFileDialog.getOpenFileName(self, "Load OBJ", start, "OBJ (*.obj)")
-        if not path: return
-        self._obj_path = path
-        self._obj_label.setText(os.path.basename(path))
+        if path:
+            self._load_obj_path(path)
+
+    def _load_obj_path(self, path):
+        """Parse an OBJ, load it into the viewport, populate layers + materials,
+        and (if a project is open) record the scene in the manifest. Shared by
+        the Load-OBJ button and project-open restore."""
         try:
             verts, groups = parse_obj(path)
         except Exception as ex:
             QMessageBox.critical(self, "OBJ error", str(ex)); return
+        self._obj_path = path
+        self._obj_label.setText(os.path.basename(path))
         self._groups = groups
         names = [g["name"] for g in groups]
         print(f"[OBJ] Parsed {len(groups)} groups: {names}")
         self._gl.load_mesh(verts, groups)
         self._populate_layers(groups)
         self._update_cmd_preview()
+        if self._proj_root:
+            self._write_manifest()          # persist the scene path on open/load
         status = f"Loaded {len(groups)} layer(s)  —  {len(verts)} vertices"
         self._sb.showMessage(status)
 
@@ -2640,6 +2860,12 @@ class MainWindow(QMainWindow):
                 self._layer_list.setCurrentRow(i)
                 break
         self._sync_guard = False
+        # Clicking a material row (and the cross-widget sync above) can move
+        # keyboard focus off the table — after which Up/Down do nothing. This
+        # branch only runs when the user acted on the material table directly
+        # (3D-pick / layer-list selections are guarded out above), so returning
+        # focus to the table here is what makes arrow-key row navigation work.
+        self._mat_panel._tbl.setFocus(Qt.FocusReason.OtherFocusReason)
         self._sb.showMessage(f"Selected layer: {name}")
 
     def _set_all_vis(self, v):
