@@ -99,7 +99,31 @@ int main(int argc, char *argv[]){
     // ------------------------------- get Device(s) information -----------------------------------
     
     int nDevices;
-    cudaGetDeviceCount(&nDevices);
+    cudaError_t err = cudaGetDeviceCount(&nDevices);
+
+	if (err != cudaSuccess) {
+    	fprintf(stderr,
+        	"\n[!] CUDA initialization failed.\n"
+        	"    cudaGetDeviceCount() returned %d (%s): %s\n\n",
+        	static_cast<int>(err),
+        	cudaGetErrorName(err),
+        	cudaGetErrorString(err));
+	
+    	if (err == cudaErrorUnknown) {
+        	fprintf(stderr,
+            	"    This is often caused by a stuck NVIDIA UVM driver, especially\n"
+            	"    after suspend/resume. The GPU may still appear in nvidia-smi.\n\n"
+            	"    Suggested fix:\n"
+            	"        sudo modprobe -r nvidia_uvm\n"
+            	"        sudo modprobe nvidia_uvm\n\n"
+            	"    If unloading fails because the module is in use, do NOT force it.\n"
+            	"    Close CUDA/GPU applications or reboot instead.\n\n"
+            	"    To inspect current GPU users:\n"
+            	"        sudo fuser -v /dev/nvidia*\n\n");
+    	}
+	
+    	return EXIT_FAILURE;
+	}
     if (nDevices == 0){
     	printf("\n[!] FAILED: no CUDA devices found\n\n");
     	return -1;
@@ -614,7 +638,7 @@ int main(int argc, char *argv[]){
 	
 	// --------------------------------- Memory assessment ---------------------------------
 	
-	cudaError_t err = cudaGetLastError();
+	err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		printf("[!] CUDA error: %s\n", cudaGetErrorString(err));
 	}
