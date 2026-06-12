@@ -10,19 +10,54 @@
 #include <vector>
 #include <array>
 #include <sstream>
+#include <cuda_runtime.h>
 #include "functions3D.cuh"
 
 int main(int argc, char *argv[]){
-	if (argc < 6) {
-        printf("Usage: %s <scene> <config> <src> <rec> <poles>\n", argv[0]);
+	if (argc < 5) {
+        printf("Usage: %s <scene> <config> <src> <rec>\n", argv[0]);
         return 1;
     }
 
-	printf("\n[!] Fit all materials first!\n");
+    // -------------------------------------------------------------------------
+    // Project-aware paths. The executable may live in build/, but the CASE
+    // files live under the project root. Derive the project root from argv[2]
+    // when argv[2] is .../config/config.txt. This keeps all physics/math
+    // untouched and fixes standalone execution from any working directory.
+    // -------------------------------------------------------------------------
 
-	printf("\n[!] Call Python script showing scene config here?\n");
-	
-	printf("\n[!] Is poles.txt consistent?\n");
+    auto canonical_input = [](const char* raw) -> std::filesystem::path {
+        std::filesystem::path p(raw);
+        if (p.is_relative()) p = std::filesystem::current_path() / p;
+        return p.lexically_normal();
+    };
+
+    std::filesystem::path scene_path  = canonical_input(argv[1]);
+    std::filesystem::path config_path = canonical_input(argv[2]);
+    std::filesystem::path src_path    = canonical_input(argv[3]);
+    std::filesystem::path rec_path    = canonical_input(argv[4]);
+
+    std::filesystem::path project_root = std::filesystem::current_path();
+    if (config_path.filename() == "config.txt" &&
+        config_path.parent_path().filename() == "config") {
+        project_root = config_path.parent_path().parent_path();
+    }
+
+    std::filesystem::path poles_path = config_path.parent_path() / "poles.txt";
+    std::filesystem::path fit_dir    = project_root / "input" / "fit";
+    std::filesystem::path output_dir = project_root / "output";
+
+    std::error_code ec;
+    std::filesystem::create_directories(output_dir, ec);
+    if (ec) {
+        std::cerr << "[!] Cannot create output directory: " << output_dir
+                  << " (" << ec.message() << ")\n";
+        return EXIT_FAILURE;
+    }
+
+    auto out_file = [&](const std::string& name) -> std::string {
+        return (output_dir / name).string();
+    };
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
 	float *p0, *u0, *v0, *w0, *p1, *u1, *v1, *w1, *p2, *u2, *v2, *w2; // host field arrays
@@ -39,7 +74,7 @@ int main(int argc, char *argv[]){
     
     // read argv[2] file
     std::vector<float> conf_arr;
-    std::ifstream file(argv[2]);
+    std::ifstream file(config_path);
     std::string line;
     while (std::getline(file, line)){
     	// Truncate at # (remove comments after float)
@@ -71,9 +106,14 @@ int main(int argc, char *argv[]){
     
     // ---------------------- load OBJ/PLY/XYZ/etc file and create scene ---------------------
     
-    system("rm output/pressureX.bin output/pressureY.bin output/pressureZ.bin output/oid.bin output/S.bin output/header.txt");
+    // Remove stale outputs from the project output directory, not from cwd.
+    for (const char* fn : {"pressureX.bin", "pressureY.bin", "pressureZ.bin",
+                           "oid.bin", "S.bin", "header.txt", "pre_header.txt"}) {
+        std::remove(out_file(fn).c_str());
+    }
         
-    char *path = argv[1];
+    std::string scene_str = scene_path.string();
+    const char *path = scene_str.c_str();
     FILE *fp = fopen(path, "r");
     if (!fp) {
         perror("Error opening file");
@@ -97,42 +137,77 @@ int main(int argc, char *argv[]){
     uint8_t* d_oid = NULL;
     
     // ------------------------------- get Device(s) information -----------------------------------
-    
-    int nDevices;
-    cudaError_t err = cudaGetDeviceCount(&nDevices);
+    //
+    // Important: always check the return value from cudaGetDeviceCount().
+    // If the CUDA runtime cannot talk to the installed driver, nDevices is not
+    // a trustworthy value. The old code ignored the error and could report
+    // "no CUDA devices found" even when nvidia-smi could see the GPU.
 
-	if (err != cudaSuccess) {
-    	fprintf(stderr,
-        	"\n[!] CUDA initialization failed.\n"
-        	"    cudaGetDeviceCount() returned %d (%s): %s\n\n",
-        	static_cast<int>(err),
-        	cudaGetErrorName(err),
-        	cudaGetErrorString(err));
-	
-    	if (err == cudaErrorUnknown) {
-        	fprintf(stderr,
-            	"    This is often caused by a stuck NVIDIA UVM driver, especially\n"
-            	"    after suspend/resume. The GPU may still appear in nvidia-smi.\n\n"
-            	"    Suggested fix:\n"
-            	"        sudo modprobe -r nvidia_uvm\n"
-            	"        sudo modprobe nvidia_uvm\n\n"
-            	"    If unloading fails because the module is in use, do NOT force it.\n"
-            	"    Close CUDA/GPU applications or reboot instead.\n\n"
-            	"    To inspect current GPU users:\n"
-            	"        sudo fuser -v /dev/nvidia*\n\n");
-    	}
-	
-    	return EXIT_FAILURE;
-	}
-    if (nDevices == 0){
-    	printf("\n[!] FAILED: no CUDA devices found\n\n");
-    	return -1;
+    const char *visible_devices = std::getenv("CUDA_VISIBLE_DEVICES");
+    std::cout << "\n CUDA_VISIBLE_DEVICES="
+              << (visible_devices ? visible_devices : "<unset>") << std::endl;
+
+    int nDevices = 0;
+    cudaError_t devErr = cudaGetDeviceCount(&nDevices);
+    if (devErr != cudaSuccess) {
+        std::cerr << "\n[!] FAILED: cudaGetDeviceCount() returned "
+                  << static_cast<int>(devErr) << " ("
+                  << cudaGetErrorName(devErr) << "): "
+                  << cudaGetErrorString(devErr) << "\n";
+
+        if (devErr == cudaErrorInsufficientDriver) {
+            std::cerr << "[!] The executable was probably built with a CUDA runtime newer "
+                         "than the installed NVIDIA driver supports. Rebuild with CUDA 11.x "
+                         "for driver 470.x, or update the NVIDIA driver.\n";
+        } else if (devErr == cudaErrorNoDevice) {
+            std::cerr << "[!] The CUDA runtime did not expose any CUDA-capable GPU to this process.\n";
+        } else if (devErr == cudaErrorInitializationError) {
+            std::cerr << "[!] CUDA runtime initialization failed. Check driver state, permissions, "
+                         "and whether another environment/library path is interfering.\n";
+        }
+
+        std::cerr << std::endl;
+        return -1;
     }
+
+    if (nDevices <= 0){
+        std::cerr << "\n[!] FAILED: no CUDA devices found by the CUDA runtime\n\n";
+        return -1;
+    }
+
+    int selectedDevice = 0;
+    cudaError_t setErr = cudaSetDevice(selectedDevice);
+    if (setErr != cudaSuccess) {
+        std::cerr << "\n[!] FAILED: cudaSetDevice(" << selectedDevice << ") returned "
+                  << static_cast<int>(setErr) << " ("
+                  << cudaGetErrorName(setErr) << "): "
+                  << cudaGetErrorString(setErr) << "\n\n";
+        return -1;
+    }
+
+    // Force context creation now, so device/runtime problems are reported here
+    // rather than much later as a misleading allocation/kernel failure.
+    cudaError_t initErr = cudaFree(0);
+    if (initErr != cudaSuccess) {
+        std::cerr << "\n[!] FAILED: CUDA context initialization returned "
+                  << static_cast<int>(initErr) << " ("
+                  << cudaGetErrorName(initErr) << "): "
+                  << cudaGetErrorString(initErr) << "\n\n";
+        return -1;
+    }
+
     for (int i = 0; i < nDevices; ++i) {
         cudaDeviceProp prop{};
-        cudaGetDeviceProperties(&prop, i);
+        cudaError_t propErr = cudaGetDeviceProperties(&prop, i);
+        if (propErr != cudaSuccess) {
+            std::cerr << "\n[!] WARNING: cudaGetDeviceProperties(" << i << ") returned "
+                      << static_cast<int>(propErr) << " ("
+                      << cudaGetErrorName(propErr) << "): "
+                      << cudaGetErrorString(propErr) << "\n";
+            continue;
+        }
 
-        std::cout << "\n Device Number: " << i << std::endl;
+        std::cout << "\n Device Number: " << i << (i == selectedDevice ? " [selected]" : "") << std::endl;
         std::cout << " Device Name: " << prop.name << std::endl;
         std::cout << " Compute Capability: " << prop.major << "." << prop.minor << std::endl;
         std::cout << " Total Global Memory (bytes): " << prop.totalGlobalMem << std::endl;
@@ -141,7 +216,7 @@ int main(int argc, char *argv[]){
         std::cout << " Memory Bus Width (bits): " << prop.memoryBusWidth << std::endl;
         std::cout << " L2 Cache Size (bytes): " << prop.l2CacheSize << std::endl;
         std::cout << " Shared Memory per Block (bytes): " << prop.sharedMemPerBlock << std::endl;
-		std::cout << " Shared Memory per SM (bytes): "    << prop.sharedMemPerMultiprocessor << std::endl;
+        std::cout << " Shared Memory per SM (bytes): " << prop.sharedMemPerMultiprocessor << std::endl;
     }
     
     // -------------------------------------- process OBJ scene ------------------------------------
@@ -163,13 +238,13 @@ int main(int argc, char *argv[]){
     		return 1;
 		}
 		
-		FILE *file_S = fopen("output/S.bin", "wb");
+		FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
 		if (file_S) {
     		fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
     		fclose(file_S);
 		}
 		
-		FILE *file_oid = fopen("output/oid.bin", "wb");
+		FILE *file_oid = fopen(out_file("oid.bin").c_str(), "wb");
 		if (file_oid){
     		fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
     		fclose(file_oid);
@@ -192,7 +267,7 @@ int main(int argc, char *argv[]){
     }
     
     FILE *pre_header; // file for data output (sdf_plot.py TST)
-	pre_header = fopen("output/pre_header.txt", "w");
+	pre_header = fopen(out_file("pre_header.txt").c_str(), "w");
 	if (pre_header != NULL){
     	fprintf(pre_header, "%d %d %d %f %d\n", Nx, Ny, Nz, h, (int)(tol/h));
     	fclose(pre_header);
@@ -229,9 +304,9 @@ int main(int argc, char *argv[]){
     int K_m, L_m; // k_max and L_max from all the fits
     
     // read poles.txt file
-    file.open(argv[5]);
+    file.open(poles_path);
     if (!file.is_open()) {
-        std::cerr << "[!] Cannot open poles.txt" << std::endl;
+        std::cerr << "[!] Cannot open poles file: " << poles_path << std::endl;
         return EXIT_FAILURE;
     }
     file >> K_m >> L_m;
@@ -257,7 +332,7 @@ int main(int argc, char *argv[]){
 
     
     for (int m = 0; m < nMat; ++m) {
-    	std::string filename = "input/fit/" + names[m+1] + ".fit"; // names[0] = Boundary
+    	std::string filename = (fit_dir / (names[m+1] + ".fit")).string(); // names[0] = Boundary
     	std::cout << "\nReading: " << filename << "\n";	
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
 	}
@@ -376,7 +451,7 @@ int main(int argc, char *argv[]){
 	
 	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
 	float lambda = c/f_cutoff;
-	if (lambda / h < 12.0f){
+	if (lambda / h < 10.0f){
 		printf("[!] Resolution too low, aborting...\n\n");
 		return -1;
 	}
@@ -398,10 +473,12 @@ int main(int argc, char *argv[]){
 	
 	// ---------------------------------- kernel options and extra arrays --------------------------------
 	
-	int kern;
+	//int kern;
 	float dm;
+	/*
 	printf("\nChoose an option for time integration:\n\n 1) Godunov + Euler\n 2) WENO3 + SSP-RK3\n\n");
 	scanf("%d", &kern);
+	*/
 	
 	float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well, depite below machine precision for float, so results may be wrong even with convergence!!!
 	
@@ -424,7 +501,7 @@ int main(int argc, char *argv[]){
 	
 	// WENO5 option
 	
-	if (kern == 2){
+	//if (kern == 2){
 		
     	p2 = new float[N](); // sound pressure
     	u2 = new float[N](); // x component of particle velocity 
@@ -460,7 +537,7 @@ int main(int argc, char *argv[]){
 		dm += N*(sizeof(uint8_t) + sizeof(int)); // oid and bmap
 		
 		cudaDeviceSynchronize();
-	}
+	//}
 	
 	// ----------------------- Parse sources and receivers from argv[3] and argv[4] --------------------
     
@@ -472,9 +549,9 @@ int main(int argc, char *argv[]){
     
     //float src_y; // for raised cosine
     
-    file.open(argv[3]);
+    file.open(src_path);
 	if (!file.is_open()){
-    	std::cerr << "[!] Failed to open: " << argv[3] << "\n";
+    	std::cerr << "[!] Failed to open sources: " << src_path << "\n";
     	return -1;
 	}
 	while (std::getline(file, line)){
@@ -545,9 +622,9 @@ int main(int argc, char *argv[]){
     
     std::vector<int> i_recV, j_recV, k_recV; // vectors for multiple receivers
     
-    file.open(argv[4]);
+    file.open(rec_path);
 	if (!file.is_open()){
-    	std::cerr << "[!] Failed to open: " << argv[4] << "\n";
+    	std::cerr << "[!] Failed to open receivers: " << rec_path << "\n";
     	return -1;
 	}
 	while (std::getline(file, line)) {
@@ -576,7 +653,7 @@ int main(int argc, char *argv[]){
 	
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
-	int opt; // opt param for some user inputs
+	//int opt; // opt param for some user inputs
 	
 	
 	
@@ -591,12 +668,12 @@ int main(int argc, char *argv[]){
 	cudaDeviceSynchronize();
 	cudaMemcpy(S, d_S, N*sizeof(float), cudaMemcpyDeviceToHost);
 	cudaMemcpy(oid, d_oid, N*sizeof(uint8_t), cudaMemcpyDeviceToHost);
-	FILE *file_S = fopen("output/S.bin", "wb");
+	FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
 	if (file_S) {
     	fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
     	fclose(file_S);
 	}
-	FILE *file_oid = fopen("output/oid.bin", "wb");
+	FILE *file_oid = fopen(out_file("oid.bin").c_str(), "wb");
 	if (file_oid){
     	fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
     	fclose(file_oid);
@@ -638,7 +715,7 @@ int main(int argc, char *argv[]){
 	
 	// --------------------------------- Memory assessment ---------------------------------
 	
-	err = cudaGetLastError();
+	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		printf("[!] CUDA error: %s\n", cudaGetErrorString(err));
 	}
@@ -657,16 +734,18 @@ int main(int argc, char *argv[]){
 	
 	// Can handle much more memory if save animation in chuncks and assemble together:
 	// e.g., the last sound pressure field is the initial field for the next instant in time.
+	/*
 	printf("\n[OK] Memory to animate is %f GB\nProceed?\n\n 1) Yes\n 2) No\n\n", anim_s/(1000000000));
 	scanf("%d", &opt);
 	if (opt != 1) return -1;
-	
+	*/
+	/*
 	int lim_ID = 0; // limiter_ID
 	if (kern != 2){
 		printf("\nType a limiter option then press ENTER:\n\n 0) no slope\n 1) central\n 2) minmod\n 3) superbee\n 4) MC\n 5) van Leer\n 6) van Albada\n\n");
 		scanf("%d", &lim_ID);
 	}
-	
+	*/
 	// ---------------------------------- animation arrays ---------------------------------
 	
 	//int i0 = Nx / 2;
@@ -705,25 +784,25 @@ int main(int argc, char *argv[]){
 	//float E0 = 0.5 * p_time[0] * p_time[0] / (rho * c*c); // initial energy for delta pulse
 	
 	// -------------------------------------------------------------------------------------
-	
+	/*
 	printf("\n[OK] Will now start %d iterations. Proceed?\n\n1) Yes\n2) No\n\n", Nt);
 	scanf("%d", &opt);
 	if (opt != 1) return -1;
-	
+	*/
 	// open BIN file for writing pressure fields
-	FILE *file_pX = fopen("output/pressureX.bin", "ab");
+	FILE *file_pX = fopen(out_file("pressureX.bin").c_str(), "ab");
 	if (file_pX == NULL) {
-    	printf("[!] Error opening output/pressureX.bin file!\n");
+    	printf("[!] Error opening pressureX.bin file!\n");
     	exit(1);
 	}
-	FILE *file_pY = fopen("output/pressureY.bin", "ab");
+	FILE *file_pY = fopen(out_file("pressureY.bin").c_str(), "ab");
 	if (file_pY == NULL) {
-    	printf("[!] Error opening output/pressureY.bin file!\n");
+    	printf("[!] Error opening pressureY.bin file!\n");
     	exit(1);
 	}
-	FILE *file_pZ = fopen("output/pressureZ.bin", "ab");
+	FILE *file_pZ = fopen(out_file("pressureZ.bin").c_str(), "ab");
 	if (file_pZ == NULL) {
-    	printf("[!] Error opening output/pressureZ.bin file!\n");
+    	printf("[!] Error opening pressureZ.bin file!\n");
     	exit(1);
 	}
 	
@@ -740,7 +819,7 @@ int main(int argc, char *argv[]){
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
 	for (int ct = 0; ct < i_recV.size(); ct++) {
-    	std::string str = "output/IR" + std::to_string(ct) + ".bin";
+    	std::string str = out_file("IR" + std::to_string(ct) + ".bin");
     	files_rec[ct].open(str, std::ios::app | std::ios::binary);
 	}
 	
@@ -760,7 +839,8 @@ int main(int argc, char *argv[]){
 	tic = clock();
 
 	// Godunov + Euler
-	if (kern == 1){
+	
+	//if (kern == 1){
 		/*
 		while(n < Nt){
 		
@@ -817,9 +897,9 @@ int main(int argc, char *argv[]){
     cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1); cudaFree(d_w1);
     cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2); cudaFree(d_w2);
     */
-    }
+   // }
     // WENO5 + SSP-RK3
-    else{
+    //else{
 		while(n < Nt){
 			/*
 			// counter pressure for directive source
@@ -978,7 +1058,7 @@ int main(int argc, char *argv[]){
     	cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2); cudaFree(d_w2);
     	cudaFree(c_rl); cudaFree(dd);
     	
-    }
+    //}
     
     fflush(file_pX); fflush(file_pY); fflush(file_pZ);
 	//fflush(f_rec);
@@ -996,9 +1076,9 @@ int main(int argc, char *argv[]){
     printf("[OK] Wrote to file for single receiver\n\n");
     
     FILE *header; // file for data output
-	header = fopen("output/header.txt", "w");
+	header = fopen(out_file("header.txt").c_str(), "w");
 	if (header != NULL){
-    	fprintf(header, "%d %d %d %d %f %f %f %d %d %f %s %f %d\n", Nx, Ny, Nz, Nt, Lx, Ly, Lz, pbin_size, anim_step, dt, argv[1], h, (int)(tol/h));
+    	fprintf(header, "%d %d %d %d %f %f %f %d %d %f %s %f %d\n", Nx, Ny, Nz, Nt, Lx, Ly, Lz, pbin_size, anim_step, dt, scene_str.c_str(), h, (int)(tol/h));
     	fclose(header);
     }
     
