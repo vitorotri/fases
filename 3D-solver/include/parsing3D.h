@@ -24,6 +24,7 @@ Scope:
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #ifdef __CUDACC__
   #include <cuda_runtime.h>
@@ -127,10 +128,47 @@ inline static bool load_obj_mesh3d(const std::string& path, Mesh3D& mesh, std::s
     mesh.tris.clear();
     mesh.group_names.clear();
 
-    // Default group
-    //mesh.group_names.push_back("default");
-    //int current_group = 0;
+    // OBJ exporters often emit both:
+    //     o chair1
+    //     g chair1
+    // for the same object. The old parser created one layer for every o/g line,
+    // so every object appeared twice. Do NOT create a group at o/g time. Keep a
+    // pending resolved name, create the actual layer only when the first face is
+    // read, and reuse an existing layer id if the same name appears again.
+    std::unordered_map<std::string, int> group_id_by_name;
     int current_group = -1;
+    std::string current_group_name = "unnamed";
+    bool have_current_group_name = false;
+
+    auto resolve_group_name = [](const std::string& obj_line) -> std::string {
+        std::istringstream ss(obj_line);
+        std::string tag;
+        ss >> tag;
+
+        std::vector<std::string> parts;
+        std::string tok;
+        while(ss >> tok) parts.push_back(tok);
+
+        // Match the GUI parser:
+        //   "g Mesh1 ceiling Model" -> "ceiling"
+        //   "o chair1" / "g chair1" -> "chair1"
+        if(parts.size() >= 2) return parts[1];
+        if(parts.size() == 1) return parts[0];
+        return std::string("unnamed");
+    };
+
+    auto ensure_current_group = [&]() -> int {
+        const std::string name = have_current_group_name ? current_group_name : std::string("unnamed");
+        auto it = group_id_by_name.find(name);
+        if(it != group_id_by_name.end()) {
+            current_group = it->second;
+            return current_group;
+        }
+        current_group = (int)mesh.group_names.size();
+        mesh.group_names.push_back(name);
+        group_id_by_name[name] = current_group;
+        return current_group;
+    };
 
     std::string line;
     while(std::getline(in, line)){
@@ -144,23 +182,13 @@ inline static bool load_obj_mesh3d(const std::string& path, Mesh3D& mesh, std::s
             if(!ss.fail()) mesh.vertices.push_back(v3(x,y,z));
         }
         else if(starts_with(line, "o ") || starts_with(line, "g ")){
-    		std::istringstream ss(line);
-		
-    		std::string tag, t1, t2;
-    		ss >> tag >> t1 >> t2;   // read up to 2 tokens after tag
-		
-    		std::string name;
-    		if(!t2.empty()) {
-        		name = t2;           // take 2nd token (ceiling/walls/floor)
-    		} else if(!t1.empty()) {
-        		name = t1;           // fallback: only one token provided
-    		} else {
-        		name = "group_" + std::to_string(mesh.group_names.size());
-    		}
-		
-    		current_group = (int)mesh.group_names.size();
-    		mesh.group_names.push_back(name);
-		}
+            const std::string new_name = resolve_group_name(line);
+            if(!have_current_group_name || new_name != current_group_name){
+                current_group_name = new_name;
+                have_current_group_name = true;
+                current_group = -1; // lazy-create/reuse on the next face
+            }
+        }
         else if(starts_with(line, "f ")){
             std::istringstream ss(line);
             char fch; ss >> fch;
@@ -177,11 +205,9 @@ inline static bool load_obj_mesh3d(const std::string& path, Mesh3D& mesh, std::s
             }
             if(face.size() < 3) continue;
 
-			if(current_group < 0){
-    			// Faces without any preceding 'g'/'o' go into an auto group (rare but legal OBJ).
-    			mesh.group_names.push_back("unnamed");
-    			current_group = (int)mesh.group_names.size() - 1;
-			}
+            if(current_group < 0){
+                current_group = ensure_current_group();
+            }
 
             // Triangulate fan (KEEP THIS)
             const int v0 = face[0];
