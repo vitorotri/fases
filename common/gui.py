@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox,
     QListWidget, QListWidgetItem, QTabWidget, QTabBar, QTextEdit,
-    QFileDialog, QMessageBox, QDoubleSpinBox, QAbstractSpinBox,
+    QFileDialog, QMessageBox, QDoubleSpinBox, QSpinBox, QAbstractSpinBox,
     QGroupBox, QScrollArea, QAbstractItemView, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar, QSlider, QMenu
@@ -1598,6 +1598,31 @@ class GLViewer(QOpenGLWidget):
 # ─────────────────────────────────────────────────────────────
 #  Material editor
 # ─────────────────────────────────────────────────────────────
+class _FitAllThread(QThread):
+    """Runs vectFIT on all materials in the background. The script pops its
+    summary figure; this thread simply waits for the process (i.e. until the
+    user closes the plot window) and reports the result."""
+    done = Signal(int, str)
+
+    def __init__(self, cmd, cwd):
+        super().__init__(); self._cmd = cmd; self._cwd = cwd
+
+    def run(self):
+        try:
+            proc = subprocess.run(self._cmd, capture_output=True, text=True,
+                                  cwd=self._cwd)
+            err = (proc.stderr or proc.stdout or "").strip()
+            if proc.returncode != 0 and err:
+                print(err)               # full traceback on the terminal
+            lines = err.splitlines()
+            # prefer the line that actually names the error
+            tail = next((l for l in reversed(lines) if "error" in l.lower()),
+                        lines[-1] if lines else "")
+            self.done.emit(proc.returncode, tail)
+        except Exception as ex:
+            self.done.emit(-1, str(ex))
+
+
 class MaterialPanel(QWidget):
     """
     Single panel for ALL material layers:
@@ -1685,6 +1710,9 @@ class MaterialPanel(QWidget):
         self._fit_btn = QPushButton("⚙  Run vectFIT")
         self._fit_btn.clicked.connect(self.run_fit_selected)
         row.addWidget(self._fit_btn)
+        self._fit_all_btn = QPushButton("⚙  Fit all")
+        self._fit_all_btn.clicked.connect(self.run_fit_all)
+        row.addWidget(self._fit_all_btn)
         lay.addLayout(row)
 
         self._status = QLabel("")
@@ -1876,30 +1904,97 @@ class MaterialPanel(QWidget):
             self._status.setText("Open a project folder first."); return
         self.save_selected()
         name = self._tbl.item(r, 0).text()
-        common = os.path.join(os.path.dirname(self._proj_root), "common")
-        script = None
-        for sn in ("vectFIT.py", "fminconFIT.py"):
-            cand = os.path.join(common, sn)
-            if os.path.isfile(cand):
-                script = cand; break
+        # The fitting scripts live NEXT TO gui.py (both are in common/), so we
+        # locate them relative to THIS file — never relative to the project,
+        # which can live anywhere on disk.
+        script = self._find_fit_script()
         if script is None:
-            self._status.setText("vectFIT.py / fminconFIT.py not found in common/"); return
+            self._status.setText("vectFIT.py / fminconFIT.py not found next to gui.py"); return
         os.makedirs(self._fit_dir, exist_ok=True)
         mat = os.path.join(self._mat_dir, name + ".mat")
         out = os.path.join(self._fit_dir, name + ".fit")
-        cmd = [sys.executable, script, "--mat", mat, "--out", out]
+        # Explicit project paths; --no-plot because output is captured (the
+        # script's plt.show() would block the subprocess otherwise).
+        proj = self._proj_root
+        cmd = [sys.executable, script,
+               "--mat",    mat,
+               "--out",    out,
+               "--config", os.path.join(proj, "config", "config.txt"),
+               "--poles",  os.path.join(proj, "config", "poles.txt"),
+               "--no-plot"]
         self._status.setText(f"Running {os.path.basename(script)} on {name}…")
         QApplication.processEvents()
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, cwd=common)
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  cwd=proj, timeout=600)
             if proc.returncode == 0:
                 self._status.setText(f"Fit done → {name}.fit")
             else:
                 msg = (proc.stderr or proc.stdout or "").strip().splitlines()
                 tail = msg[-1] if msg else "unknown error"
                 self._status.setText(f"Fit failed (rc={proc.returncode}): {tail[:80]}")
+        except subprocess.TimeoutExpired:
+            self._status.setText("Fit timed out (600 s).")
         except Exception as ex:
             self._status.setText(f"Fit error: {ex}")
+
+    def _find_fit_script(self):
+        """The fitting scripts live NEXT TO gui.py (both in common/)."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        for sn in ("vectFIT.py", "fminconFIT.py"):
+            cand = os.path.join(here, sn)
+            if os.path.isfile(cand):
+                return cand
+        return None
+
+    def run_fit_all(self):
+        """Fit EVERY layer's material in one vectFIT run. The script shows a
+        single summary figure (grid of subplots, one per material), so this is
+        run in a background thread: the GUI stays responsive while the user
+        inspects and then closes the plot window."""
+        if not self._proj_root:
+            self._status.setText("Open a project folder first."); return
+        if self._tbl.rowCount() == 0:
+            self._status.setText("No materials to fit."); return
+        script = self._find_fit_script()
+        if script is None:
+            self._status.setText("vectFIT.py / fminconFIT.py not found next to gui.py"); return
+        # Compatibility probe: multi-material fitting needs the updated script.
+        # gui.py and vectFIT.py ship TOGETHER — if the copy next to gui.py is an
+        # older one, say so explicitly instead of failing with an argparse error.
+        try:
+            if "--fitdir" not in open(script, encoding="utf-8", errors="ignore").read():
+                self._status.setText(
+                    f"{os.path.basename(script)} is outdated (no --fitdir support) — "
+                    "replace it with the updated version."); return
+        except OSError:
+            pass
+        self.save_all()                      # ensure every .mat is on disk
+        os.makedirs(self._fit_dir, exist_ok=True)
+        mats = [os.path.join(self._mat_dir, self._tbl.item(r, 0).text() + ".mat")
+                for r in range(self._tbl.rowCount()) if self._tbl.item(r, 0)]
+        proj = self._proj_root
+        cmd = [sys.executable, script,
+               "--mat", *mats,
+               "--fitdir", self._fit_dir,
+               "--config", os.path.join(proj, "config", "config.txt"),
+               "--poles",  os.path.join(proj, "config", "poles.txt")]
+        # NOTE: no --no-plot — the summary grid is the point. The figure opens
+        # in its own window; the run finishes when the user closes it.
+        self._fit_all_btn.setEnabled(False)
+        self._fit_btn.setEnabled(False)
+        self._status.setText(f"Fitting {len(mats)} material(s)… close the plot window to finish.")
+        self._fit_thread = _FitAllThread(cmd, proj)
+        self._fit_thread.done.connect(self._on_fit_all_done)
+        self._fit_thread.start()
+
+    def _on_fit_all_done(self, rc, tail):
+        self._fit_all_btn.setEnabled(True)
+        self._fit_btn.setEnabled(True)
+        if rc == 0:
+            self._status.setText(f"Fit all done → {self._fit_dir}")
+        else:
+            self._status.setText(f"Fit all failed (rc={rc}): {tail[:160]}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2505,6 +2600,11 @@ class MainWindow(QMainWindow):
             sp = ds(val, mn, mx, dec, sfx); self._cfg[key] = sp
             lay.addRow(f"{lbl}:", sp)
 
+        # Number of poles for the ADE (line 6 of config.txt; vectFIT reads v[5])
+        self._npoles = QSpinBox(); self._npoles.setRange(1, 64)
+        self._npoles.setValue(8); self._npoles.setMinimumWidth(130)
+        lay.addRow("ADE poles:", self._npoles)
+
         lay.addRow(QLabel("PML faces  (check = active):"))
         grid = QGridLayout(); self._pml = {}
         for idx, (k, lbl) in enumerate([("U_PML","Up"),("D_PML","Down"),
@@ -2903,7 +3003,7 @@ class MainWindow(QMainWindow):
             f.write(f"{self._cfg['f_cutoff'].value():.4g}  # f_cutoff [Hz]\n")
             f.write(f"{self._cfg['T_C'].value():.4g}      # temperature [°C]\n")
             f.write(f"{self._cfg['CFL'].value():.6g}      # CFL\n")
-            f.write(f"0                               # reserved\n")
+            f.write(f"{self._npoles.value()}                               # number of poles for the ADE\n")
             for k in ["U_PML","D_PML","R_PML","L_PML","F_PML","B_PML"]:
                 f.write(f"{pml[k]:.1f}  # {k}\n")
 
@@ -2922,6 +3022,8 @@ class MainWindow(QMainWindow):
                     except ValueError: pass
         for i, k in enumerate(["h","t_max","f_cutoff","T_C","CFL"]):
             if i < len(vals): self._cfg[k].setValue(vals[i])
+        if len(vals) > 5:
+            self._npoles.setValue(int(vals[5]))   # number of poles for the ADE
         for j, k in enumerate(["U_PML","D_PML","R_PML","L_PML","F_PML","B_PML"]):
             idx = 6+j
             if idx < len(vals): self._pml[k].setChecked(vals[idx] != 0.0)
@@ -2968,11 +3070,13 @@ class MainWindow(QMainWindow):
         if not self._proj_root:
             self._cmd_preview.setText("(open a project folder first)"); return
         binary = self._bin_le.text() if hasattr(self,'_bin_le') else "build/phases3D"
+        # absolute binary paths are used as-is; only bare relative ones get ./
+        bin_disp = binary if os.path.isabs(binary) else f"./{binary}"
         scene = self._obj_path or "input/scene/scene.obj"
         if self._proj_root and scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
         self._cmd_preview.setText(
-            f"./{binary}  {scene}  config/config.txt  input/src/src.txt  input/rec/rec.txt")
+            f"{bin_disp}  {scene}  config/config.txt  input/src/src.txt  input/rec/rec.txt")
 
     def _run_solver(self):
         if not self._proj_root:
@@ -2986,7 +3090,10 @@ class MainWindow(QMainWindow):
         scene = self._obj_path
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
-        cmd = [f"./{self._bin_le.text()}", scene,
+        binary = self._bin_le.text()
+        # absolute binary paths are used as-is; only bare relative ones get ./
+        bin_cmd = binary if os.path.isabs(binary) else f"./{binary}"
+        cmd = [bin_cmd, scene,
                "config/config.txt","input/src/src.txt","input/rec/rec.txt"]
         self._log.clear()
         self._log.append(f"$ cd {self._proj_root}\n$ " + " ".join(cmd))
