@@ -13,8 +13,8 @@
 #include "functions3D.cuh"
 
 int main(int argc, char *argv[]){
-	if (argc < 5) {
-        printf("Usage: %s <scene> <config> <src> <rec>\n", argv[0]);
+	if (argc < 6) {
+        printf("Usage: %s <scene> <config> <src> <rec> <poles>\n", argv[0]);
         return 1;
     }
 
@@ -229,9 +229,9 @@ int main(int argc, char *argv[]){
     int K_m, L_m; // k_max and L_max from all the fits
     
     // read poles.txt file
-    file.open("config/poles.txt");
+    file.open(argv[5]);
     if (!file.is_open()) {
-        std::cerr << "[!] Cannot open config/poles.txt" << std::endl;
+        std::cerr << "[!] Cannot open poles.txt" << std::endl;
         return EXIT_FAILURE;
     }
     file >> K_m >> L_m;
