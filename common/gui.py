@@ -30,7 +30,7 @@ import subprocess
 
 import numpy as np
 
-from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF, QEvent
+from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF, QEvent, QSettings
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor, QKeySequence,
                               QPixmap, QIcon, QPen, QShortcut)
@@ -1715,6 +1715,18 @@ class MaterialPanel(QWidget):
         row.addWidget(self._fit_all_btn)
         lay.addLayout(row)
 
+        # ── hard/soft toggle for the SELECTED layer (kept off the table so the
+        #    column layout stays untouched). 9th value of the .mat: 0/1. ──
+        hs = QHBoxLayout()
+        hs_lbl = QLabel("Selected material:")
+        hs_lbl.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
+        hs.addWidget(hs_lbl)
+        self._soft_btn = QPushButton("Hard (R > 0)")
+        self._soft_btn.setCheckable(True)
+        self._soft_btn.toggled.connect(self._on_soft_toggled)
+        hs.addWidget(self._soft_btn, 1)
+        lay.addLayout(hs)
+
         self._status = QLabel("")
         self._status.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
         lay.addWidget(self._status)
@@ -1763,7 +1775,7 @@ class MaterialPanel(QWidget):
         for name in layer_names:
             if "boundary" in name.lower():
                 continue
-            vals = self._load_mat_values(name)
+            vals, soft = self._load_mat_values(name)
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
             name_item = QTableWidgetItem(name)
             name_item.setToolTip(name)   # full name on hover (cell may be elided)
@@ -1771,10 +1783,53 @@ class MaterialPanel(QWidget):
             self._tbl.setItem(r, 0, name_item)
             for c, v in enumerate(vals):
                 self._tbl.setItem(r, c+1, QTableWidgetItem(f"{v:.2f}"))
+            self._set_row_soft(r, soft)   # after the cells exist
         self._tbl.blockSignals(False)
         self._clear_plot()
 
+    # ── ALL.mat : central hard/soft registry ─────────────────
+    # One file, one line per material: "<name>  <flag>" (0=hard, 1=soft).
+    # The hard/soft flag is kept OUT of the per-material .mat files (which stay
+    # 8 alpha values only, so every alpha-only reader keeps working) and lives
+    # here instead, read by both the GUI and vectFIT.
+    def _allmat_path(self):
+        return os.path.join(self._mat_dir, "ALL.mat") if self._mat_dir else None
+
+    def _read_all_soft(self):
+        """Return {name: bool soft} parsed from ALL.mat (missing -> empty)."""
+        d = {}
+        p = self._allmat_path()
+        if p and os.path.isfile(p):
+            try:
+                with open(p) as f:
+                    for line in f:
+                        line = line.split("#")[0].strip()
+                        if not line:
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            d[parts[0]] = (parts[1] != "0")
+            except Exception:
+                pass
+        return d
+
+    def _write_all_soft(self):
+        """Rewrite ALL.mat from the current table (one line per layer row)."""
+        p = self._allmat_path()
+        if not p:
+            return
+        os.makedirs(self._mat_dir, exist_ok=True)
+        with open(p, "w") as f:
+            f.write("# material hard/soft registry  —  <name>  <flag>  (0=hard, 1=soft)\n")
+            for r in range(self._tbl.rowCount()):
+                item = self._tbl.item(r, 0)
+                if item is None:
+                    continue
+                f.write(f"{item.text()}  {1 if self._row_soft(r) else 0}\n")
+
     def _load_mat_values(self, name):
+        """Return (alphas[8], soft). Alphas come from the per-material .mat
+        (8 values, no trailing flag); soft comes from ALL.mat."""
         vals = [0.10] * len(OCTAVE_BANDS)
         if self._mat_dir:
             p = os.path.join(self._mat_dir, name + ".mat")
@@ -1789,7 +1844,8 @@ class MaterialPanel(QWidget):
                         vals[i] = got[i]
                 except Exception:
                     pass
-        return vals
+        soft = self._read_all_soft().get(name, False)
+        return vals, soft
 
     # ── selection → plot ──
     def _current_row(self):
@@ -1805,10 +1861,30 @@ class MaterialPanel(QWidget):
         return name
 
     def _on_row_selected(self):
-        # selection changed: replot AND notify the viewport
+        # selection changed: replot, sync the hard/soft toggle, notify viewport
         name = self._replot_current()
+        r = self._current_row()
+        if r >= 0:
+            self._soft_btn.blockSignals(True)
+            soft = self._row_soft(r)
+            self._soft_btn.setChecked(soft)
+            self._soft_btn.setText("Soft (R < 0)" if soft else "Hard (R > 0)")
+            self._soft_btn.blockSignals(False)
         if name:
             self.rowSelected.emit(name)
+
+    def _on_soft_toggled(self, checked):
+        r = self._current_row()
+        if r < 0 or self._tbl.item(r, 0) is None:
+            self._soft_btn.blockSignals(True)
+            self._soft_btn.setChecked(False)
+            self._soft_btn.blockSignals(False)
+            self._status.setText("Select a layer row first."); return
+        self._set_row_soft(r, checked)
+        self._soft_btn.setText("Soft (R < 0)" if checked else "Hard (R > 0)")
+        name = self._tbl.item(r, 0).text()
+        self._status.setText(f"{name}: {'soft' if checked else 'hard'} "
+                             "(remember to Save all .mat)")
 
     def _on_edit(self):
         # a value changed: only replot the curve, no reselection signal
@@ -1821,6 +1897,25 @@ class MaterialPanel(QWidget):
             try: vals.append(float(item.text()) if item else 0.0)
             except ValueError: vals.append(0.0)
         return vals
+
+    # ── hard / soft flag (stored on the layer-name item) ──
+    def _row_soft(self, r):
+        item = self._tbl.item(r, 0)
+        return bool(item.data(Qt.ItemDataRole.UserRole)) if item else False
+
+    def _set_row_soft(self, r, soft):
+        """Set the flag and a subtle visual cue: soft layer names show in the
+        'warn' accent colour with a tooltip suffix; hard names stay default."""
+        item = self._tbl.item(r, 0)
+        if item is None:
+            return
+        item.setData(Qt.ItemDataRole.UserRole, 1 if soft else 0)
+        if soft:
+            item.setForeground(QColor(PAL["warn"]))
+            item.setToolTip(f"{item.text()} — soft (R < 0)")
+        else:
+            item.setForeground(QColor(PAL["text"]))
+            item.setToolTip(item.text())
 
     # ── Ctrl+V paste (Excel / spaces / tabs) ──
     def keyPressEvent(self, e):
@@ -1872,6 +1967,7 @@ class MaterialPanel(QWidget):
         with open(p, "w") as f:
             f.write(f"# alpha per octave band: {OCTAVE_BANDS}\n")
             f.write("  ".join(f"{v:.4f}" for v in vals) + "\n")
+        self._write_all_soft()      # hard/soft registry lives in ALL.mat
         self._status.setText(f"Saved → {name}.mat")
 
     def save_all(self):
@@ -1894,6 +1990,7 @@ class MaterialPanel(QWidget):
                 f.write(f"# alpha per octave band: {OCTAVE_BANDS}\n")
                 f.write("  ".join(f"{v:.4f}" for v in vals) + "\n")
             n += 1
+        self._write_all_soft()      # one central hard/soft registry
         self._status.setText(f"Saved {n} material file(s) → {self._mat_dir}")
 
     def run_fit_selected(self):
@@ -1939,9 +2036,11 @@ class MaterialPanel(QWidget):
             self._status.setText(f"Fit error: {ex}")
 
     def _find_fit_script(self):
-        """The fitting scripts live NEXT TO gui.py (both in common/)."""
+        """The fitting scripts live NEXT TO gui.py (both in common/).
+        fminconFIT.py is preferred when present (constrained, stability-bounded
+        fit); vectFIT.py is the fallback."""
         here = os.path.dirname(os.path.abspath(__file__))
-        for sn in ("vectFIT.py", "fminconFIT.py"):
+        for sn in ("fminconFIT.py", "vectFIT.py"):
             cand = os.path.join(here, sn)
             if os.path.isfile(cand):
                 return cand
@@ -2383,7 +2482,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_src_tab(),     "🔊  Sources")
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
         self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
-        self._tabs.addTab(self._build_run_tab(),     "▶  Run")
+        self._tabs.addTab(self._build_run_tab(),     "▶  Play")
 
         # status bar
         self._sb = QStatusBar()
@@ -2668,7 +2767,13 @@ class MainWindow(QMainWindow):
 
         bin_row = QHBoxLayout()
         bin_row.addWidget(QLabel("Binary:"))
-        self._bin_le = QLineEdit("build/phases3D")
+        # The executable is a SHARED build artifact (e.g. .../3D-solver/build/),
+        # not part of any project. Remember the last browsed path across
+        # projects and sessions; fall back to the legacy relative default.
+        _last_bin = QSettings("phases", "gui").value("last_binary", "")
+        if not (_last_bin and os.path.isfile(_last_bin)):
+            _last_bin = "/home/vitorotri/Documents/Github/phases/3D-solver/build"
+        self._bin_le = QLineEdit(_last_bin)
         self._bin_le.textChanged.connect(self._update_cmd_preview)
         bin_row.addWidget(self._bin_le, 1)
         bb = QPushButton("Browse"); bb.clicked.connect(self._browse_binary)
@@ -2735,9 +2840,12 @@ class MainWindow(QMainWindow):
         existing = self._read_manifest(path) if os.path.isfile(path) else {}
         created  = existing.get("created") or f"{datetime.now():%Y-%m-%d %H:%M}"
         scene    = os.path.abspath(self._obj_path) if self._obj_path else ""
+        # Binary is stored VERBATIM. It is a shared build artifact living
+        # outside the project (e.g. .../3D-solver/build/phases3D): absolute
+        # paths (from Browse) stay absolute; a relative path means "relative to
+        # the project root at run time" (the solver runs with cwd = root) and
+        # must NOT be absolutized against the project, where it does not exist.
         binary   = self._bin_le.text() if hasattr(self, "_bin_le") else ""
-        if binary and not os.path.isabs(binary):
-            binary = os.path.abspath(os.path.join(root, binary))
         layers   = " ".join(g["name"] for g in self._groups
                             if "boundary" not in g["name"].lower())
         dmax     = getattr(self._gl, "_domain_max", None)
@@ -2754,6 +2862,7 @@ class MainWindow(QMainWindow):
             f.write(f"config    = {os.path.join(root, 'config', 'config.txt')}\n")
             f.write(f"sources   = {os.path.join(root, 'input', 'src', 'src.txt')}\n")
             f.write(f"receivers = {os.path.join(root, 'input', 'rec', 'rec.txt')}\n")
+            f.write(f"poles     = {os.path.join(root, 'config', 'poles.txt')}\n")
             f.write(f"matdir    = {os.path.join(root, 'input', 'mat')}\n")
             f.write(f"layers    = {layers}\n")
             if dmax is not None:
@@ -2823,6 +2932,10 @@ class MainWindow(QMainWindow):
         # binary
         if man.get("binary") and hasattr(self, "_bin_le"):
             self._bin_le.setText(man["binary"])
+        elif hasattr(self, "_bin_le"):
+            lb = QSettings("phases", "gui").value("last_binary", "")
+            if lb and os.path.isfile(lb):
+                self._bin_le.setText(lb)
 
         # config / sources / receivers (manifest path if given, else canonical)
         cfg = resolve(man.get("config", "config/config.txt"))
@@ -3061,6 +3174,7 @@ class MainWindow(QMainWindow):
     def _browse_binary(self):
         p, _ = QFileDialog.getOpenFileName(self, "Locate solver binary")
         if p:
+            QSettings("phases", "gui").setValue("last_binary", p)  # remember
             if self._proj_root and p.startswith(self._proj_root):
                 p = os.path.relpath(p, self._proj_root)
             self._bin_le.setText(p)
@@ -3076,7 +3190,7 @@ class MainWindow(QMainWindow):
         if self._proj_root and scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
         self._cmd_preview.setText(
-            f"{bin_disp}  {scene}  config/config.txt  input/src/src.txt  input/rec/rec.txt")
+            f"{bin_disp}  {scene}  config/config.txt  input/src/src.txt  input/rec/rec.txt  config/poles.txt")
 
     def _run_solver(self):
         if not self._proj_root:
@@ -3090,11 +3204,18 @@ class MainWindow(QMainWindow):
         scene = self._obj_path
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
+        # The solver requires poles.txt (argv[5], written by vectFIT). Catch a
+        # missing one here with a clear message instead of a solver error.
+        if not os.path.isfile(os.path.join(self._proj_root, "config", "poles.txt")):
+            QMessageBox.warning(self, "No poles.txt",
+                "config/poles.txt not found — fit the materials first "
+                "(Scene tab → Fit all)."); return
         binary = self._bin_le.text()
         # absolute binary paths are used as-is; only bare relative ones get ./
         bin_cmd = binary if os.path.isabs(binary) else f"./{binary}"
         cmd = [bin_cmd, scene,
-               "config/config.txt","input/src/src.txt","input/rec/rec.txt"]
+               "config/config.txt","input/src/src.txt","input/rec/rec.txt",
+               "config/poles.txt"]
         self._log.clear()
         self._log.append(f"$ cd {self._proj_root}\n$ " + " ".join(cmd))
         self._log.append("-"*60)
