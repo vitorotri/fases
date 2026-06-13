@@ -1599,26 +1599,33 @@ class GLViewer(QOpenGLWidget):
 #  Material editor
 # ─────────────────────────────────────────────────────────────
 class _FitAllThread(QThread):
-    """Runs vectFIT on all materials in the background. The script pops its
-    summary figure; this thread simply waits for the process (i.e. until the
-    user closes the plot window) and reports the result."""
+    """Runs the fitter on all materials in the background. The script pops its
+    summary figure; this thread streams the process output line-by-line (so the
+    Run-tab Output log fills live, before plt.show() blocks) and reports the
+    result when the user closes the plot window."""
     done = Signal(int, str)
+    line = Signal(str)          # one line of stdout/stderr as it is produced
 
     def __init__(self, cmd, cwd):
         super().__init__(); self._cmd = cmd; self._cwd = cwd
 
     def run(self):
         try:
-            proc = subprocess.run(self._cmd, capture_output=True, text=True,
-                                  cwd=self._cwd)
-            err = (proc.stderr or proc.stdout or "").strip()
-            if proc.returncode != 0 and err:
-                print(err)               # full traceback on the terminal
-            lines = err.splitlines()
-            # prefer the line that actually names the error
+            proc = subprocess.Popen(
+                self._cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, cwd=self._cwd, bufsize=1)
+            lines = []
+            for raw in proc.stdout:
+                ln = raw.rstrip("\n")
+                lines.append(ln)
+                self.line.emit(ln)
+            proc.wait()
+            rc = proc.returncode
+            if rc != 0:
+                print("\n".join(lines))   # full traceback on the terminal too
             tail = next((l for l in reversed(lines) if "error" in l.lower()),
                         lines[-1] if lines else "")
-            self.done.emit(proc.returncode, tail)
+            self.done.emit(rc, tail)
         except Exception as ex:
             self.done.emit(-1, str(ex))
 
@@ -1633,6 +1640,8 @@ class MaterialPanel(QWidget):
       • Save .mat (per selected row) and Run vectFIT
     """
     rowSelected = Signal(str)   # emitted with layer name when a row is selected
+    fitBegan = Signal(str)      # a fit run started; payload = command header line
+    fitLog   = Signal(str)      # one line of fitter output -> Run tab Output log
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2020,25 +2029,29 @@ class MaterialPanel(QWidget):
                "--poles",  os.path.join(proj, "config", "poles.txt"),
                "--no-plot"]
         self._status.setText(f"Running {os.path.basename(script)} on {name}…")
+        self.fitBegan.emit("$ " + " ".join(cmd))
         QApplication.processEvents()
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   cwd=proj, timeout=600)
+            out = (proc.stdout or "") + (proc.stderr or "")
+            for ln in out.splitlines():
+                self.fitLog.emit(ln)
             if proc.returncode == 0:
                 self._status.setText(f"Fit done → {name}.fit")
             else:
-                msg = (proc.stderr or proc.stdout or "").strip().splitlines()
+                msg = out.strip().splitlines()
                 tail = msg[-1] if msg else "unknown error"
                 self._status.setText(f"Fit failed (rc={proc.returncode}): {tail[:80]}")
         except subprocess.TimeoutExpired:
+            self.fitLog.emit("[!] Fit timed out (600 s).")
             self._status.setText("Fit timed out (600 s).")
         except Exception as ex:
+            self.fitLog.emit(f"[!] Fit error: {ex}")
             self._status.setText(f"Fit error: {ex}")
 
     def _find_fit_script(self):
-        """The fitting scripts live NEXT TO gui.py (both in common/).
-        fminconFIT.py is preferred when present (constrained, stability-bounded
-        fit); vectFIT.py is the fallback."""
+        """The fitting scripts live NEXT TO gui.py (both in common/)."""
         here = os.path.dirname(os.path.abspath(__file__))
         for sn in ("fminconFIT.py", "vectFIT.py"):
             cand = os.path.join(here, sn)
@@ -2083,7 +2096,9 @@ class MaterialPanel(QWidget):
         self._fit_all_btn.setEnabled(False)
         self._fit_btn.setEnabled(False)
         self._status.setText(f"Fitting {len(mats)} material(s)… close the plot window to finish.")
+        self.fitBegan.emit("$ " + " ".join(cmd))
         self._fit_thread = _FitAllThread(cmd, proj)
+        self._fit_thread.line.connect(self.fitLog.emit)
         self._fit_thread.done.connect(self._on_fit_all_done)
         self._fit_thread.start()
 
@@ -2674,6 +2689,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(QLabel("Material — α per octave band [Hz] (click a row to plot; Ctrl+V to paste):"))
         self._mat_panel = MaterialPanel()
         self._mat_panel.rowSelected.connect(self._on_material_row_selected)
+        self._mat_panel.fitBegan.connect(self._begin_fit_log)
+        self._mat_panel.fitLog.connect(self._append_fit_log)
         lay.addWidget(self._mat_panel, 1)
         return w
 
@@ -2796,10 +2813,30 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(QLabel("Output:"))
         self._log = QTextEdit(); self._log.setReadOnly(True)
-        self._log.setFont(QFont("Monospace", 10)); lay.addWidget(self._log, 1)
+        self._log.setFont(QFont("Monospace", 10))
+        # darker than the rest of the UI so the console reads as a terminal
+        self._log.setStyleSheet(
+            f"background:#0f1115;color:{PAL['text']};"
+            f"border:1px solid {PAL['border']};")
+        lay.addWidget(self._log, 1)
 
         self._solver_thread = None
         return w
+
+    # ── fit output -> Run-tab Output log ─────────────────────
+    def _begin_fit_log(self, header):
+        """A fit run started: clear the Output log, show the command, and bring
+        the Output (Play) tab forward so the fitter's progress is visible."""
+        if hasattr(self, "_log"):
+            self._log.clear()
+            self._log.append(header)
+            self._log.append("-" * 60)
+        if hasattr(self, "_tabs"):
+            self._tabs.setCurrentIndex(4)   # ▶ Play tab holds the Output log
+
+    def _append_fit_log(self, line):
+        if hasattr(self, "_log"):
+            self._log.append(line)
 
     # ── slots ────────────────────────────────────────────────
     # ── project: manifest helpers ────────────────────────────
