@@ -2053,7 +2053,7 @@ class MaterialPanel(QWidget):
     def _find_fit_script(self):
         """The fitting scripts live NEXT TO gui.py (both in common/)."""
         here = os.path.dirname(os.path.abspath(__file__))
-        for sn in ("fminconFIT.py", "vectFIT.py"):
+        for sn in ("vectFIT.py", "fminconFIT.py"):
             cand = os.path.join(here, sn)
             if os.path.isfile(cand):
                 return cand
