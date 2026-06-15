@@ -169,10 +169,32 @@ def R_constant_from_octaves(freq, R_oct, mag_ceil=1-1e-12):
     R = Rinf * np.ones_like(freq, dtype=complex)  # phase = 0
     return R, Rinf
 
+# alpha here are the coefficients of acoustic absorption
 def R_from_alpha(alpha):
-	#u_R = np.sqrt(1 - alpha) # unsigned R
-	#return np.where(u_R > 0.3, u_R, -u_R)
 	return np.sqrt(1 - alpha)
+
+def read_soft_flag(mat_path):
+    """Hard/soft flag lives in ALL.mat (the central registry the GUI writes),
+    NOT as a trailing column in the per-material .mat (those stay 8 alpha values
+    only, so every alpha-only reader keeps working). ALL.mat sits next to the
+    .mat files; one line per material: '<name>  <flag>'  (0 = hard / R>0,
+    1 = soft / pressure-release R<0). Missing file or entry -> hard."""
+    name = os.path.splitext(os.path.basename(mat_path))[0]
+    allmat = os.path.join(os.path.dirname(os.path.abspath(mat_path)), "ALL.mat")
+    if not os.path.isfile(allmat):
+        return False
+    try:
+        with open(allmat) as f:
+            for line in f:
+                line = line.split("#")[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == name:
+                    return parts[1] != "0"
+    except Exception:
+        pass
+    return False
 
 # --------------------
 # Block 1: User input (CLI arguments — non-interactive, project-aware)
@@ -221,16 +243,50 @@ if not mat_files:
 if _args.out and len(mat_files) > 1:
     sys.exit("\n[!] --out is only valid with a single material; use --fitdir for several.\n")
 
-# Defaults (legacy/manual use) resolve against the CURRENT WORKING DIRECTORY,
-# i.e. run from a project root and config/, input/fit/ are found like the
-# solver itself would find them.
-config_path = os.path.abspath(_args.config) if _args.config else os.path.abspath(os.path.join("config", "config.txt"))
-Npoles_path = os.path.abspath(_args.poles)  if _args.poles  else os.path.abspath(os.path.join("config", "poles.txt"))
-fit_dir     = os.path.abspath(_args.fitdir) if _args.fitdir else os.path.abspath(os.path.join("input", "fit"))
-
 for m in mat_files:
     if not os.path.isfile(m):
         sys.exit(f"\n[!] .mat file not found: {m}\n")
+
+# Defaults for --config / --poles / --fitdir, in priority order:
+#   1. explicit arguments (always win);
+#   2. the PROJECT the .mat belongs to — found by walking up from the .mat
+#      file's directory to the first dir containing project.txt, or via the
+#      <root>/input/mat/ layout. This makes a bare
+#          python3 vectFIT.py <proj>/input/mat/walls.mat
+#      do the right thing from ANY working directory. (cwd-relative defaults
+#      were a footgun: poles.txt silently landed wherever you happened to
+#      stand, leaving the project's copy stale -> solver 'incompatible poles');
+#   3. the directory of an explicit --config (if it is <root>/config/...);
+#   4. the current working directory (legacy: run from a project root).
+def _project_root_of(mat_path):
+    d = os.path.dirname(os.path.abspath(mat_path))
+    probe = d
+    for _ in range(8):                                    # walk up
+        if os.path.isfile(os.path.join(probe, "project.txt")):
+            return probe
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    # fall back to the .../input/mat layout
+    if os.path.basename(d) == "mat" and os.path.basename(os.path.dirname(d)) == "input":
+        return os.path.dirname(os.path.dirname(d))
+    return None
+
+project_root = _project_root_of(mat_files[0])
+if project_root is None and _args.config:
+    cfg_dir = os.path.dirname(os.path.abspath(_args.config))
+    if os.path.basename(cfg_dir) == "config":
+        project_root = os.path.dirname(cfg_dir)
+if project_root is None:
+    project_root = os.getcwd()
+elif not (_args.config and _args.poles and _args.fitdir):
+    print(f"[paths] project root: {project_root}")
+
+config_path = os.path.abspath(_args.config) if _args.config else os.path.abspath(os.path.join(project_root, "config", "config.txt"))
+Npoles_path = os.path.abspath(_args.poles)  if _args.poles  else os.path.abspath(os.path.join(project_root, "config", "poles.txt"))
+fit_dir     = os.path.abspath(_args.fitdir) if _args.fitdir else os.path.abspath(os.path.join(project_root, "input", "fit"))
+
 if not os.path.isfile(config_path):
     sys.exit(f"\n[!] config.txt not found: {config_path}\n")
 
@@ -282,13 +338,21 @@ def fit_material(read_file, coefs_path):
     name = os.path.splitext(os.path.basename(read_file))[0]
     savename = name
 
-    alpha_oct = np.loadtxt(read_file)
+    data = np.atleast_1d(np.loadtxt(read_file)).ravel()
+    alpha_oct = data[:8]
     Rmag_oct = R_from_alpha(alpha_oct)
+    # Hard/soft flag is NOT in the per-material .mat (8 alpha values only); it
+    # lives in the ALL.mat registry the GUI writes, next to the .mat files.
+    soft = read_soft_flag(read_file)
     #Rmag_oct = np.loadtxt(read_file)
 
     rmserr = 0.0
     if is_near_one(Rmag_oct):
         R_tgt, Rinf = R_constant_from_octaves(freq, Rmag_oct)
+        if soft:
+            # global pi phase shift: R = -|R| (also flips the saved constant)
+            R_tgt = -R_tgt; Rinf = -Rinf
+            print(f"[{name}] soft material: R sign inverted")
         # skip min-phase + skip vector fitting
         K = 0; L = 0
         Acoef = np.array([], float); zeta = np.array([], float)
@@ -298,6 +362,12 @@ def fit_material(read_file, coefs_path):
     else:
         R_tgt, Rmag_interp, phi = min_phase_octave_cepstrum(freq, Rmag_oct, ext_oct=2, n_w=4096)
         #R_tgt, Rmag_interp, phi = min_phase_octave_hilbert(freq, Rmag_oct, ext_oct=2, n_w=8192)
+        if soft:
+            # soft (pressure-release) surface: R = -|R|·e^{j·phi_min}, i.e. a
+            # global pi phase shift. Causality/stability of the min-phase
+            # completion are untouched; the fit absorbs the sign.
+            R_tgt = -R_tgt
+            print(f"[{name}] soft material: R sign inverted")
 
         Zs_to_fit = Z_from_R(R_tgt, z0)   # optional; only if needed Z later
 
@@ -410,24 +480,37 @@ for m in mat_files:
     K_all = max(K_all, K); L_all = max(L_all, L)
 
 # --------------------
-# SAVE MAX NUMBER OF POLES IF SUPERIOR (across this run AND previous runs)
+# SAVE NUMBER OF POLES — monotonic running maximum (original behaviour)
 # --------------------
-
+# The solver reads (K_m, L_m) from poles.txt, allocates K_m*nMat / L_m*nMat
+# arrays ZERO-INITIALISED, and read_fit_file fills only each material's own
+# K_local/L_local rows — the remaining slots stay zero. The ADE kernel is
+# zero-safe: a zero slot has A=B=C=0 (no contribution) and there is no division
+# by zeta/alpha/beta anywhere, so trailing zeros are inert. Each .fit therefore
+# keeps EXACTLY its own pole count (no padding, no rewriting), and poles.txt
+# only needs to be large enough to cover the biggest one. We keep a monotonic
+# running max: read the existing poles.txt (if any), take the max with this
+# run's (K_all, L_all), write it back. --refit deletes poles.txt first to start
+# the count fresh.
+K_m, L_m = K_all, L_all
 if os.path.exists(Npoles_path):
-    Npoles = np.loadtxt(Npoles_path)
-    K_m, L_m = Npoles
-else:
-    K_m, L_m = K_all, L_all
-
-K_m = max(K_m, K_all)
-L_m = max(L_m, L_all)
+    try:
+        prev = np.atleast_1d(np.loadtxt(Npoles_path)).ravel()
+        if prev.size >= 2:
+            K_m = max(K_m, int(prev[0]))
+            L_m = max(L_m, int(prev[1]))
+    except Exception:
+        pass
 
 Npoles = np.array([[int(K_m), int(L_m)]], dtype=int)
 os.makedirs(os.path.dirname(Npoles_path), exist_ok=True)
 np.savetxt(Npoles_path, Npoles, fmt="%d", delimiter=" ")
+print(f"[poles] K_m={int(K_m)} L_m={int(L_m)} -> {Npoles_path}")
 
 # ============================================================
-# SUMMARY PLOT — one figure, grid of subplots (|R| per material)
+# SUMMARY PLOTS — three figures (|R|, Re R, Im R), each a grid of
+# subplots, one panel per material. Target always black; fitted curve
+# red for |R|, blue for Re, green for Im (matching the original script).
 # ============================================================
 
 if _args.no_plot:
@@ -436,24 +519,32 @@ if _args.no_plot:
 n = len(results)
 ncols = int(np.ceil(np.sqrt(n)))
 nrows = int(np.ceil(n / ncols))
-fig, axes = plt.subplots(nrows, ncols, figsize=(4.2*ncols, 3.2*nrows),
-                         squeeze=False, sharex=True, sharey=True)
-for i, (name, R_tgt, R_hat, rms) in enumerate(results):
-    ax = axes[i // ncols][i % ncols]
-    ax.semilogx(freq, np.abs(R_tgt), color='k', linewidth=2, label="Target |R|")
-    ax.semilogx(freq, np.abs(R_hat), "--", color='r', linewidth=2, label="Fitted |R|")
-    ax.set_ylim(0, 1.05)
-    ax.grid(True, which="both", alpha=0.4)
-    ttl = name if rms == 0.0 else f"{name}   (rms {rms:.1e})"
-    ax.set_title(ttl, fontsize=10)
-    if i // ncols == nrows - 1:
-        ax.set_xlabel("Frequency [Hz]")
-    if i % ncols == 0:
-        ax.set_ylabel("|R|")
-# hide unused panels
-for j in range(n, nrows*ncols):
-    axes[j // ncols][j % ncols].axis("off")
-axes[0][0].legend(fontsize=8)
-fig.suptitle("Vector fit — target vs fitted |R| per material")
-fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+def _grid(extract, fit_color, ylabel, suptitle, ylim):
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2*ncols, 3.2*nrows),
+                             squeeze=False, sharex=True, sharey=True)
+    for i, (name, R_tgt, R_hat, rms) in enumerate(results):
+        ax = axes[i // ncols][i % ncols]
+        ax.semilogx(freq, extract(R_tgt), color='k', linewidth=2,
+                    label=f"Target {ylabel}")
+        ax.semilogx(freq, extract(R_hat), "--", color=fit_color, linewidth=2,
+                    label=f"Fitted {ylabel}")
+        ax.set_ylim(*ylim)
+        ax.grid(True, which="both", alpha=0.4)
+        ttl = name if rms == 0.0 else f"{name}   (rms {rms:.1e})"
+        ax.set_title(ttl, fontsize=10)
+        if i // ncols == nrows - 1:
+            ax.set_xlabel("Frequency [Hz]")
+        if i % ncols == 0:
+            ax.set_ylabel(ylabel)
+    for j in range(n, nrows*ncols):
+        axes[j // ncols][j % ncols].axis("off")
+    axes[0][0].legend(fontsize=8)
+    fig.suptitle(suptitle)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    return fig
+
+_grid(np.abs,  'r',    "|R|",   "Vector fit — target vs fitted |R| per material",   (0, 1.05))
+_grid(np.real, 'b',    "Re(R)", "Vector fit — target vs fitted Re(R) per material", (-1.05, 1.05))
+_grid(np.imag, 'lime', "Im(R)", "Vector fit — target vs fitted Im(R) per material", (-1.05, 1.05))
 plt.show()
