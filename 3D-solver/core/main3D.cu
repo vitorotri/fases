@@ -295,7 +295,7 @@ int main(int argc, char *argv[]){
     float *Ak, *zeta;
     float *Bl, *Cl, *alpha, *beta;
     
-    int nMat = nObj - 1; // exclude boundary
+    int nMat = nObj - 1; // exclude bounding box
     
     Rinf = new float[nMat]();
     
@@ -335,7 +335,18 @@ int main(int argc, char *argv[]){
     	std::string filename = (fit_dir / (names[m+1] + ".fit")).string(); // names[0] = Boundary
     	std::cout << "\nReading: " << filename << "\n";	
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
-	}
+    	
+		// simple print test
+    	std::printf("Rinf[%d] = %.15f\n", m, (float)Rinf[m]);
+    	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
+                	m, (float)Ak[flat(0, m, K_m)],
+                	m, (float)zeta[flat(0, m, K_m)]);
+    	std::printf("Ak(1,%d)  = %.15f   zeta(1,%d) = %.15f\n\n",
+                	m, (float)Ak[flat(1, m, K_m)],
+                	m, (float)zeta[flat(1, m, K_m)]);
+        
+	}	
+	
 
 	// ----- device arrays for materials -----
 
@@ -690,7 +701,7 @@ int main(int argc, char *argv[]){
 	*/
 	
 	// Kernel launch parameters
-	dim3 TP(32,4,4); // row-major order. From the occupancy output right above, 32 * 4 * 4 = 512
+	dim3 TP(8,8,8); // row-major order. From the occupancy output right above, 32 * 4 * 4 = 512
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 
 	// Copy initial data to device if not using p_time[]
