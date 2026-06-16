@@ -102,6 +102,10 @@ int main(int argc, char *argv[]){
     F_PML = (float)conf_arr[10];
     B_PML = (float)conf_arr[11];
     
+    printf("\nU_PML = %d	D_PML = %d\n", (int)U_PML, (int)D_PML);
+    printf("\nL_PML = %d	R_PML = %d\n", (int)L_PML, (int)R_PML);
+    printf("\nF_PML = %d	B_PML = %d\n", (int)F_PML, (int)B_PML);
+    
     n = 0; // initial time-step
     
     // ---------------------- load OBJ/PLY/XYZ/etc file and create scene ---------------------
@@ -667,8 +671,8 @@ int main(int argc, char *argv[]){
 	//int opt; // opt param for some user inputs
 	
 	
-	
-	// peridoc BCs trick (if used)
+	/*
+	// peridoc BCs trick (if used), otherwise comment as well with the ones in the main loop
 	dim3 TPz(16,16);
 	dim3 BPz((Nx + TPz.x - 1)/TPz.x, (Ny + TPz.y - 1)/TPz.y);
 	kernel_periodic_trick_z<<<BPz, TPz>>>(d_S, d_oid, Nx, Ny, Nz, h);
@@ -689,7 +693,7 @@ int main(int argc, char *argv[]){
     	fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
     	fclose(file_oid);
 	}
-	
+	*/
 	
 	/*
 	// occupancy check
@@ -701,7 +705,7 @@ int main(int argc, char *argv[]){
 	*/
 	
 	// Kernel launch parameters
-	dim3 TP(8,8,8); // row-major order. From the occupancy output right above, 32 * 4 * 4 = 512
+	dim3 TP(32,4,4); // row-major order. From the occupancy output right above, 32 * 4 * 4 = 512
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 
 	// Copy initial data to device if not using p_time[]
@@ -936,6 +940,7 @@ int main(int argc, char *argv[]){
 			// (0)
 			
 			//kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
+			
 			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
 			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
