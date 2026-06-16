@@ -2053,7 +2053,7 @@ class MaterialPanel(QWidget):
     def _find_fit_script(self):
         """The fitting scripts live NEXT TO gui.py (both in common/)."""
         here = os.path.dirname(os.path.abspath(__file__))
-        for sn in ("vectFIT.py", "fminconFIT.py"):
+        for sn in ("fminconFIT.py", "vectFIT.py"):
             cand = os.path.join(here, sn)
             if os.path.isfile(cand):
                 return cand
@@ -2090,7 +2090,14 @@ class MaterialPanel(QWidget):
                "--mat", *mats,
                "--fitdir", self._fit_dir,
                "--config", os.path.join(proj, "config", "config.txt"),
-               "--poles",  os.path.join(proj, "config", "poles.txt")]
+               "--poles",  os.path.join(proj, "config", "poles.txt"),
+               # Fit-all covers the WHOLE scene, so poles.txt must reflect THIS
+               # material set exactly — not a stale running max from an earlier
+               # scene. --refit clears poles.txt first so the count is rebuilt
+               # authoritatively (and can shrink, e.g. an all-rigid scene -> 0 0,
+               # which the solver floors to 1 1). Single-material run_fit_selected
+               # deliberately omits --refit so it merges instead of clobbering.
+               "--refit"]
         # NOTE: no --no-plot — the summary grid is the point. The figure opens
         # in its own window; the run finishes when the user closes it.
         self._fit_all_btn.setEnabled(False)
@@ -3220,7 +3227,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, '_cmd_preview'): return
         if not self._proj_root:
             self._cmd_preview.setText("(open a project folder first)"); return
-        binary = self._bin_le.text() if hasattr(self,'_bin_le') else "build/phases3D"
+        binary = self._bin_le.text() if hasattr(self,'_bin_le') else "/home/vitorotri/Documents/Github/phases/3D-solver/build/phases3D"
         # absolute binary paths are used as-is; only bare relative ones get ./
         bin_disp = binary if os.path.isabs(binary) else f"./{binary}"
         scene = self._obj_path or "input/scene/scene.obj"
