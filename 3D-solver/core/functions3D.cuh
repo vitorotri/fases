@@ -4,7 +4,7 @@
 #include "filterABC.h"
 
 __host__ __device__ inline size_t flat3(int i, int j, int k, int Nx, int Ny){
-    return (k*Ny + j)*Nx + i;
+    return i + Nx*(j + k*Ny) ;
 }
 
 // Godunov and Roe fluxes (for WENO, no simple substitutions)
@@ -411,8 +411,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	// those values are only on positive s, which is the case here
     	// oid[] ranges from 1 to nMat, 255 elsewhere
 		const uint8_t o_ID = oid[Cijk]; // object's material ID
-		int b_ID = bmap[Cijk]; // boundary map
+		int b_ID = bmap[Cijk]; // boundary map for phi and psi (ADE)
 		if (o_ID == 0 || o_ID == 0xFF || b_ID < 0) return;
+		
+		//if (s >= h) return; // no blending test
 		
 		// gradients from S[] for detecting normals   
     	float gx = (S[flat3(i+1,j,k,Nx,Ny)] - S[flat3(i-1,j,k,Nx,Ny)]) * (0.5f / h);
@@ -488,7 +490,8 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	
     	const float chi = chi_layered(s, h, tol);
 		
-		// immersed boundary smoothing / blending (Brinkman penalization)
+		// immersed boundary smoothing / blending with value computed with WENO (s > h) (Brinkman penalization)
+		// as well as full values (s <= h => chi = 1) / (s >= tol => chi = 0)
 		u[Cijk] = (1.0f - chi) * u[Cijk] + chi * u_b;
     	v[Cijk] = (1.0f - chi) * v[Cijk] + chi * v_b;
     	w[Cijk] = (1.0f - chi) * w[Cijk] + chi * w_b;
@@ -507,7 +510,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	p[Cijk] = (1.0f - lam) * p[Cijk] + lam * p_b;
     	*/
     	/*
-    	// no merging
+    	// no blending
 		u[Cijk] = u_b;
     	v[Cijk] = v_b;
     	w[Cijk] = w_b;
@@ -852,13 +855,13 @@ __device__ void compute_Vs_z(float *Q_V, float *__restrict__ V, float *__restric
 	Q_V[3] = WENO_z(V, dd, c_rl, beta_rl, i, j, k, Nx, Ny, 0, eps);
 }
 
-__global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, float *__restrict__ u, float *v, float *w){
+__global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
 	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
    
-   	float R = 0.1;
+   	float R = 0.95;
    
     if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
     	
@@ -893,7 +896,7 @@ __global__ void kernel_inject_source(float *p, float *p_time, int i_src, int j_s
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *__restrict__ c_rl, float eps, float *__restrict__ dd, float *__restrict__ beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -976,7 +979,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *__restrict__ c_rl, float eps, float *__restrict__ dd, float *__restrict__ beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1059,7 +1062,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *__restrict__ c_rl, float eps, float *__restrict__ dd, float *__restrict__ beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
