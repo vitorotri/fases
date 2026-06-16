@@ -48,22 +48,22 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
 from OpenGL.GLU import *
 
-# matplotlib for the absorption curve plot (ships with the program).
-# Force matplotlib's Qt backend to bind to PySide6 (not PyQt5/PySide2),
-# otherwise two different Qt bindings load at once and the app crashes.
+# The absorption curve is now drawn by the in-house AlphaCurveEditor widget,
+# so matplotlib is no longer required. We keep an optional import only so any
+# future matplotlib-based view still works if present; the app runs fine without.
 os.environ.setdefault("QT_API", "pyside6")
-# Backend/module names differ between matplotlib versions:
-#   >= 3.5 : backend "QtAgg",  module backend_qtagg
-#   <  3.5 : backend "Qt5Agg", module backend_qt5agg
-import matplotlib
-from matplotlib.figure import Figure
 try:
-    matplotlib.use("QtAgg")
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    import matplotlib
+    from matplotlib.figure import Figure
+    try:
+        matplotlib.use("QtAgg")
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    except Exception:
+        matplotlib.use("Qt5Agg")
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+    _HAS_MPL = True
 except Exception:
-    matplotlib.use("Qt5Agg")
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-_HAS_MPL = True
+    _HAS_MPL = False
 
 # ─────────────────────────────────────────────────────────────
 #  Palette
@@ -109,6 +109,15 @@ AXIS_COLORS = {
 }
 
 OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
+
+# ─────────────────────────────────────────────────────────────
+#  Solver executable location
+# ─────────────────────────────────────────────────────────────
+# Absolute path to the compiled solver. This is the single place to edit if the
+# program is installed elsewhere; it is the default shown in the Run tab's
+# "Binary:" field and is NOT overwritten by a project's saved manifest unless
+# that manifest points to a file that actually exists.
+SOLVER_BINARY = "/home/vitorotri/Documents/Github/phases/3D-solver/build/phases3D"
 
 # ─────────────────────────────────────────────────────────────
 #  Project layout
@@ -1630,6 +1639,225 @@ class _FitAllThread(QThread):
             self.done.emit(-1, str(ex))
 
 
+class ToggleSwitch(QCheckBox):
+    """
+    A small iOS-style on/off slider switch (used for the hard/soft flag).
+    Behaves exactly like a QCheckBox (checked / toggled signal) but is painted
+    as a sliding pill: grey knob on the left when off, accent-purple track with
+    the knob on the right when on.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._w, self._h = 42, 22         # track size in px
+        self.setFixedSize(self._w, self._h)
+
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
+        return QSize(self._w, self._h)
+
+    def hitButton(self, pos):
+        # A bare QCheckBox only treats its small indicator rect as clickable;
+        # accept the WHOLE painted switch so any click toggles it.
+        return self.rect().contains(pos)
+
+    def paintEvent(self, _):
+        from PySide6.QtGui import QPainter, QColor
+        from PySide6.QtCore import QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        on = self.isChecked()
+        r = self._h / 2.0
+        # track
+        track = QColor(PAL["accent"]) if on else QColor(PAL["btn"])
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(QRectF(0, 0, self._w, self._h), r, r)
+        # knob
+        knob_d = self._h - 6
+        kx = (self._w - knob_d - 3) if on else 3
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QRectF(kx, 3, knob_d, knob_d))
+        p.end()
+
+
+class AlphaCurveEditor(QWidget):
+    """
+    Interactive replacement for the matplotlib absorption plot.
+
+    • One control point per octave band, drawn as a filled circle in the GUI
+      accent (purple) tone, joined by a smooth (Catmull-Rom) curve of the same
+      colour. Vertical position encodes alpha 0..1 (bottom..top).
+    • Click-drag a point to set its value; drag sideways across the widget to
+      "draw" the whole curve — every band the cursor passes over follows the
+      pointer height.
+    • Numeric values appear next to the points ONLY while dragging.
+    • Shows the material name (top), the 'α' symbol (left) and 'Frequency [Hz]'
+      with band numbers (bottom). No axes/ticks otherwise.
+
+    Two-way tied to the table via:
+      • set_values(name, vals)   – table  -> editor
+      • valuesChanged(list)      – editor -> table  (emitted live during drag)
+    """
+    valuesChanged = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(240)
+        self.setMouseTracking(True)
+        self._name = None
+        self._vals = None              # list[float] or None when nothing selected
+        self._n    = len(OCTAVE_BANDS)
+        self._dragging = False
+        self._pad_l, self._pad_r = 34, 16
+        self._pad_t, self._pad_b = 26, 30
+
+    # ── public API ──
+    def set_values(self, name, vals):
+        """Load values from the table (no signal emitted)."""
+        self._name = name
+        self._vals = [min(1.0, max(0.0, float(v))) for v in vals] if vals else None
+        self.update()
+
+    def clear(self):
+        self._name = None
+        self._vals = None
+        self.update()
+
+    # ── geometry helpers ──
+    def _plot_rect(self):
+        return (self._pad_l, self._pad_t,
+                self.width()  - self._pad_l - self._pad_r,
+                self.height() - self._pad_t - self._pad_b)
+
+    def _point_xy(self, i):
+        x0, y0, w, h = self._plot_rect()
+        x = x0 + (w * i / (self._n - 1) if self._n > 1 else 0)
+        y = y0 + h * (1.0 - self._vals[i])
+        return x, y
+
+    def _nearest_index(self, px):
+        x0, y0, w, h = self._plot_rect()
+        if w <= 0:
+            return 0
+        frac = (px - x0) / w
+        i = round(frac * (self._n - 1))
+        return int(min(self._n - 1, max(0, i)))
+
+    def _value_from_y(self, py):
+        x0, y0, w, h = self._plot_rect()
+        if h <= 0:
+            return 0.0
+        return min(1.0, max(0.0, 1.0 - (py - y0) / h))
+
+    # ── interaction ──
+    def mousePressEvent(self, e):
+        if self._vals is None:
+            return
+        self._dragging = True
+        self._apply(e.position().x(), e.position().y())
+
+    def mouseMoveEvent(self, e):
+        if self._dragging and self._vals is not None:
+            self._apply(e.position().x(), e.position().y())
+
+    def mouseReleaseEvent(self, e):
+        self._dragging = False
+        self.update()
+
+    def _apply(self, px, py):
+        i = self._nearest_index(px)
+        self._vals[i] = self._value_from_y(py)
+        self.valuesChanged.emit(list(self._vals))
+        self.update()
+
+    # ── painting ──
+    def paintEvent(self, _):
+        from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
+        from PySide6.QtCore import QRectF, QPointF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # white plotting background to match the previous look
+        p.fillRect(self.rect(), QColor("white"))
+        x0, y0, w, h = self._plot_rect()
+
+        accent = QColor(PAL["accent"])
+        grey   = QColor("#888888")
+        dark   = QColor("#444444")
+
+        # title (material name) and α / Hz labels
+        p.setPen(dark)
+        p.setFont(QFont("Sans", 9, QFont.Weight.Bold))
+        if self._name:
+            p.drawText(QRectF(0, 2, self.width(), 18),
+                       Qt.AlignmentFlag.AlignCenter, self._name)
+        p.setFont(QFont("Sans", 10, QFont.Weight.Bold))
+        p.drawText(QRectF(2, y0, 24, h), Qt.AlignmentFlag.AlignCenter, "α")
+        p.setFont(QFont("Sans", 8))
+        p.setPen(dark)                       # as dark as the α symbol
+        p.drawText(QRectF(0, self.height() - 16, self.width(), 14),
+                   Qt.AlignmentFlag.AlignCenter, "Frequency [Hz]")
+
+        if self._vals is None:
+            p.setPen(grey)
+            p.setFont(QFont("Sans", 11))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                       "α per octave band [Hz]")
+            p.end()
+            return
+
+        # light-grey grid: horizontal lines at α = 0,.25,.5,.75,1 and a vertical
+        # line at every band, same colour as the frequency numbers.
+        gpen = QPen(QColor("#cccccc"), 1)
+        p.setPen(gpen)
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            gy = y0 + h * frac
+            p.drawLine(int(x0), int(gy), int(x0 + w), int(gy))
+        for i in range(self._n):
+            gx, _ = self._point_xy(i)
+            p.drawLine(int(gx), int(y0), int(gx), int(y0 + h))
+
+        # band frequency numbers along the bottom
+        p.setPen(grey)
+        p.setFont(QFont("Sans", 7))
+        for i, b in enumerate(OCTAVE_BANDS):
+            x, _ = self._point_xy(i)
+            p.drawText(QRectF(x - 20, y0 + h + 2, 40, 12),
+                       Qt.AlignmentFlag.AlignCenter, str(b))
+
+        # smooth connecting curve (Catmull-Rom -> cubic Bézier)
+        pts = [QPointF(*self._point_xy(i)) for i in range(self._n)]
+        path = QPainterPath(pts[0])
+        for i in range(len(pts) - 1):
+            p0 = pts[i - 1] if i > 0 else pts[i]
+            p1 = pts[i]
+            p2 = pts[i + 1]
+            p3 = pts[i + 2] if i + 2 < len(pts) else pts[i + 1]
+            c1 = QPointF(p1.x() + (p2.x() - p0.x()) / 6.0,
+                         p1.y() + (p2.y() - p0.y()) / 6.0)
+            c2 = QPointF(p2.x() - (p3.x() - p1.x()) / 6.0,
+                         p2.y() - (p3.y() - p1.y()) / 6.0)
+            path.cubicTo(c1, c2, p2)
+        p.setPen(QPen(accent, 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+
+        # control points (circles) + live value readout while dragging
+        p.setFont(QFont("Sans", 7, QFont.Weight.Bold))
+        for i in range(self._n):
+            x, y = self._point_xy(i)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(accent)
+            p.drawEllipse(QPointF(x, y), 4.5, 4.5)
+            if self._dragging:
+                p.setPen(accent)
+                p.drawText(QRectF(x - 18, y - 18, 36, 12),
+                           Qt.AlignmentFlag.AlignCenter, f"{self._vals[i]:.2f}")
+        p.end()
+
+
 class MaterialPanel(QWidget):
     """
     Single panel for ALL material layers:
@@ -1654,21 +1882,10 @@ class MaterialPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0,0,0,0); lay.setSpacing(6)
 
-        # ── plot area ──
-        if _HAS_MPL:
-            self._fig = Figure(figsize=(3, 2.8), facecolor="white")
-            self._canvas = FigureCanvas(self._fig)
-            self._canvas.setMinimumHeight(240)
-            self._ax = self._fig.add_subplot(111)
-            self._clear_plot()
-            lay.addWidget(self._canvas)
-        else:
-            self._canvas = None
-            ph = QLabel("α per octave band [Hz]\n(install matplotlib to see the curve)")
-            ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ph.setMinimumHeight(240)
-            ph.setStyleSheet(f"background:white;color:#444;border:1px solid {PAL['border']};")
-            lay.addWidget(ph)
+        # ── interactive alpha-curve editor (replaces the matplotlib plot) ──
+        self._curve = AlphaCurveEditor()
+        self._curve.valuesChanged.connect(self._on_curve_changed)
+        lay.addWidget(self._curve)
 
         # ── table ──
         cols = ["Layer"] + [str(b) for b in OCTAVE_BANDS]
@@ -1730,45 +1947,35 @@ class MaterialPanel(QWidget):
         hs_lbl = QLabel("Selected material:")
         hs_lbl.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         hs.addWidget(hs_lbl)
-        self._soft_btn = QPushButton("Hard (R > 0)")
-        self._soft_btn.setCheckable(True)
+        self._soft_btn = ToggleSwitch()          # small on/off slider switch
         self._soft_btn.toggled.connect(self._on_soft_toggled)
-        hs.addWidget(self._soft_btn, 1)
+        hs.addWidget(self._soft_btn)
+        self._soft_lbl = QLabel("Hard (R > 0)")
+        self._soft_lbl.setStyleSheet(f"color:{PAL['text']};font-size:11px;")
+        hs.addWidget(self._soft_lbl)
+        hs.addStretch(1)
         lay.addLayout(hs)
 
         self._status = QLabel("")
         self._status.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
         lay.addWidget(self._status)
 
-    # ── plot ──
+    # ── curve editor bridge ──
     def _clear_plot(self):
-        if not _HAS_MPL: return
-        self._ax.clear()
-        self._ax.set_facecolor("white")
-        self._ax.text(0.5, 0.5, r"$\alpha$ per octave band [Hz]",
-                      ha="center", va="center", color="#888",
-                      transform=self._ax.transAxes, fontsize=11)
-        self._ax.set_xticks([]); self._ax.set_yticks([])
-        self._fig.tight_layout()
-        self._canvas.draw_idle()
+        self._curve.clear()
 
     def _plot_row(self, name, vals):
-        if not _HAS_MPL: return
-        self._ax.clear()
-        self._ax.set_facecolor("white")
-        x = list(range(len(OCTAVE_BANDS)))
-        self._ax.plot(x, vals, color="#00b4d8", marker="o", linewidth=2)
-        self._ax.set_xticks(x)
-        self._ax.set_xticklabels([str(b) for b in OCTAVE_BANDS],
-                                 rotation=45, fontsize=7)
-        self._ax.set_xlabel("Frequency [Hz]", fontsize=8)
-        self._ax.set_ylim(0, 1.0)
-        self._ax.set_ylabel(r"$\alpha$", fontsize=11)
-        self._ax.set_title(name, fontsize=9)
-        self._ax.tick_params(labelsize=7)
-        self._ax.grid(True, alpha=0.3)
-        self._fig.tight_layout()
-        self._canvas.draw_idle()
+        self._curve.set_values(name, vals)
+
+    def _on_curve_changed(self, vals):
+        """Editor -> table: write dragged values into the selected row's cells."""
+        r = self._current_row()
+        if r < 0 or self._tbl.item(r, 0) is None:
+            return
+        self._tbl.blockSignals(True)
+        for c, v in enumerate(vals):
+            self._tbl.setItem(r, c + 1, QTableWidgetItem(f"{v:.2f}"))
+        self._tbl.blockSignals(False)
 
     # ── population ──
     def set_project(self, proj_root):
@@ -1877,7 +2084,7 @@ class MaterialPanel(QWidget):
             self._soft_btn.blockSignals(True)
             soft = self._row_soft(r)
             self._soft_btn.setChecked(soft)
-            self._soft_btn.setText("Soft (R < 0)" if soft else "Hard (R > 0)")
+            self._soft_lbl.setText("Soft (R < 0)" if soft else "Hard (R > 0)")
             self._soft_btn.blockSignals(False)
         if name:
             self.rowSelected.emit(name)
@@ -1890,7 +2097,7 @@ class MaterialPanel(QWidget):
             self._soft_btn.blockSignals(False)
             self._status.setText("Select a layer row first."); return
         self._set_row_soft(r, checked)
-        self._soft_btn.setText("Soft (R < 0)" if checked else "Hard (R > 0)")
+        self._soft_lbl.setText("Soft (R < 0)" if checked else "Hard (R > 0)")
         name = self._tbl.item(r, 0).text()
         self._status.setText(f"{name}: {'soft' if checked else 'hard'} "
                              "(remember to Save all .mat)")
@@ -2504,7 +2711,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_src_tab(),     "🔊  Sources")
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
         self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
-        self._tabs.addTab(self._build_run_tab(),     "▶  Play")
+        self._tabs.addTab(self._build_run_tab(),     "▶  Run")
 
         # status bar
         self._sb = QStatusBar()
@@ -2655,9 +2862,9 @@ class MainWindow(QMainWindow):
         self._proj_label.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         pv.addWidget(self._proj_label)
         pb = QHBoxLayout()
-        for lbl, fn in [("🆕  New",  self._new_project),
-                        ("📂  Open", self._open_project),
-                        ("💾  Save", self._save_project)]:
+        for lbl, fn in [("\U0001F5C0  New",  self._new_project),
+                        ("\U0001F5C1  Open", self._open_project),
+                        ("\U0001F5AB  Save", self._save_project)]:
             b = QPushButton(lbl); b.clicked.connect(fn); pb.addWidget(b)
         pv.addLayout(pb)
         lay.addWidget(grp_proj)
@@ -2667,7 +2874,7 @@ class MainWindow(QMainWindow):
         self._obj_label = QLabel("none")
         self._obj_label.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         o_lay.addWidget(self._obj_label, 1)
-        btn2 = QPushButton("Load OBJ"); btn2.clicked.connect(self._load_obj)
+        btn2 = QPushButton("Import OBJ"); btn2.clicked.connect(self._load_obj)
         o_lay.addWidget(btn2)
         lay.addWidget(grp_obj)
 
@@ -2788,15 +2995,15 @@ class MainWindow(QMainWindow):
     def _build_run_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
         lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
-
+        '''
         bin_row = QHBoxLayout()
         bin_row.addWidget(QLabel("Binary:"))
-        # The executable is a SHARED build artifact (e.g. .../3D-solver/build/),
-        # not part of any project. Remember the last browsed path across
-        # projects and sessions; fall back to the legacy relative default.
+        # The executable is a SHARED build artifact, not part of any project.
+        # Default to the SOLVER_BINARY constant (edit it at the top of the file);
+        # if a previously browsed path still exists, prefer that.
         _last_bin = QSettings("phases", "gui").value("last_binary", "")
         if not (_last_bin and os.path.isfile(_last_bin)):
-            _last_bin = "/home/vitorotri/Documents/Github/phases/3D-solver/build"
+            _last_bin = SOLVER_BINARY
         self._bin_le = QLineEdit(_last_bin)
         self._bin_le.textChanged.connect(self._update_cmd_preview)
         bin_row.addWidget(self._bin_le, 1)
@@ -2808,7 +3015,7 @@ class MainWindow(QMainWindow):
         self._cmd_preview.setStyleSheet(
             f"color:{PAL['accent']};font-family:monospace;font-size:11px;")
         self._cmd_preview.setWordWrap(True); lay.addWidget(self._cmd_preview)
-
+        '''
         self._run_btn = QPushButton("▶  Launch solver")
         self._run_btn.setStyleSheet(
             f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
@@ -2833,13 +3040,13 @@ class MainWindow(QMainWindow):
     # ── fit output -> Run-tab Output log ─────────────────────
     def _begin_fit_log(self, header):
         """A fit run started: clear the Output log, show the command, and bring
-        the Output (Play) tab forward so the fitter's progress is visible."""
+        the Output (Run) tab forward so the fitter's progress is visible."""
         if hasattr(self, "_log"):
             self._log.clear()
             self._log.append(header)
             self._log.append("-" * 60)
         if hasattr(self, "_tabs"):
-            self._tabs.setCurrentIndex(4)   # ▶ Play tab holds the Output log
+            self._tabs.setCurrentIndex(4)   # ▶ Run tab holds the Output log
 
     def _append_fit_log(self, line):
         if hasattr(self, "_log"):
@@ -2973,13 +3180,14 @@ class MainWindow(QMainWindow):
         def resolve(rel):
             return rel if os.path.isabs(rel) else os.path.join(d, rel)
 
-        # binary
-        if man.get("binary") and hasattr(self, "_bin_le"):
-            self._bin_le.setText(man["binary"])
-        elif hasattr(self, "_bin_le"):
-            lb = QSettings("phases", "gui").value("last_binary", "")
-            if lb and os.path.isfile(lb):
-                self._bin_le.setText(lb)
+        # binary: only adopt the manifest's path if it actually exists, so a
+        # stale relative entry (e.g. "build/phases3D") never clobbers the field.
+        if hasattr(self, "_bin_le"):
+            mb = man.get("binary", "")
+            if mb and os.path.isfile(mb):
+                self._bin_le.setText(mb)
+            # else: keep whatever is in the field (SOLVER_BINARY default or a
+            # valid last-browsed path) — do not overwrite with a bad path.
 
         # config / sources / receivers (manifest path if given, else canonical)
         cfg = resolve(man.get("config", "config/config.txt"))
@@ -3032,7 +3240,7 @@ class MainWindow(QMainWindow):
         if self._proj_root:
             cand = os.path.join(self._proj_root, "input", "scene")
             start = cand if os.path.isdir(cand) else self._proj_root
-        path, _ = QFileDialog.getOpenFileName(self, "Load OBJ", start, "OBJ (*.obj)")
+        path, _ = QFileDialog.getOpenFileName(self, "Import OBJ", start, "OBJ (*.obj)")
         if path:
             self._load_obj_path(path)
 
@@ -3227,7 +3435,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, '_cmd_preview'): return
         if not self._proj_root:
             self._cmd_preview.setText("(open a project folder first)"); return
-        binary = self._bin_le.text() if hasattr(self,'_bin_le') else "/home/vitorotri/Documents/Github/phases/3D-solver/build/phases3D"
+        binary = self._bin_le.text() if hasattr(self, "_bin_le") else SOLVER_BINARY
         # absolute binary paths are used as-is; only bare relative ones get ./
         bin_disp = binary if os.path.isabs(binary) else f"./{binary}"
         scene = self._obj_path or "input/scene/scene.obj"
