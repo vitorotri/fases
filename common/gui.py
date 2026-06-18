@@ -2921,11 +2921,11 @@ class MainWindow(QMainWindow):
 
         self._cfg = {}
         for key, lbl, val, mn, mx, dec, sfx in [
-            ("h",       "Grid spacing",     0.05, 0.001, 2.0,   4, "m"),
-            ("t_max",   "Simulation time",  0.5,  0.001,10.0,   3, "s"),
-            ("f_cutoff","Cutoff frequency",1000., 50., 8000.,   1, "Hz"),
-            ("T_C",     "Temperature",      20., -30.,   60.,   1, "°C"),
-            ("CFL",     "CFL number",        0.4,  0.05,  0.49, 3, ""),
+            ("h",       "Grid spacing",     0.05, 0.001, 2.0, 3, "m"),
+            ("t_max",   "Simulation time",  0.5,  0.001, 60.0, 3, "s"),
+            ("f_cutoff","Cutoff frequency", 250., 50., 10000., 1, "Hz"),
+            ("T_C",     "Temperature",      20., -30.,   50., 1, "°C"),
+            ("CFL",     "CFL number",        0.40,  0.05,  0.50, 2, ""),
         ]:
             sp = ds(val, mn, mx, dec, sfx); self._cfg[key] = sp
             lay.addRow(f"{lbl}:", sp)
