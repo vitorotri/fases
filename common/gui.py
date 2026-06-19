@@ -30,7 +30,7 @@ import subprocess
 
 import numpy as np
 
-from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF, QEvent, QSettings, QTimer
+from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF, QEvent, QSettings, QTimer, QSize
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor, QKeySequence,
                               QPixmap, QIcon, QPen, QShortcut)
@@ -1930,7 +1930,7 @@ class MaterialPanel(QWidget):
 
         # ── buttons ──
         row = QHBoxLayout()
-        self._save_btn = QPushButton("💾  Save all .mat")
+        self._save_btn = QPushButton("🖫  Save all .mat")
         self._save_btn.clicked.connect(self.save_all)
         row.addWidget(self._save_btn)
         # The fitting buttons moved to the Run tab ("Fit impedances"); the button
@@ -2329,6 +2329,28 @@ class MaterialPanel(QWidget):
 # ─────────────────────────────────────────────────────────────
 #  Point table  (sources / receivers)
 # ─────────────────────────────────────────────────────────────
+def make_pm_icon(sign, size=18, color=None):
+    """Draw a crisp '+' or '−' as a QIcon so the symbol renders at any size and
+    never depends on font glyph coverage (avoids the tofu boxes). The button
+    text ('Add' / 'Remove') stays at the normal size next to it."""
+    from PySide6.QtCore import QSize
+    col = QColor(color) if color else QColor(PAL["text"])
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(col); pen.setWidthF(2.4); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    m = size * 0.22                       # margin
+    cy = size / 2.0
+    p.drawLine(int(m), int(cy), int(size - m), int(cy))      # horizontal bar
+    if sign == "+":
+        cx = size / 2.0
+        p.drawLine(int(cx), int(m), int(cx), int(size - m))  # vertical bar
+    p.end()
+    return QIcon(pm)
+
+
 class PointTable(QWidget):
     changed = Signal()
 
@@ -2363,8 +2385,14 @@ class PointTable(QWidget):
         self._tbl.customContextMenuRequested.connect(self._show_cell_menu)
         lay.addWidget(self._tbl)
         btn_row = QHBoxLayout()
-        for label, fn in [("＋ Add", self._add), ("－ Remove", self._remove)]:
-            b = QPushButton(label); b.clicked.connect(fn); btn_row.addWidget(b)
+        # '+' / '−' are DRAWN as icons (always render, larger than the text)
+        # while the labels stay at the normal button font size.
+        for sign, label, fn in [("+", "Add", self._add),
+                                 ("-", "Remove", self._remove)]:
+            b = QPushButton(label); b.clicked.connect(fn)
+            b.setIcon(make_pm_icon(sign))
+            b.setIconSize(QSize(16, 16))
+            btn_row.addWidget(b)
         lay.addLayout(btn_row)
 
     def _add(self, x=1.0, y=1.0, z=1.0, amp=1.0, name=None):
@@ -2566,10 +2594,59 @@ class FillTabBar(QTabBar):
         self.updateGeometry()
 
 
+class DraggableProgress(QWidget):
+    """
+    A small, floating progress bar that overlays the 3D scene. It is a child of
+    the viewport container (absolute-positioned, not in a layout) and can be
+    dragged anywhere with the mouse. Hidden until a run starts.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(
+            f"background:{PAL['bg']};border:1px solid {PAL['border']};border-radius:5px;")
+        self.setFixedSize(220, 30)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4); lay.setSpacing(6)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100); self._bar.setValue(0)
+        self._bar.setTextVisible(True)
+        self._bar.setFixedHeight(16)
+        self._bar.setStyleSheet(f"""
+            QProgressBar {{ background:{PAL['panel']}; border:1px solid {PAL['border']};
+                border-radius:3px; color:{PAL['text']}; font-size:10px; text-align:center; }}
+            QProgressBar::chunk {{ background:{PAL['accent']}; border-radius:2px; }}
+        """)
+        lay.addWidget(self._bar, 1)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self._drag_off = None
+        self.hide()
+
+    def setValue(self, v):
+        self._bar.setValue(max(0, min(100, int(v))))
+
+    # ── drag to reposition within the parent ──
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_off = e.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_off is not None and self.parent():
+            new = self.mapToParent(e.position().toPoint() - self._drag_off)
+            pr = self.parent().rect()
+            x = max(0, min(new.x(), pr.width()  - self.width()))
+            y = max(0, min(new.y(), pr.height() - self.height()))
+            self.move(x, y)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_off = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Acoustic FVM Solver  —  Scene Setup")
+        self.setWindowTitle("FASES - Fast ACoustics Solver for Enhanced Spaces")
         self.resize(1440, 860)
         self._proj_root  = None
         self._obj_path   = None
@@ -2727,6 +2804,12 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
         self._tabs.addTab(self._build_config_tab(),  "⚙  Configs")
         self._tabs.addTab(self._build_run_tab(),     "▶  Run")
+
+        # Floating, draggable progress bar overlaying the 3D scene. Parented to
+        # the GL container so it sits on top of the viewport; starts hidden and
+        # is positioned near the top-left, the user can drag it anywhere.
+        self._float_prog = DraggableProgress(gl_wrap)
+        self._float_prog.move(16, 16)
 
         # status bar
         self._sb = QStatusBar()
@@ -2959,8 +3042,8 @@ class MainWindow(QMainWindow):
             self._pml[k] = chk; grid.addWidget(chk, idx//3, idx%3)
         lay.addRow(grid)
 
-        for lbl, fn in [("💾  Save config.txt", self._save_config),
-                        ("📂  Load config.txt", self._load_config)]:
+        for lbl, fn in [("🖫  Save config.txt", self._save_config),
+                        ("🗁  Load config.txt", self._load_config)]:
             b = QPushButton(lbl); b.clicked.connect(fn); lay.addRow(b)
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
@@ -2982,8 +3065,8 @@ class MainWindow(QMainWindow):
             lambda: self._on_table_row_selected("source"))
         lay.addWidget(self._src_tbl)
         br = QHBoxLayout()
-        for lbl, fn in [("📂  Load src.txt", self._load_src),
-                        ("💾  Save src.txt", self._save_src)]:
+        for lbl, fn in [("🗁  Load src.txt", self._load_src),
+                        ("🖫  Save src.txt", self._save_src)]:
             b = QPushButton(lbl); b.clicked.connect(fn); br.addWidget(b)
         lay.addLayout(br)
         return w
@@ -3000,8 +3083,8 @@ class MainWindow(QMainWindow):
             lambda: self._on_table_row_selected("receiver"))
         lay.addWidget(self._rec_tbl)
         br = QHBoxLayout()
-        for lbl, fn in [("📂  Load rec.txt", self._load_rec),
-                        ("💾  Save rec.txt", self._save_rec)]:
+        for lbl, fn in [("🗁  Load rec.txt", self._load_rec),
+                        ("🖫  Save rec.txt", self._save_rec)]:
             b = QPushButton(lbl); b.clicked.connect(fn); br.addWidget(b)
         lay.addLayout(br)
         return w
@@ -3035,26 +3118,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self._run_btn, 1)
         lay.addLayout(top)
 
-        # ── floating progress bar (hidden until Run is pressed) ──
-        self._prog_wrap = QWidget()
-        self._prog_wrap.setStyleSheet(
-            f"background:{PAL['bg']};border:1px solid {PAL['border']};border-radius:4px;")
-        pw = QHBoxLayout(self._prog_wrap)
-        pw.setContentsMargins(8,4,8,4); pw.setSpacing(8)
-        self._prog = QProgressBar()
-        self._prog.setRange(0, 100); self._prog.setValue(0)
-        self._prog.setTextVisible(True)
-        self._prog.setFixedHeight(16)
-        self._prog.setStyleSheet(f"""
-            QProgressBar {{ background:{PAL['panel']}; border:1px solid {PAL['border']};
-                border-radius:3px; color:{PAL['text']}; font-size:10px; text-align:center; }}
-            QProgressBar::chunk {{ background:{PAL['accent']}; border-radius:2px; }}
-        """)
-        pw.addWidget(self._prog, 1)
-        self._prog_wrap.setVisible(False)
-        # keep it compact and "floating" — does not stretch with the window
-        prog_row = QHBoxLayout(); prog_row.addWidget(self._prog_wrap, 1); prog_row.addStretch(0)
-        lay.addLayout(prog_row)
+        # (progress bar floats over the 3D scene — see DraggableProgress)
 
         # ── output log ──
         lay.addWidget(QLabel("Output:"))
@@ -3532,8 +3596,9 @@ class MainWindow(QMainWindow):
             self._run_btn.setText("⏹  Stop")
             self._run_btn.setStyleSheet(
                 f"background:{PAL['err']};color:{PAL['bg']};font-weight:bold;padding:8px;")
-            self._prog.setValue(0)
-            self._prog_wrap.setVisible(True)
+            self._float_prog.setValue(0)
+            self._float_prog.show()
+            self._float_prog.raise_()
             self._fitimp_btn.setEnabled(False)
         else:
             self._run_btn.setText("▶  Run")
@@ -3542,26 +3607,26 @@ class MainWindow(QMainWindow):
             self._fitimp_btn.setEnabled(True)
 
     def _on_solver_progress(self, pct):
-        self._prog.setValue(max(0, min(100, pct)))
+        self._float_prog.setValue(pct)
 
     def _stop_solver(self):
         if self._solver_thread and self._solver_thread.isRunning():
             self._solver_thread.stop()
             self._log.append("\n[!] Stopped by user.")
         self._set_running(False)
-        self._prog_wrap.setVisible(False)
+        self._float_prog.hide()
 
     def _on_solver_done(self, rc):
         # Re-enable launching, fill/hide the progress bar, report status.
         self._set_running(False)
         if rc == 0:
-            self._prog.setValue(100)
+            self._float_prog.setValue(100)
         c = PAL["ok"] if rc == 0 else PAL["err"]
         self._log.append(
             f'<span style="color:{c};">{"[OK]" if rc==0 else "[FAIL]"}  rc={rc}</span>')
         self._sb.showMessage(f"Solver finished  (rc={rc})")
         # hide the floating bar shortly after completion
-        QTimer.singleShot(1500, lambda: self._prog_wrap.setVisible(False))
+        QTimer.singleShot(1500, self._float_prog.hide)
 
 
 # ─────────────────────────────────────────────────────────────
