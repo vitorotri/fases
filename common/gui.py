@@ -2710,7 +2710,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
         self._tabs.addTab(self._build_src_tab(),     "🔊  Sources")
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
-        self._tabs.addTab(self._build_config_tab(),  "⚙  Config")
+        self._tabs.addTab(self._build_config_tab(),  "⚙  Setup")
         self._tabs.addTab(self._build_run_tab(),     "▶  Run")
 
         # status bar
@@ -2995,9 +2995,9 @@ class MainWindow(QMainWindow):
     def _build_run_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
         lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
-        '''
+        
         bin_row = QHBoxLayout()
-        bin_row.addWidget(QLabel("Binary:"))
+        #bin_row.addWidget(QLabel("Binary:"))
         # The executable is a SHARED build artifact, not part of any project.
         # Default to the SOLVER_BINARY constant (edit it at the top of the file);
         # if a previously browsed path still exists, prefer that.
@@ -3007,15 +3007,15 @@ class MainWindow(QMainWindow):
         self._bin_le = QLineEdit(_last_bin)
         self._bin_le.textChanged.connect(self._update_cmd_preview)
         bin_row.addWidget(self._bin_le, 1)
-        bb = QPushButton("Browse"); bb.clicked.connect(self._browse_binary)
-        bin_row.addWidget(bb); lay.addLayout(bin_row)
+        #bb = QPushButton("Browse"); bb.clicked.connect(self._browse_binary)
+        #bin_row.addWidget(bb); lay.addLayout(bin_row)
 
-        lay.addWidget(QLabel("Command:"))
-        self._cmd_preview = QLabel("(open project first)")
-        self._cmd_preview.setStyleSheet(
-            f"color:{PAL['accent']};font-family:monospace;font-size:11px;")
-        self._cmd_preview.setWordWrap(True); lay.addWidget(self._cmd_preview)
-        '''
+        #lay.addWidget(QLabel("Command:"))
+        #self._cmd_preview = QLabel("(open project first)")
+        #self._cmd_preview.setStyleSheet(
+            #f"color:{PAL['accent']};font-family:monospace;font-size:11px;")
+        #self._cmd_preview.setWordWrap(True); lay.addWidget(self._cmd_preview)
+        
         self._run_btn = QPushButton("▶  Launch solver")
         self._run_btn.setStyleSheet(
             f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
