@@ -1089,8 +1089,6 @@ int main(int argc, char *argv[]){
     files_rec.clear();
     fclose(fp);
     
-    printf("[OK] Wrote to file for single receiver\n\n");
-    
     FILE *header; // file for data output
 	header = fopen(out_file("header.txt").c_str(), "w");
 	if (header != NULL){
