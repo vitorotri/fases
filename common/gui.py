@@ -30,7 +30,7 @@ import subprocess
 
 import numpy as np
 
-from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF, QEvent, QSettings
+from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF, QEvent, QSettings, QTimer
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor, QKeySequence,
                               QPixmap, QIcon, QPen, QShortcut)
@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QDoubleSpinBox, QSpinBox, QAbstractSpinBox,
     QGroupBox, QScrollArea, QAbstractItemView, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QStatusBar, QSlider, QMenu
+    QStatusBar, QSlider, QMenu, QProgressBar
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
@@ -1933,12 +1933,13 @@ class MaterialPanel(QWidget):
         self._save_btn = QPushButton("💾  Save all .mat")
         self._save_btn.clicked.connect(self.save_all)
         row.addWidget(self._save_btn)
-        self._fit_btn = QPushButton("⚙  Run vectFIT")
+        # The fitting buttons moved to the Run tab ("Fit impedances"); the button
+        # objects are kept (hidden, not added to any layout) because run_fit_all /
+        # run_fit_selected / _on_fit_all_done enable/disable them as busy flags.
+        self._fit_btn = QPushButton("⚙  Run vectFIT");  self._fit_btn.setVisible(False)
         self._fit_btn.clicked.connect(self.run_fit_selected)
-        row.addWidget(self._fit_btn)
-        self._fit_all_btn = QPushButton("⚙  Fit all")
+        self._fit_all_btn = QPushButton("⚙  Fit all");  self._fit_all_btn.setVisible(False)
         self._fit_all_btn.clicked.connect(self.run_fit_all)
-        row.addWidget(self._fit_all_btn)
         lay.addLayout(row)
 
         # ── hard/soft toggle for the SELECTED layer (kept off the table so the
@@ -2497,20 +2498,34 @@ class PointTable(QWidget):
 # ─────────────────────────────────────────────────────────────
 class SolverThread(QThread):
     output   = Signal(str)
-    finished = Signal(int)
+    progress = Signal(int)          # parsed NN% from the solver's progress bar
+    done     = Signal(int)          # NOT 'finished' (that shadows QThread's own)
 
     def __init__(self, cmd, cwd):
         super().__init__(); self._cmd = cmd; self._cwd = cwd
+        self._proc = None
 
     def run(self):
+        import re
+        pct_re = re.compile(r"(\d+)\s*%")
         try:
-            proc = subprocess.Popen(self._cmd, cwd=self._cwd,
+            self._proc = subprocess.Popen(self._cmd, cwd=self._cwd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
-            for line in proc.stdout: self.output.emit(line.rstrip())
-            proc.wait(); self.finished.emit(proc.returncode)
+            for line in self._proc.stdout:
+                line = line.rstrip()
+                self.output.emit(line)
+                m = pct_re.search(line)        # e.g. "[====   ] 39%"
+                if m:
+                    try: self.progress.emit(int(m.group(1)))
+                    except ValueError: pass
+            self._proc.wait(); self.done.emit(self._proc.returncode)
         except Exception as ex:
-            self.output.emit(f"[ERROR] {ex}"); self.finished.emit(-1)
+            self.output.emit(f"[ERROR] {ex}"); self.done.emit(-1)
+
+    def stop(self):
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2710,7 +2725,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
         self._tabs.addTab(self._build_src_tab(),     "🔊  Sources")
         self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
-        self._tabs.addTab(self._build_config_tab(),  "⚙  Setup")
+        self._tabs.addTab(self._build_config_tab(),  "⚙  Configs")
         self._tabs.addTab(self._build_run_tab(),     "▶  Run")
 
         # status bar
@@ -2995,40 +3010,56 @@ class MainWindow(QMainWindow):
     def _build_run_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
         lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
-        
-        bin_row = QHBoxLayout()
-        #bin_row.addWidget(QLabel("Binary:"))
-        # The executable is a SHARED build artifact, not part of any project.
-        # Default to the SOLVER_BINARY constant (edit it at the top of the file);
-        # if a previously browsed path still exists, prefer that.
+
+        # Binary path is kept (hidden field) so the launch command still works;
+        # default to SOLVER_BINARY (edit at the top of the file) or last browsed.
         _last_bin = QSettings("phases", "gui").value("last_binary", "")
         if not (_last_bin and os.path.isfile(_last_bin)):
             _last_bin = SOLVER_BINARY
         self._bin_le = QLineEdit(_last_bin)
-        self._bin_le.textChanged.connect(self._update_cmd_preview)
-        bin_row.addWidget(self._bin_le, 1)
-        #bb = QPushButton("Browse"); bb.clicked.connect(self._browse_binary)
-        #bin_row.addWidget(bb); lay.addLayout(bin_row)
+        self._bin_le.setVisible(False)        # path lives in SOLVER_BINARY now
 
-        #lay.addWidget(QLabel("Command:"))
-        #self._cmd_preview = QLabel("(open project first)")
-        #self._cmd_preview.setStyleSheet(
-            #f"color:{PAL['accent']};font-family:monospace;font-size:11px;")
-        #self._cmd_preview.setWordWrap(True); lay.addWidget(self._cmd_preview)
-        
-        self._run_btn = QPushButton("▶  Launch solver")
+        # ── top row: Fit impedances (left)  |  Run/Stop (right) ──
+        top = QHBoxLayout(); top.setSpacing(8)
+        self._fitimp_btn = QPushButton("⚙  Fit impedances")
+        self._fitimp_btn.setStyleSheet(
+            f"background:{PAL['btn']};color:{PAL['text']};font-weight:bold;padding:8px;")
+        self._fitimp_btn.clicked.connect(self._fit_impedances)
+        top.addWidget(self._fitimp_btn, 1)
+
+        # Single Run/Stop toggle: shows ▶ Run normally, ⏹ Stop while running.
+        self._run_btn = QPushButton("▶  Run")
         self._run_btn.setStyleSheet(
             f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
-        self._run_btn.clicked.connect(self._run_solver); lay.addWidget(self._run_btn)
+        self._run_btn.clicked.connect(self._toggle_run)
+        top.addWidget(self._run_btn, 1)
+        lay.addLayout(top)
 
-        self._stop_btn = QPushButton("⏹  Stop")
-        self._stop_btn.setEnabled(False)
-        self._stop_btn.clicked.connect(self._stop_solver); lay.addWidget(self._stop_btn)
+        # ── floating progress bar (hidden until Run is pressed) ──
+        self._prog_wrap = QWidget()
+        self._prog_wrap.setStyleSheet(
+            f"background:{PAL['bg']};border:1px solid {PAL['border']};border-radius:4px;")
+        pw = QHBoxLayout(self._prog_wrap)
+        pw.setContentsMargins(8,4,8,4); pw.setSpacing(8)
+        self._prog = QProgressBar()
+        self._prog.setRange(0, 100); self._prog.setValue(0)
+        self._prog.setTextVisible(True)
+        self._prog.setFixedHeight(16)
+        self._prog.setStyleSheet(f"""
+            QProgressBar {{ background:{PAL['panel']}; border:1px solid {PAL['border']};
+                border-radius:3px; color:{PAL['text']}; font-size:10px; text-align:center; }}
+            QProgressBar::chunk {{ background:{PAL['accent']}; border-radius:2px; }}
+        """)
+        pw.addWidget(self._prog, 1)
+        self._prog_wrap.setVisible(False)
+        # keep it compact and "floating" — does not stretch with the window
+        prog_row = QHBoxLayout(); prog_row.addWidget(self._prog_wrap, 1); prog_row.addStretch(0)
+        lay.addLayout(prog_row)
 
+        # ── output log ──
         lay.addWidget(QLabel("Output:"))
         self._log = QTextEdit(); self._log.setReadOnly(True)
         self._log.setFont(QFont("Monospace", 10))
-        # darker than the rest of the UI so the console reads as a terminal
         self._log.setStyleSheet(
             f"background:#0f1115;color:{PAL['text']};"
             f"border:1px solid {PAL['border']};")
@@ -3471,24 +3502,66 @@ class MainWindow(QMainWindow):
         self._log.clear()
         self._log.append(f"$ cd {self._proj_root}\n$ " + " ".join(cmd))
         self._log.append("-"*60)
-        self._run_btn.setEnabled(False); self._stop_btn.setEnabled(True)
+        # switch the button to Stop, reveal + reset the progress bar
+        self._set_running(True)
         self._tabs.setCurrentIndex(4)
         self._solver_thread = SolverThread(cmd, self._proj_root)
         self._solver_thread.output.connect(self._log.append)
-        self._solver_thread.finished.connect(self._on_solver_done)
+        self._solver_thread.progress.connect(self._on_solver_progress)
+        self._solver_thread.done.connect(self._on_solver_done)
         self._solver_thread.start()
+
+    def _fit_impedances(self):
+        """Run vectFIT over ALL materials (was the Scene tab's 'Fit all').
+        Defines cutoff frequency + ADE pole count and writes poles.txt / .fit,
+        which the solver needs before a run — hence it lives here on the Run tab."""
+        if not self._proj_root:
+            self._sb.showMessage("Open a project folder first."); return
+        self._mat_panel.run_fit_all()
+
+    def _toggle_run(self):
+        """The single Run/Stop button: launch if idle, stop if running."""
+        if self._solver_thread and self._solver_thread.isRunning():
+            self._stop_solver()
+        else:
+            self._run_solver()
+
+    def _set_running(self, running):
+        """Flip the Run/Stop button appearance and progress-bar visibility."""
+        if running:
+            self._run_btn.setText("⏹  Stop")
+            self._run_btn.setStyleSheet(
+                f"background:{PAL['err']};color:{PAL['bg']};font-weight:bold;padding:8px;")
+            self._prog.setValue(0)
+            self._prog_wrap.setVisible(True)
+            self._fitimp_btn.setEnabled(False)
+        else:
+            self._run_btn.setText("▶  Run")
+            self._run_btn.setStyleSheet(
+                f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
+            self._fitimp_btn.setEnabled(True)
+
+    def _on_solver_progress(self, pct):
+        self._prog.setValue(max(0, min(100, pct)))
 
     def _stop_solver(self):
         if self._solver_thread and self._solver_thread.isRunning():
-            self._solver_thread.terminate()
+            self._solver_thread.stop()
             self._log.append("\n[!] Stopped by user.")
+        self._set_running(False)
+        self._prog_wrap.setVisible(False)
 
     def _on_solver_done(self, rc):
-        self._run_btn.setEnabled(True); self._stop_btn.setEnabled(False)
+        # Re-enable launching, fill/hide the progress bar, report status.
+        self._set_running(False)
+        if rc == 0:
+            self._prog.setValue(100)
         c = PAL["ok"] if rc == 0 else PAL["err"]
         self._log.append(
             f'<span style="color:{c};">{"[OK]" if rc==0 else "[FAIL]"}  rc={rc}</span>')
         self._sb.showMessage(f"Solver finished  (rc={rc})")
+        # hide the floating bar shortly after completion
+        QTimer.singleShot(1500, lambda: self._prog_wrap.setVisible(False))
 
 
 # ─────────────────────────────────────────────────────────────
