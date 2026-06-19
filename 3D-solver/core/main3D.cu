@@ -337,9 +337,9 @@ int main(int argc, char *argv[]){
     
     for (int m = 0; m < nMat; ++m) {
     	std::string filename = (fit_dir / (names[m+1] + ".fit")).string(); // names[0] = Boundary
-    	std::cout << "\nReading: " << filename << "\n";	
+    	//std::cout << "\nReading: " << filename << "\n";	
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
-    	
+    	/*
 		// simple print test
     	std::printf("Rinf[%d] = %.15f\n", m, (float)Rinf[m]);
     	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
@@ -348,7 +348,7 @@ int main(int argc, char *argv[]){
     	std::printf("Ak(1,%d)  = %.15f   zeta(1,%d) = %.15f\n\n",
                 	m, (float)Ak[flat(1, m, K_m)],
                 	m, (float)zeta[flat(1, m, K_m)]);
-        
+        */
 	}	
 	
 
@@ -985,7 +985,7 @@ int main(int argc, char *argv[]){
 			std::swap(psi_1_old, psi_1);
 			std::swap(psi_2_old, psi_2);
 			
-			print_progress(n, Nt, 50);
+			print_progress(n, Nt, 50); // gui.py loads progress by querrying the output of this function!
 		
 			// Copy result back to host for creating animation
 			cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
