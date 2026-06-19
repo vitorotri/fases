@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QDoubleSpinBox, QSpinBox, QAbstractSpinBox,
     QGroupBox, QScrollArea, QAbstractItemView, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QStatusBar, QSlider, QMenu, QProgressBar
+    QStatusBar, QSlider, QMenu, QProgressBar, QDialog
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
@@ -118,6 +118,15 @@ OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 # "Binary:" field and is NOT overwritten by a project's saved manifest unless
 # that manifest points to a file that actually exists.
 SOLVER_BINARY = "/home/vitorotri/Documents/Github/phases/3D-solver/build/phases3D"
+
+# Predefined absorption-material catalogue used by the material table RMB menu.
+# Expected line format inside the text file:
+#   material_name  a63  a125  a250  a500  a1000  a2000  a4000  a8000
+# Example:
+#   rough_concrete 0.01 0.01 0.02 0.04 0.06 0.08 0.10 0.10
+# The GUI shows material_name as "material name" in the selector, but keeps the
+# file format underscore-based and human-editable.
+MATERIALS_FILE = "/home/vitorotri/Documents/Github/phases/common/materialsREF.txt"
 
 # ─────────────────────────────────────────────────────────────
 #  Project layout
@@ -1922,6 +1931,10 @@ class MaterialPanel(QWidget):
         self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tbl.itemSelectionChanged.connect(self._on_row_selected)
         self._tbl.itemChanged.connect(lambda *_: self._on_edit())
+        # RMB on a layer row: optional predefined-material lookup. Existing
+        # manual typing, paste, plotting, save and fit behaviour stays unchanged.
+        self._tbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tbl.customContextMenuRequested.connect(self._show_material_menu)
         from PySide6.QtWidgets import QSizePolicy
         self._tbl.setSizePolicy(QSizePolicy.Policy.Expanding,
                                 QSizePolicy.Policy.Expanding)
@@ -1977,6 +1990,192 @@ class MaterialPanel(QWidget):
         for c, v in enumerate(vals):
             self._tbl.setItem(r, c + 1, QTableWidgetItem(f"{v:.2f}"))
         self._tbl.blockSignals(False)
+
+    # ── predefined material catalogue (RMB on material table row) ──
+    def _show_material_menu(self, pos):
+        """Right-click row menu: optionally copy values from materialsREF.txt."""
+        item = self._tbl.itemAt(pos)
+        if item is None:
+            return
+        row = item.row()
+        if row < 0 or self._tbl.item(row, 0) is None:
+            return
+
+        self._tbl.setCurrentCell(row, max(item.column(), 0))
+        self._tbl.selectRow(row)
+
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{ background:{PAL['panel']}; color:{PAL['text']};
+                     border:1px solid {PAL['border']}; }}
+            QMenu::item {{ padding:5px 18px; border-radius:3px; }}
+            QMenu::item:selected {{ background:{PAL['accent']}; color:{PAL['bg']}; }}
+        """)
+        choose = menu.addAction("Choose material from predefined list…")
+        menu.addSeparator()
+        info = menu.addAction(f"Reference file: {MATERIALS_FILE}")
+        info.setEnabled(False)
+
+        chosen = menu.exec(self._tbl.viewport().mapToGlobal(pos))
+        if chosen == choose:
+            self._select_material_from_ref(row)
+
+    def _read_materials_ref(self):
+        """Return [(file_name, display_name, values)] parsed from MATERIALS_FILE.
+
+        Expected text format per non-comment line:
+            rough_concrete 0.01 0.01 0.02 0.04 0.06 0.08 0.10 0.10
+        Extra columns are ignored; malformed/incomplete lines are skipped.
+        """
+        materials = []
+        with open(MATERIALS_FILE, encoding="utf-8") as f:
+            for line_no, raw in enumerate(f, start=1):
+                line = raw.split("#")[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 1 + len(OCTAVE_BANDS):
+                    continue
+                file_name = parts[0]
+                try:
+                    vals = [float(x) for x in parts[1:1 + len(OCTAVE_BANDS)]]
+                except ValueError:
+                    continue
+                # Absorption coefficients are alpha values; clamp accidental
+                # out-of-range catalogue entries instead of poisoning the table.
+                vals = [min(1.0, max(0.0, v)) for v in vals]
+                display_name = file_name.replace("_", " ")
+                materials.append((file_name, display_name, vals))
+        return materials
+
+    def _select_material_from_ref(self, row):
+        """Show a readable selector window and apply the chosen alpha values."""
+        layer_item = self._tbl.item(row, 0)
+        if layer_item is None:
+            return
+        layer_name = layer_item.text()
+
+        if not os.path.isfile(MATERIALS_FILE):
+            QMessageBox.warning(
+                self, "materialsREF.txt not found",
+                "The predefined material catalogue was not found.\n\n"
+                f"Expected file:\n{MATERIALS_FILE}\n\n"
+                "Create this file with one material per line, for example:\n"
+                "rough_concrete 0.01 0.01 0.02 0.04 0.06 0.08 0.10 0.10")
+            self._status.setText(f"Missing predefined material file: {MATERIALS_FILE}")
+            return
+
+        try:
+            materials = self._read_materials_ref()
+        except Exception as ex:
+            QMessageBox.critical(
+                self, "Could not read materialsREF.txt",
+                f"Could not read predefined material catalogue:\n{MATERIALS_FILE}\n\n{ex}")
+            self._status.setText("Could not read predefined material catalogue.")
+            return
+
+        if not materials:
+            QMessageBox.information(
+                self, "No predefined materials",
+                "No valid materials were found. Each non-comment line must be:\n\n"
+                "material_name  a63  a125  a250  a500  a1000  a2000  a4000  a8000\n\n"
+                f"File:\n{MATERIALS_FILE}")
+            self._status.setText("No valid predefined materials found.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Choose predefined material for {layer_name}")
+        dlg.resize(640, 480)
+        dlg.setStyleSheet(f"""
+            QDialog {{ background:{PAL['bg']}; color:{PAL['text']}; }}
+            QLabel {{ color:{PAL['text']}; }}
+            QLineEdit {{ background:{PAL['panel']}; color:{PAL['text']};
+                         border:1px solid {PAL['border']}; padding:5px; }}
+            QListWidget {{ background:{PAL['panel']}; color:{PAL['text']};
+                           border:1px solid {PAL['border']}; }}
+            QListWidget::item {{ padding:5px; }}
+            QListWidget::item:selected {{ background:{PAL['accent']}; color:{PAL['bg']}; }}
+            QPushButton {{ background:{PAL['btn']}; color:{PAL['text']};
+                           border:1px solid {PAL['border']}; padding:6px 10px;
+                           border-radius:4px; }}
+            QPushButton:hover {{ background:{PAL['btn_hover']}; }}
+        """)
+
+        v = QVBoxLayout(dlg)
+        title = QLabel(f"Select predefined absorption values for layer: {layer_name}")
+        title.setStyleSheet(f"color:{PAL['accent2']}; font-weight:bold;")
+        v.addWidget(title)
+        path_lbl = QLabel(f"Source file: {MATERIALS_FILE}")
+        path_lbl.setWordWrap(True)
+        path_lbl.setStyleSheet(f"color:{PAL['subtext']}; font-size:10px;")
+        v.addWidget(path_lbl)
+
+        filt = QLineEdit()
+        filt.setPlaceholderText("Filter materials…")
+        v.addWidget(filt)
+
+        lst = QListWidget()
+        lst.setAlternatingRowColors(True)
+        v.addWidget(lst, 1)
+
+        for file_name, display_name, vals in materials:
+            values_txt = "  ".join(f"{x:.2f}" for x in vals)
+            item = QListWidgetItem(f"{display_name}     {values_txt}")
+            item.setToolTip(f"{file_name}\n" + "  ".join(str(b) for b in OCTAVE_BANDS) + " Hz")
+            item.setData(Qt.ItemDataRole.UserRole, (file_name, display_name, vals))
+            lst.addItem(item)
+        if lst.count():
+            lst.setCurrentRow(0)
+
+        def apply_filter(text):
+            q = text.strip().lower()
+            first_visible = -1
+            for i in range(lst.count()):
+                it = lst.item(i)
+                file_name, display_name, vals = it.data(Qt.ItemDataRole.UserRole)
+                hay = f"{file_name} {display_name}".lower()
+                hide = bool(q and q not in hay)
+                it.setHidden(hide)
+                if not hide and first_visible < 0:
+                    first_visible = i
+            if first_visible >= 0:
+                lst.setCurrentRow(first_visible)
+
+        filt.textChanged.connect(apply_filter)
+        lst.itemDoubleClicked.connect(lambda *_: dlg.accept())
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        cancel = QPushButton("Cancel")
+        ok = QPushButton("Apply material")
+        ok.setDefault(True)
+        cancel.clicked.connect(dlg.reject)
+        ok.clicked.connect(dlg.accept)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        v.addLayout(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = lst.currentItem()
+        if chosen is None or chosen.isHidden():
+            self._status.setText("No predefined material selected.")
+            return
+
+        file_name, display_name, vals = chosen.data(Qt.ItemDataRole.UserRole)
+        self._apply_material_values(row, vals)
+        self._status.setText(
+            f"Applied predefined material '{display_name}' to layer '{layer_name}' "
+            "(remember to Save all .mat).")
+
+    def _apply_material_values(self, row, vals):
+        """Copy alpha values to a row without changing the layer name."""
+        self._tbl.blockSignals(True)
+        for c, v in enumerate(vals[:len(OCTAVE_BANDS)], start=1):
+            self._tbl.setItem(row, c, QTableWidgetItem(f"{float(v):.2f}"))
+        self._tbl.blockSignals(False)
+        self._tbl.selectRow(row)
+        self._on_row_selected()
 
     # ── population ──
     def set_project(self, proj_root):
@@ -3635,7 +3834,7 @@ def main():
     fmt.setDepthBufferSize(24); fmt.setSamples(4)
     QSurfaceFormat.setDefaultFormat(fmt)
     app = QApplication(sys.argv)
-    app.setApplicationName("AcousticFVM GUI")
+    app.setApplicationName("FASES GUI")
     app.setFont(QFont("Segoe UI",10) if sys.platform=="win32" else
                 QFont("SF Pro Text",10) if sys.platform=="darwin" else
                 QFont("Ubuntu",10))
