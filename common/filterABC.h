@@ -95,7 +95,7 @@ void read_fit_file(
 
 
 // build bmap and return nB
-// re-implement on GPU if too low
+// re-implement on GPU if too slow
 int build_boundary_map(uint8_t *oid, int N, int *bmap){
     int nB = 0; // number of boundary cells
     // bmap has size N, as well as oid
