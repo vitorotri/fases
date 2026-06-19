@@ -1867,6 +1867,98 @@ class AlphaCurveEditor(QWidget):
         p.end()
 
 
+class MaterialRefPreview(QWidget):
+    """Compact name + sparkline preview for a predefined material entry."""
+    def __init__(self, display_name, vals, parent=None):
+        super().__init__(parent)
+        self._name = display_name
+        self._vals = [min(1.0, max(0.0, float(v))) for v in vals[:len(OCTAVE_BANDS)]]
+        self._selected = False
+        # Let the QListWidget own the mouse handling/selection.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setMinimumHeight(32)
+
+    def sizeHint(self):
+        # Width is intentionally close to the end of the curve column: enough
+        # room for names, a small controlled gap, and the compact preview.
+        return QSize(510, 36)
+
+    def set_selected(self, selected):
+        selected = bool(selected)
+        if selected != self._selected:
+            self._selected = selected
+            self.update()
+
+    def paintEvent(self, _):
+        from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
+        from PySide6.QtCore import QRectF, QPointF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        bg = QColor(PAL['accent']) if self._selected else QColor(PAL['panel'])
+        fg = QColor(PAL['bg']) if self._selected else QColor(PAL['text'])
+        curve_col = QColor(PAL['bg']) if self._selected else QColor(PAL['accent2'])
+
+        p.fillRect(self.rect(), bg)
+
+        margin = 10
+        gap = 22
+
+        p.setPen(fg)
+        p.setFont(QFont('Sans', 9))
+        fm = p.fontMetrics()
+
+        # Fixed columns keep every curve aligned. The name column is wide, but
+        # not excessive; the curve starts after a modest constant gap instead
+        # of jumping left/right with each material-name length.
+        curve_w = 46.0
+        name_w = min(390.0, max(260.0, self.width() - 2 * margin - gap - curve_w - 14.0))
+        curve_left = margin + name_w + gap
+        curve_rect = QRectF(curve_left, 8,
+                            curve_w, max(12, self.height() - 16))
+        name_rect = QRectF(margin, 0, name_w, self.height())
+
+        visible_name = fm.elidedText(self._name, Qt.TextElideMode.ElideRight,
+                                     int(name_rect.width()))
+        p.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   visible_name)
+
+        if len(self._vals) >= 2 and curve_rect.width() > 10 and curve_rect.height() > 6:
+            # The preview must be physically honest: absorption is always scaled
+            # against the full 0..1 range. Do NOT normalize each material to its
+            # own min/max, otherwise tiny changes such as 0.01 -> 0.02 look like
+            # large S-shaped curves even though they are practically flat.
+            pts = []
+            n = len(self._vals)
+            y_pad = curve_rect.height() * 0.14
+            y0 = curve_rect.bottom() - y_pad   # alpha = 0 reference
+            y1 = curve_rect.top() + y_pad      # alpha = 1 reference
+            y_usable = max(1.0, y0 - y1)
+
+            # Minimal 0..1 reference: top and bottom guide lines only, with no
+            # labels, values or axes. This preserves the clean list while making
+            # the vertical scale unambiguous.
+            guide_col = QColor(PAL['bg'] if self._selected else PAL['subtext'])
+            guide_col.setAlpha(85 if self._selected else 70)
+            p.setPen(QPen(guide_col, 1.0))
+            p.drawLine(QPointF(curve_rect.left(), y1), QPointF(curve_rect.right(), y1))
+            p.drawLine(QPointF(curve_rect.left(), y0), QPointF(curve_rect.right(), y0))
+
+            for i, v in enumerate(self._vals):
+                x = curve_rect.left() + (curve_rect.width() * i / (n - 1))
+                y = y0 - y_usable * min(1.0, max(0.0, v))
+                pts.append(QPointF(x, y))
+
+            # Piecewise-linear path: continuous, compact, and no cubic overshoot.
+            path = QPainterPath(pts[0])
+            for pt in pts[1:]:
+                path.lineTo(pt)
+            p.setPen(QPen(curve_col, 2.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+        p.end()
+
+
 class MaterialPanel(QWidget):
     """
     Single panel for ALL material layers:
@@ -2012,9 +2104,6 @@ class MaterialPanel(QWidget):
             QMenu::item:selected {{ background:{PAL['accent']}; color:{PAL['bg']}; }}
         """)
         choose = menu.addAction("Choose material from predefined list…")
-        menu.addSeparator()
-        info = menu.addAction(f"Reference file: {MATERIALS_FILE}")
-        info.setEnabled(False)
 
         chosen = menu.exec(self._tbl.viewport().mapToGlobal(pos))
         if chosen == choose:
@@ -2057,20 +2146,19 @@ class MaterialPanel(QWidget):
 
         if not os.path.isfile(MATERIALS_FILE):
             QMessageBox.warning(
-                self, "materialsREF.txt not found",
+                self, "Predefined material list not found",
                 "The predefined material catalogue was not found.\n\n"
-                f"Expected file:\n{MATERIALS_FILE}\n\n"
-                "Create this file with one material per line, for example:\n"
+                "Create it with one material per line, for example:\n"
                 "rough_concrete 0.01 0.01 0.02 0.04 0.06 0.08 0.10 0.10")
-            self._status.setText(f"Missing predefined material file: {MATERIALS_FILE}")
+            self._status.setText("Missing predefined material catalogue.")
             return
 
         try:
             materials = self._read_materials_ref()
-        except Exception as ex:
+        except Exception:
             QMessageBox.critical(
-                self, "Could not read materialsREF.txt",
-                f"Could not read predefined material catalogue:\n{MATERIALS_FILE}\n\n{ex}")
+                self, "Could not read material list",
+                "Could not read the predefined material catalogue. Check that it exists and is readable.")
             self._status.setText("Could not read predefined material catalogue.")
             return
 
@@ -2078,14 +2166,15 @@ class MaterialPanel(QWidget):
             QMessageBox.information(
                 self, "No predefined materials",
                 "No valid materials were found. Each non-comment line must be:\n\n"
-                "material_name  a63  a125  a250  a500  a1000  a2000  a4000  a8000\n\n"
-                f"File:\n{MATERIALS_FILE}")
+                "material_name  a63  a125  a250  a500  a1000  a2000  a4000  a8000")
             self._status.setText("No valid predefined materials found.")
             return
 
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Choose predefined material for {layer_name}")
-        dlg.resize(640, 480)
+        # Narrow enough that the list ends just after the compact curve column,
+        # but with enough room to keep material names readable.
+        dlg.resize(550, 480)
         dlg.setStyleSheet(f"""
             QDialog {{ background:{PAL['bg']}; color:{PAL['text']}; }}
             QLabel {{ color:{PAL['text']}; }}
@@ -2105,27 +2194,34 @@ class MaterialPanel(QWidget):
         title = QLabel(f"Select predefined absorption values for layer: {layer_name}")
         title.setStyleSheet(f"color:{PAL['accent2']}; font-weight:bold;")
         v.addWidget(title)
-        path_lbl = QLabel(f"Source file: {MATERIALS_FILE}")
-        path_lbl.setWordWrap(True)
-        path_lbl.setStyleSheet(f"color:{PAL['subtext']}; font-size:10px;")
-        v.addWidget(path_lbl)
-
         filt = QLineEdit()
         filt.setPlaceholderText("Filter materials…")
         v.addWidget(filt)
 
         lst = QListWidget()
         lst.setAlternatingRowColors(True)
+        lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         v.addWidget(lst, 1)
 
         for file_name, display_name, vals in materials:
-            values_txt = "  ".join(f"{x:.2f}" for x in vals)
-            item = QListWidgetItem(f"{display_name}     {values_txt}")
-            item.setToolTip(f"{file_name}\n" + "  ".join(str(b) for b in OCTAVE_BANDS) + " Hz")
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(510, 38))
+            item.setToolTip(display_name)
             item.setData(Qt.ItemDataRole.UserRole, (file_name, display_name, vals))
             lst.addItem(item)
+            lst.setItemWidget(item, MaterialRefPreview(display_name, vals, lst))
+
+        def refresh_preview_selection():
+            for i in range(lst.count()):
+                it = lst.item(i)
+                widget = lst.itemWidget(it)
+                if widget is not None:
+                    widget.set_selected(it.isSelected())
+
+        lst.itemSelectionChanged.connect(refresh_preview_selection)
         if lst.count():
             lst.setCurrentRow(0)
+            refresh_preview_selection()
 
         def apply_filter(text):
             q = text.strip().lower()
@@ -2140,6 +2236,7 @@ class MaterialPanel(QWidget):
                     first_visible = i
             if first_visible >= 0:
                 lst.setCurrentRow(first_visible)
+            refresh_preview_selection()
 
         filt.textChanged.connect(apply_filter)
         lst.itemDoubleClicked.connect(lambda *_: dlg.accept())
@@ -3303,14 +3400,14 @@ class MainWindow(QMainWindow):
 
         # ── top row: Fit impedances (left)  |  Run/Stop (right) ──
         top = QHBoxLayout(); top.setSpacing(8)
-        self._fitimp_btn = QPushButton("⚙  Fit impedances")
+        self._fitimp_btn = QPushButton("⡶⣰  Fit impedances")
         self._fitimp_btn.setStyleSheet(
             f"background:{PAL['btn']};color:{PAL['text']};font-weight:bold;padding:8px;")
         self._fitimp_btn.clicked.connect(self._fit_impedances)
         top.addWidget(self._fitimp_btn, 1)
 
         # Single Run/Stop toggle: shows ▶ Run normally, ⏹ Stop while running.
-        self._run_btn = QPushButton("▶  Run")
+        self._run_btn = QPushButton("▷  Simulate")
         self._run_btn.setStyleSheet(
             f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
         self._run_btn.clicked.connect(self._toggle_run)
@@ -3800,7 +3897,7 @@ class MainWindow(QMainWindow):
             self._float_prog.raise_()
             self._fitimp_btn.setEnabled(False)
         else:
-            self._run_btn.setText("▶  Run")
+            self._run_btn.setText("▷  Simulate")
             self._run_btn.setStyleSheet(
                 f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
             self._fitimp_btn.setEnabled(True)
