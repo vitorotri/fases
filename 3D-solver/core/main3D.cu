@@ -11,8 +11,15 @@
 #include <vector>
 #include <array>
 #include <sstream>
+#include <unistd.h>
 #include <cuda_runtime.h>
 #include "functions3D.cuh"
+
+unsigned long long available_ram_bytes() {
+    long pages = sysconf(_SC_AVPHYS_PAGES);
+    long page_size = sysconf(_SC_PAGESIZE);
+    return (unsigned long long)pages * (unsigned long long)page_size;
+}
 
 int main(int argc, char *argv[]){
 	if (argc < 5) {
@@ -453,6 +460,12 @@ int main(int argc, char *argv[]){
     // ---------------------------------------------------------------------------------------------------------
 
     // Allocate main host memory arrays and initilize to 0.0f
+    unsigned long long avail = available_ram_bytes();
+    std::size_t needed = 4 * N * sizeof(float);
+    if (needed > 0.7 * avail) {
+        std::cerr << "\n[!] Requested memory too large, skipping allocation\nTry a larger grid spacing or smaller cutoff frequency";
+        return -1;
+    }
     try {
     	p0 = new float[N](); // pressure deviations from p0
     	u0 = new float[N](); // x component of particle velocity 
@@ -510,6 +523,10 @@ int main(int argc, char *argv[]){
 	
 	float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well, depite below machine precision for float, so results may be wrong even with convergence!!!
 	
+    if (needed > 0.7 * avail) {
+        std::cerr << "\n[!] Requested memory too large, skipping allocation\nTry a larger grid spacing or smaller cutoff frequency\n";
+        return -1;
+    }
 	try {
 		p1 = new float[N](); // sound pressure
     	u1 = new float[N](); // x component of particle velocity 
