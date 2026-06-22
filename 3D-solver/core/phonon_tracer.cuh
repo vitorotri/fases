@@ -3,10 +3,10 @@
 #include <cmath>
 
 // phonon (quasi-particle) struct of arrays
-typedef struct phonons{
+typedef struct phonon{
 	uint32_t *id; // particle index / ID
 	float *x, *y, *z; // position [m]
-	float *u, *v, *w; // particle velocities [m/s]
+	float *u, *v, *w; // particle Lagrangean velocities [m/s]
 	float *p; // sound pressure computed from intensity (if absorption of material < 0.5 -> invert phase) [Pa]
 	// RGB colors
 	/*
@@ -14,7 +14,7 @@ typedef struct phonons{
 	uint8_t *G;
 	uint8_t *B;
 	*/
-} phonons;
+} phonon;
 
 // squared velocity
 __host__ __device__ u2(float u, float v, float w){
@@ -26,11 +26,19 @@ __host__ __device__ en(float rho0, float u2, float c, float p){
 	return 0.5f * (rho0*u2 + p*p/(rho0*c));
 }
 
-// N is the number of particles
-__global__ void trace(float h, int Nx, int Ny, float *S, float dt, int N){	
+// Should henerate with q Fibonacci sphere, more uniform
+pos_ptc(int N_ptc, phonon ptc){
+	for (int i = 0; i < (int)(N_ptc/2); i++){
+		
+	}
+}
+
+// N is the number of total particles = N_ptc * N_sources (flattened 2D array)
+// dt is obtained from the FVM method, non-adaptive
+__global__ void trace(float h, int Nx, int Ny, float *S, uint8_t *oid, float dt, int N_ptc, phonon ptc){	
 	int n = blockIdx.x*blockDim.x + threadIdx.x;
 	
-	if (n < N){
+	if (n < N_ptc){
 	
 		// phonon indexes
 		int i, j, k;
@@ -51,14 +59,14 @@ __global__ void trace(float h, int Nx, int Ny, float *S, float dt, int N){
     	float ny = -gy/gn;
     	float nz = -gz/gn;
 		
-		// phonon velocities
+		// phonon Lagrangean velocities
 		float vn = ptc.u[n]*nx + ptc.v[n]*ny + ptc.w[n]*nz;
 		
 		ptc.u[n] += -2.0f*vn*nx;
 		ptc.v[n] += -2.0f*vn*ny;
 		ptc.w[n] += -2.0f*vn*nz;
 		
-		// phonon positions
+		// phonon positions, non-adaptive
 		// x_i = x0_i + v_i * dt
 		ptc.x[n] += ptc.u[n]*dt;
 		ptc.y[n] += ptc.v[n]*dt;

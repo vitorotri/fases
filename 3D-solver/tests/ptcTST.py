@@ -19,6 +19,7 @@ N = 2000
 r = 3
 # Fibonacci sphere — uniform by construction, arbitrary N
 i = np.arange(N) + 0.5
+#print(i)
 z = 1 - 2*i/N                          # cos(phi) uniform in [-1, 1]
 phi = np.arccos(z)
 theta = np.pi * (1 + 5**0.5) * i       # golden-angle azimuth
