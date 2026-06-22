@@ -3,6 +3,7 @@
 #include <cmath>
 #include <ctime>
 #include <cstring>
+#include <new>
 #include <string>
 #include <filesystem>
 #include <iostream>
@@ -60,7 +61,7 @@ int main(int argc, char *argv[]){
     };
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
-	float *p0, *u0, *v0, *w0, *p1, *u1, *v1, *w1, *p2, *u2, *v2, *w2; // host field arrays
+	float *p0, *u0, *v0, *w0, *p1, *u1, *v1, *w1;// *p2, *u2, *v2, *w2; // host field arrays
 	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2; // device arrays
 	float *c_rl, *dd, *beta_rl; // WENO5 arrays
 	float rho, c, Temp; // density, speed of sound, temperature
@@ -301,7 +302,11 @@ int main(int argc, char *argv[]){
     
     int nMat = nObj - 1; // exclude bounding box
     
-    Rinf = new float[nMat]();
+    try {
+    	Rinf = new float[nMat]();
+    } catch (const std::bad_alloc&){
+    	std::cerr << "\n[!] Allocation for R_inf[] failed, not enough memory\n";
+    }
     
     // read K_m and L_m from file
     
@@ -321,13 +326,17 @@ int main(int argc, char *argv[]){
 	if (K_m < 1) K_m = 1;
 	if (L_m < 1) L_m = 1;
     
-	Ak 		= new float[K_m * nMat]();
-	zeta 	= new float[K_m * nMat]();
-	
-	Bl 		= new float[L_m * nMat]();
-    Cl 		= new float[L_m * nMat]();
-    alpha 	= new float[L_m * nMat]();
-    beta 	= new float[L_m * nMat](); 
+    try {
+		Ak 		= new float[K_m * nMat]();
+		zeta 	= new float[K_m * nMat]();
+		
+		Bl 		= new float[L_m * nMat]();
+    	Cl 		= new float[L_m * nMat]();
+    	alpha 	= new float[L_m * nMat]();
+    	beta 	= new float[L_m * nMat]();
+    } catch (const std::bad_alloc&){
+    	std::cerr << "\n[!] Allocation for remaining materials' coefficients, not enough memory\n";
+    }
     
     printf("\nChecking materials\n\n");
     for (size_t i = 0; i < names.size(); ++i){
@@ -443,11 +452,15 @@ int main(int argc, char *argv[]){
     
     // ---------------------------------------------------------------------------------------------------------
 
-    // Allocate remaining host memory and initilize to 0.0f
-    p0 = new float[N](); // pressure deviations from p0
-    u0 = new float[N](); // x component of particle velocity 
-    v0 = new float[N](); // y component of particle velocity 
-    w0 = new float[N](); // z component of particle velocity
+    // Allocate main host memory arrays and initilize to 0.0f
+    try {
+    	p0 = new float[N](); // pressure deviations from p0
+    	u0 = new float[N](); // x component of particle velocity 
+    	v0 = new float[N](); // y component of particle velocity 
+    	w0 = new float[N](); // z component of particle velocity
+    } catch (const std::bad_alloc&){
+    	std::cerr << "\n[!] Allocation for initial pressures and velocities failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n";
+    }
 
 	float C_CFL = conf_arr[4]; // Courant number: pick values < 0.5 (not equal to)
 	dt = C_CFL*h/c; // Courant-Friedrichs-Lewy condition
@@ -497,10 +510,14 @@ int main(int argc, char *argv[]){
 	
 	float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well, depite below machine precision for float, so results may be wrong even with convergence!!!
 	
-	p1 = new float[N](); // sound pressure
-    u1 = new float[N](); // x component of particle velocity 
-    v1 = new float[N](); // y component of particle velocity
-    w1 = new float[N](); // z component of particle velocity
+	try {
+		p1 = new float[N](); // sound pressure
+    	u1 = new float[N](); // x component of particle velocity 
+    	v1 = new float[N](); // y component of particle velocity
+    	w1 = new float[N](); // z component of particle velocity
+    } catch (const std::bad_alloc&){
+    	std::cerr << "\n[!] Allocation for remaining host arrays failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n";
+    }
 	
 	cudaMalloc(&d_p1, N*sizeof(float));
 	cudaMalloc(&d_u1, N*sizeof(float));
@@ -517,12 +534,12 @@ int main(int argc, char *argv[]){
 	// WENO5 option
 	
 	//if (kern == 2){
-		
+		/*
     	p2 = new float[N](); // sound pressure
     	u2 = new float[N](); // x component of particle velocity 
     	v2 = new float[N](); // y component of particle velocity
 		w2 = new float[N](); // z component of particle velocity
-		
+		*/
     	cudaMalloc(&d_p2, N*sizeof(float));
 		cudaMalloc(&d_u2, N*sizeof(float));
 		cudaMalloc(&d_v2, N*sizeof(float));
@@ -1066,7 +1083,7 @@ int main(int argc, char *argv[]){
     	// Free host memory
     	delete[] p0; delete[] u0; delete[] v0; delete[] w0;
     	delete[] p1; delete[] u1; delete[] v1; delete[] w1;
-    	delete[] p2; delete[] u2; delete[] v2; delete[] w2;
+    	//delete[] p2; delete[] u2; delete[] v2; delete[] w2;
     	
     	// Free device memory
     	cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0); cudaFree(d_w0);
