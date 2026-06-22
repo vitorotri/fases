@@ -241,14 +241,19 @@ int main(int argc, char *argv[]){
    		
     	Scene3D sc;
 
-		if(!parse_obj3d(path, &sc, h)) return 1;
+		if(!parse_obj3d(path, &sc, h)) return -1;
 		
-		build_sdf(&sc, h, &Nx, &Ny, &Nz, &Lx, &Ly, &Lz, &S);
-		
-		if(!build_oid_dense_cpu(sc, S, Nx, Ny, Nz, h, tol, &oid)){
-    		fprintf(stderr,"Failed to build OID map\n");
-    		return 1;
-		}
+		if(!build_sdf(&sc, h, &Nx, &Ny, &Nz, &Lx, &Ly, &Lz, &S)){
+        // grid_dims_checked already printed the reason + suggested h
+        scene_free(&sc);
+        return -1;
+    	}
+	
+    	if(!build_oid_dense(sc, S, Nx, Ny, Nz, h, tol, &oid)){   // GPU, CPU fallback
+        	fprintf(stderr,"Failed to build OID map\n");
+        	free(S); scene_free(&sc);
+        	return -1;
+    	}
 		
 		FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
 		if (file_S) {
