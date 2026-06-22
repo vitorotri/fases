@@ -25,6 +25,13 @@ Scope:
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <climits>
+
+#if defined(_WIN32)
+  #include <windows.h>
+#else
+  #include <unistd.h>
+#endif
 
 #ifdef __CUDACC__
   #include <cuda_runtime.h>
@@ -665,19 +672,146 @@ inline static int build_sdf_cpu(const Scene3D& Sc, int Nx,int Ny,int Nz, float h
     // transformed mesh bbox min.
     grid.origin=v3(0.f,0.f,0.f);
 
-    std::vector<float> tmp;
-    compute_sdf_cpu(Sc, grid, tmp);
-    std::memcpy(S, tmp.data(), sizeof(float)*N);
+    try {
+        std::vector<float> tmp;
+        compute_sdf_cpu(Sc, grid, tmp);
+        std::memcpy(S, tmp.data(), sizeof(float)*N);
+    } catch(const std::bad_alloc&){
+        std::fprintf(stderr,"[SDF3D] out of memory building CPU SDF scratch\n");
+        std::free(S);
+        return 0;
+    }
     *S_out = S;
     return 1;
 }
 
-inline static void build_sdf(Scene3D* sc, float h,
-                             int* Nx,int* Ny,int* Nz,
-                             float* Lx,float* Ly,float* Lz,
-                             float** S)
+// ============================================================
+// Memory-budget guard (prevents OOM freeze when h is too small)
+// ------------------------------------------------------------
+// A too-small h does NOT mean "user error". It means the requested grid does
+// not fit in memory. We compute the voxel count in double/int64 (overflow-safe),
+// compare the projected peak footprint against actually-available RAM/VRAM, and
+// refuse early with a clear, actionable message + a suggested minimum h — BEFORE
+// any allocation that would thrash the machine.
+//
+// Peak-memory model, bytes per voxel — these are the *coexisting* peaks during
+// construction, not the final array (which is just S = 4N):
+//   host: S(4) + absd(4) + sdf_out(4), all live at once in compute_sdf_cpu = 12
+//   dev : d_absu(4) + d_S(4), both live at once in the narrow-band SDF      = 8
+// (S_gpu, oid, d_oid live only in later phases and never beat these peaks.)
+// The 0.70/0.85 fractions are the safety margin on top of the true peak.
+// ============================================================
+
+static constexpr size_t PHASES_HOST_BYTES_PER_VOXEL = 12;
+static constexpr size_t PHASES_DEV_BYTES_PER_VOXEL  = 8;
+static constexpr double PHASES_HOST_BUDGET_FRAC     = 0.70;
+static constexpr double PHASES_DEV_BUDGET_FRAC      = 0.85;
+static constexpr double PHASES_GB                   = 1.073741824e9;
+
+// Available *physical* memory in bytes (best effort; 0 == unknown).
+inline static size_t phases_host_avail_bytes(){
+#if defined(_WIN32)
+    MEMORYSTATUSEX st; st.dwLength = sizeof(st);
+    if(GlobalMemoryStatusEx(&st)) return (size_t)st.ullAvailPhys;
+    return 0;
+#elif defined(__linux__)
+    long pages = sysconf(_SC_AVPHYS_PAGES);
+    long psz   = sysconf(_SC_PAGESIZE);
+    if(pages > 0 && psz > 0) return (size_t)pages * (size_t)psz;
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+// Smallest h whose grid fits the host budget for this domain.
+// N ~ (Lx/h)(Ly/h)(Lz/h) for small h  =>  h ~ cbrt(vol / Nmax).
+inline static double phases_suggest_min_h(double Lx,double Ly,double Lz,size_t host_avail){
+    if(host_avail == 0) return 0.0;
+    const double Nmax = (PHASES_HOST_BUDGET_FRAC * (double)host_avail)
+                        / (double)PHASES_HOST_BYTES_PER_VOXEL;
+    if(Nmax <= 1.0) return 0.0;
+    const double vol = (Lx>0?Lx:1.0) * (Ly>0?Ly:1.0) * (Lz>0?Lz:1.0);
+    return std::cbrt(vol / Nmax);
+}
+
+// Overflow-safe grid sizing + budget check. Returns false with a reason in `err`
+// instead of letting a tiny h blow past INT_MAX or exhaust RAM/VRAM.
+inline static bool grid_dims_checked(float Lxf,float Lyf,float Lzf,float h,
+                                     int* Nx,int* Ny,int* Nz,
+                                     std::string* err)
 {
-    if(!sc||!Nx||!Ny||!Nz||!Lx||!Ly||!Lz||!S) return;
+    if(!(h > 0.f)){ if(err) *err = "grid spacing h must be > 0 (got <=0 or NaN)"; return false; }
+
+    const double Lx=(double)Lxf, Ly=(double)Lyf, Lz=(double)Lzf;
+    const double nxd = std::ceil(Lx/h) + 1.0;   // +1: cell-centered convention
+    const double nyd = std::ceil(Ly/h) + 1.0;
+    const double nzd = std::ceil(Lz/h) + 1.0;
+
+    if(nxd < 2.0 || nyd < 2.0 || nzd < 2.0){
+        if(err) *err = "degenerate grid (domain too small for this h)";
+        return false;
+    }
+    if(nxd > (double)INT_MAX || nyd > (double)INT_MAX || nzd > (double)INT_MAX){
+        if(err) *err = "a grid dimension exceeds 2^31 (h far too small)";
+        return false;
+    }
+
+    const double Nd = nxd * nyd * nzd;           // exact enough; each factor < 2^31
+
+    // --- host RAM budget ---
+    const size_t host_avail = phases_host_avail_bytes();
+    const double host_need  = Nd * (double)PHASES_HOST_BYTES_PER_VOXEL;
+    if(host_avail > 0 && host_need > PHASES_HOST_BUDGET_FRAC * (double)host_avail){
+        char buf[360];
+        const double h_sug = phases_suggest_min_h(Lx,Ly,Lz,host_avail);
+        std::snprintf(buf,sizeof(buf),
+            "grid does not fit host RAM: h=%.6g gives ~%.3g voxels needing ~%.2f GB, "
+            "but only ~%.2f GB is free. Increase h (suggested h >= %.6g).",
+            (double)h, Nd, host_need/PHASES_GB, (double)host_avail/PHASES_GB, h_sug);
+        if(err) *err = buf;
+        return false;
+    }
+    // If availability is unknown, still refuse absurd footprints (~64 GB model).
+    if(host_avail == 0 && host_need > 6.8e10){
+        char buf[256];
+        std::snprintf(buf,sizeof(buf),
+            "grid likely too large: h=%.6g gives ~%.3g voxels (~%.2f GB). Increase h.",
+            (double)h, Nd, host_need/PHASES_GB);
+        if(err) *err = buf;
+        return false;
+    }
+
+#ifdef __CUDACC__
+    // --- device VRAM budget (the solver ultimately needs S+oid on the GPU) ---
+    size_t dfree=0, dtot=0;
+    if(cudaMemGetInfo(&dfree,&dtot) == cudaSuccess && dfree > 0){
+        const double dev_need = Nd * (double)PHASES_DEV_BYTES_PER_VOXEL;
+        if(dev_need > PHASES_DEV_BUDGET_FRAC * (double)dfree){
+            char buf[320];
+            std::snprintf(buf,sizeof(buf),
+                "grid does not fit GPU memory: ~%.3g voxels need ~%.2f GB device, "
+                "but only ~%.2f GB is free. Increase h.",
+                Nd, dev_need/PHASES_GB, (double)dfree/PHASES_GB);
+            if(err) *err = buf;
+            return false;
+        }
+    }
+#endif
+
+    *Nx = (int)nxd; *Ny = (int)nyd; *Nz = (int)nzd;
+    return true;
+}
+
+// Returns 1 on success, 0 on failure (invalid h, overflow, OOM, or alloc fail).
+// On failure: *Nx=*Ny=*Nz=0, *S=nullptr, and a reason is printed to stderr.
+inline static int build_sdf(Scene3D* sc, float h,
+                            int* Nx,int* Ny,int* Nz,
+                            float* Lx,float* Ly,float* Lz,
+                            float** S)
+{
+    if(!sc||!Nx||!Ny||!Nz||!Lx||!Ly||!Lz||!S) return 0;
+    *Nx=*Ny=*Nz=0; *S=nullptr;
 
     const int ng = 3;
 	const float pad = ng * h;
@@ -692,13 +826,22 @@ inline static void build_sdf(Scene3D* sc, float h,
 	*Lx = dom_max.x - dom_min.x;   // = size_x + 6h
 	*Ly = dom_max.y - dom_min.y;
 	*Lz = dom_max.z - dom_min.z;
-	
-	*Nx = (int)std::ceil(*Lx/h) + 1;  // cell centers at 0.5h etc.
-	*Ny = (int)std::ceil(*Ly/h) + 1;
-	*Nz = (int)std::ceil(*Lz/h) + 1;
+
+    // Overflow-safe sizing + RAM/VRAM budget check BEFORE any allocation.
+    std::string gerr;
+    if(!grid_dims_checked(*Lx,*Ly,*Lz, h, Nx,Ny,Nz, &gerr)){
+        std::fprintf(stderr, "[SDF3D] %s\n", gerr.c_str());
+        *Nx=*Ny=*Nz=0;
+        return 0;
+    }
 
     // Always compute CPU first
-    (void)build_sdf_cpu(*sc, *Nx,*Ny,*Nz, h, S);
+    if(!build_sdf_cpu(*sc, *Nx,*Ny,*Nz, h, S)){
+        std::fprintf(stderr, "[SDF3D] host allocation failed for %lld voxels\n",
+                     (long long)*Nx*(long long)*Ny*(long long)*Nz);
+        *Nx=*Ny=*Nz=0; *S=nullptr;
+        return 0;
+    }
 
 #ifdef __CUDACC__
     Grid3D grid; grid.Nx=*Nx; grid.Ny=*Ny; grid.Nz=*Nz; grid.h=v3(h,h,h); grid.origin=dom_min;
@@ -711,6 +854,7 @@ inline static void build_sdf(Scene3D* sc, float h,
         if(S_gpu) std::free(S_gpu);     // keep the CPU narrow-band result
     }
 #endif
+    return 1;
 }
 
 // ============================================================
@@ -819,8 +963,143 @@ inline static int build_oid_dense_cpu(const Scene3D& Sc, const float* S,
 }
 
 // ============================================================
-// Names / layers + free
+// OID helpers (GPU) — one thread per voxel, brute-force nearest triangle.
+// Bit-for-bit mirrors build_oid_dense_cpu's classification (same gid->lid order,
+// same SDF origin (0,0,0), same 1/sqrt normalization). Strict speed win since the
+// CPU path is the identical O(Ntri) search, just serial.
 // ============================================================
+#ifdef __CUDACC__
+
+__global__ void k_build_oid_dense(const float* __restrict__ S, uint8_t* __restrict__ oid,
+                                  Grid3D grid, dMesh3D mesh,
+                                  const int* __restrict__ gid2lid, int max_gid,
+                                  float h, float tol)
+{
+    const int Nx=grid.Nx, Ny=grid.Ny, Nz=grid.Nz;
+    const int i = blockIdx.x*blockDim.x + threadIdx.x;
+    const int j = blockIdx.y*blockDim.y + threadIdx.y;
+    const int k = blockIdx.z*blockDim.z + threadIdx.z;
+    if(i<1 || j<1 || k<1 || i>=Nx-1 || j>=Ny-1 || k>=Nz-1) return;
+
+    const size_t idx = (size_t)k*Ny*Nx + (size_t)j*Nx + (size_t)i;
+    const float s = S[idx];
+    const float d = fabsf(s);
+    if(!(s >= 0.0f && d <= tol)) return;
+
+    // central gradient (interior guaranteed by bounds above)
+    const size_t im=(size_t)k*Ny*Nx+(size_t)j*Nx+(size_t)(i-1);
+    const size_t ip=(size_t)k*Ny*Nx+(size_t)j*Nx+(size_t)(i+1);
+    const size_t jm=(size_t)k*Ny*Nx+(size_t)(j-1)*Nx+(size_t)i;
+    const size_t jp=(size_t)k*Ny*Nx+(size_t)(j+1)*Nx+(size_t)i;
+    const size_t km=(size_t)(k-1)*Ny*Nx+(size_t)j*Nx+(size_t)i;
+    const size_t kp=(size_t)(k+1)*Ny*Nx+(size_t)j*Nx+(size_t)i;
+    const float gx=(S[ip]-S[im])/(2.0f*h);
+    const float gy=(S[jp]-S[jm])/(2.0f*h);
+    const float gz=(S[kp]-S[km])/(2.0f*h);
+    const float gn2 = gx*gx+gy*gy+gz*gz;
+    if(gn2 <= 1e-24f) return;
+
+    const float inv_gn = 1.0f/sqrtf(gn2);   // match CPU exactly (not rsqrtf)
+    const vec3 n = v3(gx*inv_gn, gy*inv_gn, gz*inv_gn);
+
+    const vec3 C = v3(grid.origin.x + (i+0.5f)*h,
+                      grid.origin.y + (j+0.5f)*h,
+                      grid.origin.z + (k+0.5f)*h);
+    const vec3 W = v3(C.x - s*n.x, C.y - s*n.y, C.z - s*n.z);
+
+    float best_d2 = FLT_MAX; int best_gid = -1;
+    for(int t=0; t<mesh.ntris; ++t){
+        const Tri tri = mesh.d_tris[t];
+        const vec3 a = d_vertex_transformed(mesh, tri.v0);
+        const vec3 b = d_vertex_transformed(mesh, tri.v1);
+        const vec3 c = d_vertex_transformed(mesh, tri.v2);
+        const float dd = point_triangle_dist2(W,a,b,c);
+        if(dd < best_d2){ best_d2 = dd; best_gid = tri.group_id; }
+    }
+    if(best_gid < 0 || best_gid > max_gid) return;
+    const int lid = gid2lid[best_gid];
+    if(lid >= 0 && lid <= 254) oid[idx] = (uint8_t)lid;
+}
+
+// Drop-in replacement for build_oid_dense_cpu: same signature, returns host oid.
+// Returns 0 on any device error so the caller can fall back to the CPU path.
+inline static int build_oid_dense_gpu(const Scene3D& Sc, const float* S,
+                                      int Nx,int Ny,int Nz, float h, float tol,
+                                      uint8_t** OID_out)
+{
+    if(!S||Nx<=0||Ny<=0||Nz<=0||!OID_out) return 0;
+    const size_t N = (size_t)Nx*(size_t)Ny*(size_t)Nz;
+
+    uint8_t* oid = (uint8_t*)std::malloc(N);
+    if(!oid){ std::fprintf(stderr,"[OID3D-GPU] host malloc failed\n"); return 0; }
+
+    // gid -> local id, identical ordering to the CPU builder
+    int max_gid=-1;
+    for(const auto& t: Sc.tris) max_gid = std::max(max_gid, t.group_id);
+    if(max_gid < 0){ std::memset(oid, OID_NONE_U8, N); *OID_out = oid; return 1; }
+
+    std::vector<int> gid2lid((size_t)(max_gid+1), -1);
+    int lid_counter=0;
+    for(int gid=0; gid<=max_gid; ++gid){
+        bool appears=false;
+        for(const auto& t: Sc.tris){ if(t.group_id==gid){ appears=true; break; } }
+        if(!appears) continue;
+        if(lid_counter <= 254) gid2lid[(size_t)gid] = lid_counter++ + 1;
+    }
+
+    vec3* d_v=nullptr; Tri* d_t=nullptr; dMesh3D dm; std::string merr;
+    if(!upload_mesh_to_device(Sc, dm, d_v, d_t, &merr)){
+        std::fprintf(stderr,"[OID3D-GPU] %s\n", merr.c_str());
+        std::free(oid); return 0;
+    }
+
+    float* d_S=nullptr; uint8_t* d_oid=nullptr; int* d_map=nullptr;
+    bool ok = true;
+    if(cudaMalloc(&d_S,   N*sizeof(float))                  != cudaSuccess) ok=false;
+    if(ok && cudaMalloc(&d_oid, N*sizeof(uint8_t))          != cudaSuccess) ok=false;
+    if(ok && cudaMalloc(&d_map,(size_t)(max_gid+1)*sizeof(int)) != cudaSuccess) ok=false;
+    if(ok) ok = (cudaMemcpy(d_S, S, N*sizeof(float), cudaMemcpyHostToDevice)==cudaSuccess);
+    if(ok) ok = (cudaMemcpy(d_map, gid2lid.data(), (size_t)(max_gid+1)*sizeof(int),
+                            cudaMemcpyHostToDevice)==cudaSuccess);
+    if(ok) ok = (cudaMemset(d_oid, OID_NONE_U8, N)==cudaSuccess);
+
+    if(ok){
+        Grid3D grid; grid.Nx=Nx; grid.Ny=Ny; grid.Nz=Nz; grid.h=v3(h,h,h); grid.origin=v3(0.f,0.f,0.f);
+        dim3 TP(8,8,8);
+        dim3 B((Nx+7)/8,(Ny+7)/8,(Nz+7)/8);
+        k_build_oid_dense<<<B,TP>>>(d_S, d_oid, grid, dm, d_map, max_gid, h, tol);
+        ok = (cudaDeviceSynchronize()==cudaSuccess);
+    }
+    if(ok) ok = (cudaMemcpy(oid, d_oid, N*sizeof(uint8_t), cudaMemcpyDeviceToHost)==cudaSuccess);
+
+    if(d_S)   cudaFree(d_S);
+    if(d_oid) cudaFree(d_oid);
+    if(d_map) cudaFree(d_map);
+    free_mesh_device(d_v, d_t);
+
+    if(!ok){
+        std::fprintf(stderr,"[OID3D-GPU] device path failed\n");
+        std::free(oid);
+        return 0;
+    }
+    *OID_out = oid;
+    return 1;
+}
+
+#endif // __CUDACC__
+
+// Auto-dispatch: try the GPU builder when compiled with nvcc, fall back to CPU
+// on any device error. Same signature/result as build_oid_dense_cpu.
+inline static int build_oid_dense(const Scene3D& Sc, const float* S,
+                                  int Nx,int Ny,int Nz, float h, float tol,
+                                  uint8_t** OID_out)
+{
+#ifdef __CUDACC__
+    if(build_oid_dense_gpu(Sc, S, Nx,Ny,Nz, h, tol, OID_out)) return 1;
+    std::fprintf(stderr,"[OID3D] GPU path unavailable, using CPU...\n");
+#endif
+    return build_oid_dense_cpu(Sc, S, Nx,Ny,Nz, h, tol, OID_out);
+}
 
 inline static int scene_layer_count_3d(const Scene3D& sc){
     return (int)sc.group_names.size() + 1; // Boundary + groups
