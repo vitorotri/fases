@@ -7,7 +7,7 @@ typedef struct phonon{
 	uint32_t *id; // particle index / ID
 	float *x, *y, *z; // position [m]
 	float *u, *v, *w; // particle Lagrangean velocities [m/s]
-	float *p; // sound pressure computed from intensity (if absorption of material < 0.5 -> invert phase) [Pa]
+	float *p; // sound pressure computed from intensity
 	// RGB colors
 	/*
 	uint8_t *R;
@@ -26,26 +26,36 @@ __host__ __device__ en(float rho0, float u2, float c, float p){
 	return 0.5f * (rho0*u2 + p*p/(rho0*c));
 }
 
-// Should henerate with q Fibonacci sphere, more uniform
-pos_ptc(int N_ptc, phonon ptc){
-	for (int i = 0; i < (int)(N_ptc/2); i++){
+// Should generate similar to a Fibonacci Sphere, more uniform
+// Kernel to init particle velocities (omnidirectional)
+__global__ init_V(int N_ptc, phonon ptcs, float c){
+	int n = blockIdx.x*blockDim.x + threadIdx.x;	
+	if (n < N_ptc){
 		
+		float i = n + 0.5;
+		float cz = 1.0 - 2.0*i/N_ptc;
+		float sz = sqrtf(1.0 - cz*cz);
+		float theta = M_PI * (1.0 + sqrtf(5.0)) * i
+		
+		ptcs.u[n] = c*sz*cos(theta);
+		ptcs.v[n] = c*sz*sin(theta);
+		ptcs.w[n] = c*cz;
 	}
 }
 
-// N is the number of total particles = N_ptc * N_sources (flattened 2D array)
+// N_ptc is the number of particles per source
+// N is total the number of total particles = N_ptc * N_sources (flattened 2D array)
 // dt is obtained from the FVM method, non-adaptive
-__global__ void trace(float h, int Nx, int Ny, float *S, uint8_t *oid, float dt, int N_ptc, phonon ptc){	
+__global__ void trace(float h, int Nx, int Ny, float *S, uint8_t *oid, float dt, int N_ptc, float *src_arr, float *rec_arr, phonon ptcs){	
 	int n = blockIdx.x*blockDim.x + threadIdx.x;
-	
 	if (n < N_ptc){
 	
 		// phonon indexes
 		int i, j, k;
 		
-		i = (int)(ptc.x[n] / h);
-		j = (int)(ptc.y[n] / h);
-		k = (int)(ptc.z[n] / h);
+		i = (int)(ptcs.x[n] / h);
+		j = (int)(ptcs.y[n] / h);
+		k = (int)(ptcs.z[n] / h);
 		
 		// gradients from S[] for detecting normals   
     	float gx = (S[flat3(i+1,j,k,Nx,Ny)] - S[flat3(i-1,j,k,Nx,Ny)]) * (0.5f / h);
@@ -60,18 +70,18 @@ __global__ void trace(float h, int Nx, int Ny, float *S, uint8_t *oid, float dt,
     	float nz = -gz/gn;
 		
 		// phonon Lagrangean velocities
-		float vn = ptc.u[n]*nx + ptc.v[n]*ny + ptc.w[n]*nz;
+		float vn = ptcs.u[n]*nx + ptcs.v[n]*ny + ptcs.w[n]*nz;
 		
-		ptc.u[n] += -2.0f*vn*nx;
-		ptc.v[n] += -2.0f*vn*ny;
-		ptc.w[n] += -2.0f*vn*nz;
+		ptcs.u[n] += -2.0f*vn*nx;
+		ptcs.v[n] += -2.0f*vn*ny;
+		ptcs.w[n] += -2.0f*vn*nz;
 		
 		// phonon positions, non-adaptive
 		// x_i = x0_i + v_i * dt
-		ptc.x[n] += ptc.u[n]*dt;
-		ptc.y[n] += ptc.v[n]*dt;
-		ptc.z[n] += ptc.w[n]*dt;
+		ptcs.x[n] += ptcs.u[n]*dt;
+		ptcs.y[n] += ptcs.v[n]*dt;
+		ptcs.z[n] += ptcs.w[n]*dt;
 		
-		delete[] ptc;
+		delete[] ptcs;
 	}
 }
