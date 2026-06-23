@@ -15,20 +15,19 @@ y = r*np.cos(T)*np.sin(P)
 z = r*np.cos(P)
 '''
 
-N = 2000
-r = 3
-# Fibonacci sphere — uniform by construction, arbitrary N
-i = np.arange(N) + 0.5
-#print(i)
-z = 1 - 2*i/N                          # cos(phi) uniform in [-1, 1]
-phi = np.arccos(z)
-theta = np.pi * (1 + 5**0.5) * i       # golden-angle azimuth
+N = 10000          # number of phonons
+c = 343.0          # speed of sound (use your local c)
 
-x = r*np.sin(phi)*np.cos(theta)
-y = r*np.sin(phi)*np.sin(theta)
-z = r*z
+i  = np.arange(N) + 0.5
+cz = 1 - 2*i/N                      # cos(phi), uniform in (-1, 1)
+sz = np.sqrt(1 - cz**2)            # sin(phi) = projection onto xy-plane
+theta = np.pi * (1 + 5**0.5) * i   # golden-angle azimuth
+
+vx = c*sz*np.cos(theta)
+vy = c*sz*np.sin(theta)
+vz = c*cz                          # = c*cos(phi)
 
 fig = plt.figure(figsize=(12, 12))
 ax = fig.add_subplot(projection='3d')
-ax.scatter(x.ravel(), y.ravel(), z.ravel(), c='r', marker='o')
+ax.scatter(vx.ravel(), vy.ravel(), vz.ravel(), c='r', marker='o')
 plt.show()
