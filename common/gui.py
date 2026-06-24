@@ -380,6 +380,7 @@ class GLViewer(QOpenGLWidget):
         # in the scene corresponds to which table row.
         self._hl_src = -1
         self._hl_rec = -1
+        self._glyph_queue = []   # per-frame source/receiver glyph overlay list
 
         # placement state
         self._mode      = self.MODE_NONE
@@ -563,6 +564,7 @@ class GLViewer(QOpenGLWidget):
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._setup_camera()
+        self._glyph_queue = []            # collected by _draw_sources/_receivers
         self._draw_gizmo()   # replaces grid + world axes
         self._draw_mesh()
         self._draw_sources()
@@ -573,6 +575,11 @@ class GLViewer(QOpenGLWidget):
             # show the same axis guide + coordinate readout while moving a point
             self._draw_drag_guide()
         self._draw_hud()
+        # source/receiver glyphs are drawn last, as a QPainter text overlay
+        if self._glyph_queue:
+            gp = QPainter(self)
+            self._paint_point_glyphs(gp)
+            gp.end()
 
     # ── drawing helpers ──────────────────────────────────────
     def _draw_gizmo(self):
@@ -803,250 +810,52 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
-    def _speaker_icon(self, x, y, z, scale, color):
-        """Draw a stylised loudspeaker at world position (x,y,z)."""
-        r, g, b = color
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
-        glPushMatrix()
-        glTranslatef(x, y, z)
-        # billboard — rotate to face camera (undo yaw+pitch)
-        glRotatef(-self._yaw,    0, 0, 1)
-        glRotatef(-self._pitch,  1, 0, 0)
-        glRotatef(-self._free_y, 0, 1, 0)
-        glRotatef(-self._free_x, 1, 0, 0)
-        glRotatef(-self._roll,   0, 0, 1)
-        s = scale
-
-        # body rectangle
-        glColor4f(r, g, b, 1.0)
-        glLineWidth(2.0)
-        glBegin(GL_LINE_LOOP)
-        glVertex3f(-s*0.25, -s*0.35, 0)
-        glVertex3f( s*0.25, -s*0.35, 0)
-        glVertex3f( s*0.25,  s*0.35, 0)
-        glVertex3f(-s*0.25,  s*0.35, 0)
-        glEnd()
-
-        # cone shape (trapezoid on right side)
-        glBegin(GL_LINE_LOOP)
-        glVertex3f( s*0.25, -s*0.35, 0)
-        glVertex3f( s*0.65, -s*0.60, 0)
-        glVertex3f( s*0.65,  s*0.60, 0)
-        glVertex3f( s*0.25,  s*0.35, 0)
-        glEnd()
-
-        # sound waves
-        glColor4f(r, g, b, 1.0)
-        for i in range(1, 3):
-            ri = s * (0.75 + i*0.25)
-            glBegin(GL_LINE_STRIP)
-            for a in range(-5, 6):
-                ang = math.radians(a * 10)
-                glVertex3f(s*0.65 + ri*math.cos(ang), ri*math.sin(ang), 0)
-            glEnd()
-
-        # dot at centre
-        glPointSize(5)
-        glColor4f(r, g, b, 1.0)
-        glBegin(GL_POINTS); glVertex3f(0, 0, 0); glEnd()
-
-        glPopMatrix()
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_LIGHTING)
-
-    def _mic_icon(self, x, y, z, scale, color):
-        """Draw a stylised microphone at world position (x,y,z)."""
-        r, g, b = color
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
-        glPushMatrix()
-        glTranslatef(x, y, z)
-        glRotatef(-self._yaw,    0, 0, 1)
-        glRotatef(-self._pitch,  1, 0, 0)
-        glRotatef(-self._free_y, 0, 1, 0)
-        glRotatef(-self._free_x, 1, 0, 0)
-        glRotatef(-self._roll,   0, 0, 1)
-        s = scale
-
-        # capsule (head)
-        glColor4f(r, g, b, 1.0)
-        glLineWidth(2.0)
-        segs = 16
-        glBegin(GL_LINE_STRIP)
-        for i in range(segs+1):
-            ang = math.radians(i * 180 / segs)
-            glVertex3f(s*0.22*math.cos(ang), s*0.55 + s*0.22*math.sin(ang), 0)
-        glEnd()
-        glBegin(GL_LINES)
-        glVertex3f(-s*0.22,  s*0.55, 0); glVertex3f(-s*0.22, -s*0.10, 0)
-        glVertex3f( s*0.22,  s*0.55, 0); glVertex3f( s*0.22, -s*0.10, 0)
-        glEnd()
-
-        # stand arc
-        glColor4f(r, g, b, 1.0)
-        glBegin(GL_LINE_STRIP)
-        for i in range(segs+1):
-            ang = math.radians(i * 180 / segs)
-            glVertex3f(s*0.38*math.cos(ang), -s*0.10 - s*0.28*math.sin(ang), 0)
-        glEnd()
-        # stem
-        glBegin(GL_LINES)
-        glVertex3f(0, -s*0.10, 0); glVertex3f(0, -s*0.62, 0)
-        # base
-        glVertex3f(-s*0.28, -s*0.62, 0); glVertex3f( s*0.28, -s*0.62, 0)
-        glEnd()
-
-        glPointSize(5)
-        glColor4f(r, g, b, 1.0)
-        glBegin(GL_POINTS); glVertex3f(0, 0, 0); glEnd()
-
-        glPopMatrix()
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_LIGHTING)
-
     def _outside_domain(self, x, y, z):
         """Return True if (x,y,z) lies outside the scene bounding box."""
         p = np.array([x, y, z], np.float32)
         return bool(np.any(p < self._domain_min) or np.any(p > self._domain_max))
 
-    def _icon_scale(self, wx, wy, wz, px=28):
-        """
-        Return the world-space radius that corresponds to `px` screen pixels
-        at the given world position, using the current projection matrices.
-        Falls back to a scene-span fraction if unprojection fails.
-        """
-        W, H = self.width(), self.height()
-        viewport = [int(0), int(0), int(W), int(H)]
-        try:
-            # project the world point to screen
-            sx, sy, sz = gluProject(float(wx), float(wy), float(wz),
-                                    self._mv, self._proj, viewport)
-            # unproject a point `px` pixels to the right at the same depth
-            ox, oy, _ = gluUnProject(float(sx) + px, float(sy), float(sz),
-                                     self._mv, self._proj, viewport)
-            return max(math.hypot(ox - wx, oy - wy), 1e-4)
-        except Exception:
-            return max(self._scene_span * 0.03, 0.05)
-
-    def _screen_offset_world(self, x, y, z, dx_px, dy_px=0):
-        """Return the world point that is (dx_px, dy_px) screen pixels from (x,y,z)."""
-        W, H = self.width(), self.height()
-        viewport = [int(0), int(0), int(W), int(H)]
-        sx, sy, sz = gluProject(float(x), float(y), float(z),
-                                self._mv, self._proj, viewport)
-        w = gluUnProject(float(sx) + dx_px, float(sy) + dy_px, float(sz),
-                         self._mv, self._proj, viewport)
-        return float(w[0]), float(w[1]), float(w[2])
-
-    def _marker_ball(self, x, y, z, color, px=3):
-        """
-        Small solid camera-facing dot at the EXACT placed coordinate (centre).
-        Constant pixel size, always faces the camera.
-        """
-        r, g, b = color
-        W, H = self.width(), self.height()
-        viewport = [int(0), int(0), int(W), int(H)]
-        try:
-            sx, sy, sz = gluProject(float(x), float(y), float(z),
-                                    self._mv, self._proj, viewport)
-            centre = np.array([x, y, z], np.float64)
-            rx = np.array(gluUnProject(float(sx) + px, float(sy), float(sz),
-                                       self._mv, self._proj, viewport), np.float64)
-            uy = np.array(gluUnProject(float(sx), float(sy) + px, float(sz),
-                                       self._mv, self._proj, viewport), np.float64)
-            vx = rx - centre     # screen-right in world
-            vy = uy - centre     # screen-up in world
-        except Exception:
-            return
-
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
-        glColor4f(r, g, b, 1.0)
-        segs = 16
-        glBegin(GL_TRIANGLE_FAN)
-        glVertex3f(centre[0], centre[1], centre[2])
-        for k in range(segs + 1):
-            a = 2 * math.pi * k / segs
-            p = centre + vx * math.cos(a) + vy * math.sin(a)
-            glVertex3f(p[0], p[1], p[2])
-        glEnd()
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_LIGHTING)
-
     def _point_glyph(self, x, y, z, color, kind, hl=False):
         """
-        Draw a source/receiver as a camera-facing concentric symbol at the EXACT
-        world coordinate (no offset glyph beside it):
-          • source   -> U+25C9 ◉  : filled disc with a filled inner dot
-          • receiver -> U+25CD ◍  : ring with the lower half filled
-        Constant screen size, always faces the camera, never depth-occluded.
+        Queue a source/receiver to be drawn as its real Unicode glyph at the
+        EXACT world coordinate (no offset icon beside it):
+          • source   -> U+25C9 ◉
+          • receiver -> U+25CD ◍
+        The glyph is rendered with QPainter as a 2D overlay after the GL scene
+        (see _paint_point_glyphs), so it uses the true font character, stays a
+        constant screen size and always faces the camera. Colour is preserved
+        (red when outside the domain, highlight tint when selected/hovered).
         """
-        r, g, b = color
         W, H = self.width(), self.height()
         viewport = [int(0), int(0), int(W), int(H)]
-        rad_px = 9 if hl else 7
         try:
             sx, sy, sz = gluProject(float(x), float(y), float(z),
                                     self._mv, self._proj, viewport)
-            centre = np.array([x, y, z], np.float64)
-            rx = np.array(gluUnProject(float(sx) + rad_px, float(sy), float(sz),
-                                       self._mv, self._proj, viewport), np.float64)
-            uy = np.array(gluUnProject(float(sx), float(sy) + rad_px, float(sz),
-                                       self._mv, self._proj, viewport), np.float64)
-            vx = rx - centre        # screen-right in world (one radius)
-            vy = uy - centre        # screen-up in world (one radius)
         except Exception:
             return
+        if sz < 0.0 or sz > 1.0:      # behind the camera / clipped
+            return
+        # GL y is bottom-up; QPainter y is top-down
+        self._glyph_queue.append((float(sx), float(H - sy), tuple(color),
+                                  kind, bool(hl)))
 
-        segs = 28
-        def ring_pt(rad, k):
-            a = 2 * math.pi * k / segs
-            return centre + vx * (rad * math.cos(a)) + vy * (rad * math.sin(a))
-
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
-        glColor4f(r, g, b, 1.0)
-
-        if kind == "source":
-            # ◉ filled outer disc
-            glBegin(GL_TRIANGLE_FAN)
-            glVertex3f(*centre)
-            for k in range(segs + 1):
-                glVertex3f(*ring_pt(1.0, k))
-            glEnd()
-            # inner dot in the background tone, then a small solid centre, to
-            # read as the bullseye of U+25C9
-            br, bg, bb = 0.05, 0.055, 0.07
-            glColor4f(br, bg, bb, 1.0)
-            glBegin(GL_TRIANGLE_FAN)
-            glVertex3f(*centre)
-            for k in range(segs + 1):
-                glVertex3f(*ring_pt(0.55, k))
-            glEnd()
-            glColor4f(r, g, b, 1.0)
-            glBegin(GL_TRIANGLE_FAN)
-            glVertex3f(*centre)
-            for k in range(segs + 1):
-                glVertex3f(*ring_pt(0.28, k))
-            glEnd()
-        else:
-            # ◍ outer ring (thick) + lower-half filled
-            glLineWidth(2.0)
-            glBegin(GL_LINE_LOOP)
-            for k in range(segs):
-                glVertex3f(*ring_pt(1.0, k))
-            glEnd()
-            # lower half fill (screen-down = negative vy)
-            glBegin(GL_TRIANGLE_FAN)
-            glVertex3f(*centre)
-            for k in range(segs + 1):
-                a = math.pi + math.pi * k / segs        # pi..2pi (lower half)
-                glVertex3f(*(centre + vx * math.cos(a) + vy * math.sin(a)))
-            glEnd()
-
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_LIGHTING)
+    def _paint_point_glyphs(self, painter):
+        """Render all queued source/receiver glyphs with QPainter."""
+        if not self._glyph_queue:
+            return
+        from PySide6.QtGui import QFont, QColor
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        for sx, sy, col, kind, hl in self._glyph_queue:
+            ch   = "\u25C9" if kind == "source" else "\u25CD"
+            size = 20 if hl else 16
+            f = QFont("Sans", size)
+            painter.setFont(f)
+            painter.setPen(QColor(int(col[0]*255), int(col[1]*255), int(col[2]*255)))
+            fm = painter.fontMetrics()
+            # centre the glyph on the projected point
+            wx = sx - fm.horizontalAdvance(ch) / 2.0
+            wy = sy + (fm.ascent() - fm.descent()) / 2.0
+            painter.drawText(int(round(wx)), int(round(wy)), ch)
 
     def _draw_sources(self):
         for i, pt in enumerate(self._sources):
