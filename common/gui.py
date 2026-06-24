@@ -11,9 +11,9 @@ Key bindings (GL viewport):
     LMB (normal)   : rotate camera
     MMB / drag     : pan
     Scroll         : zoom
-    R              : reset camera
+    T              : reset camera to the initial view
     S              : enter "place SOURCE" mode
-    E              : enter "place RECEIVER" mode   (R is reset, so E for rEceiver)
+    R              : enter "place RECEIVER" mode
     X / Y / Z      : (in placement mode) lock to that axis
     Click          : (in placement mode) confirm placement
     Escape         : cancel placement mode / deselect layer
@@ -432,6 +432,8 @@ class GLViewer(QOpenGLWidget):
             self._free_x = 0.0
             self._free_y = 0.0
             self._roll   = 0.0
+            # snapshot the exact initial view so reset can restore it precisely
+            self._save_home_view()
             # default placement position at mesh centre
             self._place_pos = ctr.copy()
         self.update()
@@ -972,36 +974,97 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
+    def _point_glyph(self, x, y, z, color, kind, hl=False):
+        """
+        Draw a source/receiver as a camera-facing concentric symbol at the EXACT
+        world coordinate (no offset glyph beside it):
+          • source   -> U+25C9 ◉  : filled disc with a filled inner dot
+          • receiver -> U+25CD ◍  : ring with the lower half filled
+        Constant screen size, always faces the camera, never depth-occluded.
+        """
+        r, g, b = color
+        W, H = self.width(), self.height()
+        viewport = [int(0), int(0), int(W), int(H)]
+        rad_px = 9 if hl else 7
+        try:
+            sx, sy, sz = gluProject(float(x), float(y), float(z),
+                                    self._mv, self._proj, viewport)
+            centre = np.array([x, y, z], np.float64)
+            rx = np.array(gluUnProject(float(sx) + rad_px, float(sy), float(sz),
+                                       self._mv, self._proj, viewport), np.float64)
+            uy = np.array(gluUnProject(float(sx), float(sy) + rad_px, float(sz),
+                                       self._mv, self._proj, viewport), np.float64)
+            vx = rx - centre        # screen-right in world (one radius)
+            vy = uy - centre        # screen-up in world (one radius)
+        except Exception:
+            return
+
+        segs = 28
+        def ring_pt(rad, k):
+            a = 2 * math.pi * k / segs
+            return centre + vx * (rad * math.cos(a)) + vy * (rad * math.sin(a))
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        glColor4f(r, g, b, 1.0)
+
+        if kind == "source":
+            # ◉ filled outer disc
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex3f(*centre)
+            for k in range(segs + 1):
+                glVertex3f(*ring_pt(1.0, k))
+            glEnd()
+            # inner dot in the background tone, then a small solid centre, to
+            # read as the bullseye of U+25C9
+            br, bg, bb = 0.05, 0.055, 0.07
+            glColor4f(br, bg, bb, 1.0)
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex3f(*centre)
+            for k in range(segs + 1):
+                glVertex3f(*ring_pt(0.55, k))
+            glEnd()
+            glColor4f(r, g, b, 1.0)
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex3f(*centre)
+            for k in range(segs + 1):
+                glVertex3f(*ring_pt(0.28, k))
+            glEnd()
+        else:
+            # ◍ outer ring (thick) + lower-half filled
+            glLineWidth(2.0)
+            glBegin(GL_LINE_LOOP)
+            for k in range(segs):
+                glVertex3f(*ring_pt(1.0, k))
+            glEnd()
+            # lower half fill (screen-down = negative vy)
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex3f(*centre)
+            for k in range(segs + 1):
+                a = math.pi + math.pi * k / segs        # pi..2pi (lower half)
+                glVertex3f(*(centre + vx * math.cos(a) + vy * math.sin(a)))
+            glEnd()
+
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
     def _draw_sources(self):
         for i, pt in enumerate(self._sources):
-            s   = self._icon_scale(pt[0], pt[1], pt[2], px=14)
             hl  = (i == self._hl_src)
             if self._outside_domain(pt[0], pt[1], pt[2]):
                 col = (1.0, 0.15, 0.15)
             else:
                 col = HL_COLOR if hl else SRC_COLOR
-            # highlighted point gets a larger marker dot so it stands out
-            self._marker_ball(pt[0], pt[1], pt[2], col, px=6 if hl else 3)
-            try:
-                ix, iy, iz = self._screen_offset_world(pt[0], pt[1], pt[2], 16)
-            except Exception:
-                ix, iy, iz = pt[0], pt[1], pt[2]
-            self._speaker_icon(ix, iy, iz, s, col)
+            self._point_glyph(pt[0], pt[1], pt[2], col, "source", hl=hl)
 
     def _draw_receivers(self):
         for i, pt in enumerate(self._receivers):
-            s   = self._icon_scale(pt[0], pt[1], pt[2], px=14)
             hl  = (i == self._hl_rec)
             if self._outside_domain(pt[0], pt[1], pt[2]):
                 col = (1.0, 0.15, 0.15)
             else:
                 col = HL_COLOR if hl else REC_COLOR
-            self._marker_ball(pt[0], pt[1], pt[2], col, px=6 if hl else 3)
-            try:
-                ix, iy, iz = self._screen_offset_world(pt[0], pt[1], pt[2], 16)
-            except Exception:
-                ix, iy, iz = pt[0], pt[1], pt[2]
-            self._mic_icon(ix, iy, iz, s, col)
+            self._point_glyph(pt[0], pt[1], pt[2], col, "receiver", hl=hl)
 
     def _draw_placement_cursor(self):
         """Axis arrow + crosshair at _cursor_world."""
@@ -1033,23 +1096,13 @@ class GLViewer(QOpenGLWidget):
             glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
             glEnd()
 
-        # preview: marker ball at the EXACT cross centre, icon offset to its right
-        s   = self._icon_scale(p[0], p[1], p[2], px=14)
+        # preview: draw the SAME glyph as a placed point, at the exact centre
         col_override = (1.0, 0.15, 0.15) \
                        if self._outside_domain(p[0], p[1], p[2]) else None
         icon_col = col_override if col_override else \
                    (SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR)
-        # ball at centre
-        self._marker_ball(p[0], p[1], p[2], icon_col)
-        # icon offset 16 px to the right
-        try:
-            ix, iy, iz = self._screen_offset_world(p[0], p[1], p[2], 16)
-        except Exception:
-            ix, iy, iz = p[0], p[1], p[2]
-        if self._mode == self.MODE_SRC:
-            self._speaker_icon(ix, iy, iz, s, icon_col)
-        else:
-            self._mic_icon(ix, iy, iz, s, icon_col)
+        kind = "source" if self._mode == self.MODE_SRC else "receiver"
+        self._point_glyph(p[0], p[1], p[2], icon_col, kind)
 
         glEnable(GL_LIGHTING)
 
@@ -1342,17 +1395,44 @@ class GLViewer(QOpenGLWidget):
         self._dist = max(0.001, self._dist * f)
         self.update()
 
+    def _save_home_view(self):
+        """Capture the current camera as the 'home' view that reset restores."""
+        self._home_view = {
+            "pivot":  self._pivot.copy(),
+            "pan":    self._pan.copy(),
+            "dist":   float(self._dist),
+            "yaw":    float(self._yaw),
+            "pitch":  float(self._pitch),
+            "free_x": float(getattr(self, "_free_x", 0.0)),
+            "free_y": float(getattr(self, "_free_y", 0.0)),
+            "roll":   float(getattr(self, "_roll", 0.0)),
+        }
+
+    def _reset_view(self):
+        """Restore the exact initial view captured at load time (pivot, pan,
+        distance/zoom and every orientation angle), so the scene returns to
+        precisely the same visualization each time."""
+        hv = getattr(self, "_home_view", None)
+        if hv is None:
+            return
+        self._pivot  = np.array(hv["pivot"], np.float32)
+        self._pan    = np.array(hv["pan"],   np.float32)
+        self._dist   = hv["dist"]
+        self._yaw    = hv["yaw"]
+        self._pitch  = hv["pitch"]
+        self._free_x = hv["free_x"]
+        self._free_y = hv["free_y"]
+        self._roll   = hv["roll"]
+        self.update()
+
     def keyPressEvent(self, e):
         key = e.key()
         if key == Qt.Key.Key_Escape:
             self.exit_placement_mode()
             e.accept(); return
-        if key == Qt.Key.Key_R and self._mode == self.MODE_NONE:
-            # reset camera
-            self._yaw = 35.0; self._pitch = -22.0
-            self._free_x = 0.0; self._free_y = 0.0; self._roll = 0.0
-            self._pan = np.zeros(3, np.float32)
-            self.update()
+        if key == Qt.Key.Key_T and self._mode == self.MODE_NONE:
+            # reset camera to the exact initial view captured at load time
+            self._reset_view()
             e.accept(); return
         # "G" toggles "edit positions" mode: press once to arm, press again to
         # disarm. While armed, LMB grabs and drags the nearest placed point.
@@ -3064,14 +3144,14 @@ class MainWindow(QMainWindow):
         self._src_btn.clicked.connect(lambda: self._toggle_placement("source"))
         place_bar.addWidget(self._src_btn)
 
-        self._rec_btn = QPushButton("Rec [T]")
+        self._rec_btn = QPushButton("Rec [R]")
         self._rec_btn.setCheckable(True)
         self._rec_btn.setFixedSize(90, 22)
         self._rec_btn.clicked.connect(lambda: self._toggle_placement("receiver"))
         place_bar.addWidget(self._rec_btn)
 
         hint = QLabel("Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
-                      "R: reset   S: src   T: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   "
+                      "T: reset view   S: src   R: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   "
                       "G then LMB-drag: move point (hold X/Y/Z to lock)   RMB: del   Ctrl+Z: undo   Esc: cancel")
         hint.setStyleSheet(f"color:{PAL['subtext']};font-size:9px;")
         place_bar.addWidget(hint)
@@ -3211,7 +3291,7 @@ class MainWindow(QMainWindow):
         self._sb.showMessage(f"Removed {kind} #{idx}")
 
     def keyPressEvent(self, e):
-        """Global key bindings. S=source, T=receiver, R=reset, X/Y/Z=axis lock."""
+        """Global key bindings. S=source, R=receiver, T=reset view, X/Y/Z=axis lock."""
         if e.matches(QKeySequence.StandardKey.Undo):
             self._undo_point_change()
             e.accept(); return
@@ -3221,10 +3301,15 @@ class MainWindow(QMainWindow):
             self._src_btn.setChecked(checked)
             self._toggle_placement("source")
             e.accept(); return
-        if key == Qt.Key.Key_T:
+        if key == Qt.Key.Key_R:
             checked = not self._rec_btn.isChecked()
             self._rec_btn.setChecked(checked)
             self._toggle_placement("receiver")
+            e.accept(); return
+        if key == Qt.Key.Key_T and self._gl._mode == GLViewer.MODE_NONE:
+            # reset the 3D view to the exact initial visualization
+            self._gl._reset_view()
+            self._sb.showMessage("View reset.")
             e.accept(); return
         if key == Qt.Key.Key_Escape:
             was_placing = self._src_btn.isChecked() or self._rec_btn.isChecked()
