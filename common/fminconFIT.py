@@ -470,6 +470,12 @@ else:
     else:
         fit_dir = os.path.abspath(os.path.join(project_root, "input", "fit"))
 
+# Octave-band fitted impedances for the ISM solver, written next to the .fit
+# files (sibling of fit_dir): <fit_dir>/../imp. Derived from fit_dir so the .imp
+# files always land in the SAME input/ dir as the .fit files, regardless of how
+# fit_dir was resolved (--fitdir, project.txt matdir, or the layout default).
+imp_dir = os.path.abspath(os.path.join(os.path.dirname(fit_dir), "imp"))
+
 if not os.path.isfile(config_path):
     sys.exit(f"\n[!] config.txt not found: {config_path}\n")
 
@@ -479,6 +485,7 @@ if _args.refit and os.path.exists(Npoles_path):
 print(f"[paths] config   : {config_path}")
 print(f"[paths] fit dir  : {fit_dir}")
 print(f"[paths] poles    : {Npoles_path}")
+print(f"[paths] imp dir  : {imp_dir}")
 
 # --------------------
 # Shared setup (config, air constants, frequency grid)
@@ -511,6 +518,10 @@ freq = np.logspace(np.log10(f_min), np.log10(f_max), Npts) # log-spaced
 
 Niter = 30       # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
 N = int(v[5])    # "number of poles" in MATLAB script (here: number of REAL starting poles)
+
+# Octave-band centre frequencies (Hz) — the bands the .mat alpha values use, and
+# the bands the .imp impedance export is sampled at for the ISM solver.
+OCTAVE_FC = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
 
 
 # --------------------------------------------------------------------------------
@@ -688,6 +699,37 @@ def fit_material(read_file, coefs_path, soft=False):
 
     print(f"[{name}] Saved coefficients to {coefs_path}")
 
+    # ----------------------------------------------------------------------
+    # SAVE FITTED IMPEDANCE PER OCTAVE BAND  ->  <input>/imp/<name>.imp
+    # ----------------------------------------------------------------------
+    # The ISM solver builds the angle-dependent, local-reaction reflection
+    # coefficient   R(theta) = (zeta*cos(theta) - 1) / (zeta*cos(theta) + 1),
+    # zeta = Z / z0 the NORMALISED specific impedance, so it needs Z at the 8
+    # octave-band centres. We evaluate the SAME fitted ADE model the wave solver
+    # realises (R_expected) at those centres and map R -> Z = z0*(1+R)/(1-R).
+    # CRITICAL: these are the FINAL coefficients, i.e. AFTER the Option A
+    # (Hornikx/Cotte) refinement above — the exact poles/residues written to the
+    # .fit and thus realised by the wave solver. Using the post-refinement model
+    # (not the raw VF output, not the raw octave target) keeps the ISM and the
+    # wave solver on the same surface. Near-rigid -> R~1 -> large real Z; soft ->
+    # R<0 -> sign carried through.
+    #
+    # Format (exactly two lines, 8 space-separated values each):
+    #   line 1: Re(Z) per band, 63 -> 8000 Hz
+    #   line 2: Im(Z) per band, 63 -> 8000 Hz
+    # Z is the specific acoustic impedance [Pa.s/m]; the ISM normalises by
+    # z0 = rho0*c0 (both available from config) to get zeta.
+    w_oct      = 2.0 * np.pi * OCTAVE_FC
+    R_oct_fit  = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w_oct)
+    Z_oct_fit  = Z_from_R(R_oct_fit, z0)
+
+    os.makedirs(imp_dir, exist_ok=True)
+    imp_path = os.path.join(imp_dir, name + ".imp")
+    with open(imp_path, "w") as f:
+        f.write(" ".join(f"{val:.12g}" for val in np.real(Z_oct_fit)) + "\n")
+        f.write(" ".join(f"{val:.12g}" for val in np.imag(Z_oct_fit)) + "\n")
+    print(f"[{name}] Saved octave-band impedance to {imp_path}")
+
     # Model response for summary plot / final RMS
     w = 2 * np.pi * freq
     R_hat = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w)
@@ -752,6 +794,23 @@ Npoles = np.array([[int(K_m), int(L_m)]], dtype=int)
 os.makedirs(os.path.dirname(Npoles_path), exist_ok=True)
 np.savetxt(Npoles_path, Npoles, fmt="%d", delimiter=" ")
 print(f"[poles] K_m={int(K_m)} L_m={int(L_m)} (scanned {len(_fit_files)} .fit files) -> {Npoles_path}")
+
+# ============================================================
+# OUTPUTS SUMMARY — absolute paths + file counts, so there is never any
+# ambiguity about WHERE the .fit and .imp files landed. If you don't see this
+# banner after a run, you are executing a different script than this one.
+# ============================================================
+_imp_written = sorted(glob.glob(os.path.join(imp_dir, "*.imp")))
+print("\n" + "=" * 60)
+print(" OUTPUTS")
+print(f"   .fit -> {fit_dir}   ({len(_fit_files)} file(s))")
+print(f"   .imp -> {imp_dir}   ({len(_imp_written)} file(s))")
+for _p_ in _imp_written:
+    print(f"          {os.path.basename(_p_)}")
+print("=" * 60 + "\n")
+if not _imp_written:
+    print(f"[!] No .imp files were written — check write permissions on {imp_dir} "
+          "and the run output above for errors.")
 
 # ============================================================
 # SUMMARY PLOTS — three figures (|R|, Re R, Im R), each a grid of
