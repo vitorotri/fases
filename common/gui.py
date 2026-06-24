@@ -2021,7 +2021,7 @@ class MaterialPanel(QWidget):
             QMenu::item {{ padding:5px 18px; border-radius:3px; }}
             QMenu::item:selected {{ background:{PAL['accent']}; color:{PAL['bg']}; }}
         """)
-        choose = menu.addAction("Choose material from predefined list…")
+        choose = menu.addAction("\u26C1  Choose material from predefined list…")
 
         chosen = menu.exec(self._tbl.viewport().mapToGlobal(pos))
         if chosen == choose:
