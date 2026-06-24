@@ -108,6 +108,10 @@ AXIS_COLORS = {
     'Z': (0.70, 1.00, 0.10),          # bright lime
 }
 
+# Opacity of the gizmo's opposite-side (negative-axis) balls, 0.0..1.0.
+# Set to 0.0 to hide them completely (fully transparent); 1.0 = fully opaque.
+GIZMO_NEG_ALPHA = 0.55
+
 OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 
 # ─────────────────────────────────────────────────────────────
@@ -645,43 +649,44 @@ class GLViewer(QOpenGLWidget):
             px, py, dz = project_axis(ax, ay, az)
             proj.append((px, py, dz, col, label))
 
-        # ── draw sticks (centre -> positive tip only) ──
-        glBegin(GL_LINES)
-        for px, py, dz, col, _ in proj:
-            glColor4f(*col)
-            glVertex2f(cx, cy_gl)
-            glVertex2f(cx + px*L, cy_gl + py*L)
-        glEnd()
-
-        # ── collect all six balls, then paint back-to-front ──
-        # Positive end: filled ball + letter. Negative end: a smaller HOLLOW
-        # ring (colored outline only), no letter — small enough to read clearly
-        # as the "back" of the axis while staying easy to tell apart. Sorting
-        # all six by depth gives correct 3D occlusion (painter's algorithm on
-        # 6 items, negligible cost).
-        br_neg = br * 0.7
-        balls = []
+        # ── build ONE draw list of sticks + balls, sorted by depth ──
+        # Every primitive (each stick and each ball) carries a representative
+        # depth and is painted back-to-front together, so a stick correctly
+        # passes in front of / behind another stick or a ball (painter's
+        # algorithm over ~9 items — no depth buffer, negligible cost).
+        #   item = (depth, kind, data...)
+        #     kind "stick" -> (px, py, col)
+        #     kind "ball"  -> (tx, ty, rad, col)
+        br_neg = br * 0.8
+        items = []
         for px, py, dz, col, label in proj:
-            balls.append(( dz, cx + px*L, cy_gl + py*L, col, True))   # +: filled
-            balls.append((-dz, cx - px*L, cy_gl - py*L, col, False))  # -: hollow
-        balls.sort(key=lambda t: t[0])            # farthest first, nearest last
+            # stick centre->+tip: sort by its midpoint depth (centre is depth 0)
+            items.append((dz * 0.5, "stick", px, py, col))
+            # positive ball: full size, opaque
+            items.append((dz, "ball", cx + px*L, cy_gl + py*L, br, col))
+            # negative ball: smaller, opacity from the editable GIZMO_NEG_ALPHA
+            ncol = (col[0], col[1], col[2],
+                    (col[3] if len(col) > 3 else 1.0) * GIZMO_NEG_ALPHA)
+            items.append((-dz, "ball", cx - px*L, cy_gl - py*L, br_neg, ncol))
+        items.sort(key=lambda t: t[0])           # farthest first, nearest last
 
         segs = 20
-        for dz, tx, ty, col, filled in balls:
-            glColor4f(*col)
-            if filled:
+        for it in items:
+            if it[1] == "stick":
+                _, _, px, py, col = it
+                glColor4f(*col)
+                glBegin(GL_LINES)
+                glVertex2f(cx, cy_gl)
+                glVertex2f(cx + px*L, cy_gl + py*L)
+                glEnd()
+            else:
+                _, _, tx, ty, rad, col = it
+                glColor4f(*col)
                 glBegin(GL_TRIANGLE_FAN)
                 glVertex2f(tx, ty)
                 for k in range(segs + 1):
                     a = 2 * math.pi * k / segs
-                    glVertex2f(tx + br * math.cos(a), ty + br * math.sin(a))
-                glEnd()
-            else:
-                glLineWidth(2.0)
-                glBegin(GL_LINE_LOOP)
-                for k in range(segs):
-                    a = 2 * math.pi * k / segs
-                    glVertex2f(tx + br_neg * math.cos(a), ty + br_neg * math.sin(a))
+                    glVertex2f(tx + rad * math.cos(a), ty + rad * math.sin(a))
                 glEnd()
     
         # ── DISABLE BLENDING AFTER GIZMO ──────────────────
