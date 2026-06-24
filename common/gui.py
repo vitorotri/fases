@@ -600,9 +600,9 @@ class GLViewer(QOpenGLWidget):
     
         # Add alpha (0.5 = 50% transparency) to each color
         axes = [            
-            ((1,0,0), AXIS_COLORS['X'] + (0.7,),  'X'),
-            ((0,1,0), AXIS_COLORS['Y'] + (0.85,), 'Y'),
-            ((0,0,1), AXIS_COLORS['Z'] + (0.7,),  'Z'),
+            ((1,0,0), AXIS_COLORS['X'] + (0.99,), 'X'),
+            ((0,1,0), AXIS_COLORS['Y'] + (0.99,), 'Y'),
+            ((0,0,1), AXIS_COLORS['Z'] + (0.99,), 'Z'),
         ]
     
         glViewport(vp_x, vp_y, box, box)
@@ -629,36 +629,60 @@ class GLViewer(QOpenGLWidget):
         pitch_r = math.radians(self._pitch)
     
         def project_axis(ax, ay, az):
+            # returns (screen_x, screen_y, depth) — depth is the view-space z
+            # (larger = nearer the camera) used only to paint-sort the 3 axes.
             x1 = ax * math.cos(yaw_r) - ay * math.sin(yaw_r)
             y1 = ax * math.sin(yaw_r) + ay * math.cos(yaw_r)
             z1 = az
             x2 = x1
             y2 = y1 * math.cos(pitch_r) - z1 * math.sin(pitch_r)
-            return x2, y2
-    
-        # ── draw sticks ───────────────────────────────────
+            depth = y1 * math.sin(pitch_r) + z1 * math.cos(pitch_r)
+            return x2, y2, depth
+
+        # Project all three tips once. depth = view-space z (larger = nearer).
+        proj = []
+        for (ax,ay,az), col, label in axes:
+            px, py, dz = project_axis(ax, ay, az)
+            proj.append((px, py, dz, col, label))
+
+        # ── draw sticks (centre -> positive tip only) ──
         glBegin(GL_LINES)
-        for (ax,ay,az), col, _ in axes:
-            px, py = project_axis(ax, ay, az)
-            # Use glColor4f for RGBA instead of glColor3f
-            glColor4f(*col)  
+        for px, py, dz, col, _ in proj:
+            glColor4f(*col)
             glVertex2f(cx, cy_gl)
             glVertex2f(cx + px*L, cy_gl + py*L)
         glEnd()
-    
-        # ── draw balls ────────────────────────────────────
+
+        # ── collect all six balls, then paint back-to-front ──
+        # Positive end: filled ball + letter. Negative end: a smaller HOLLOW
+        # ring (colored outline only), no letter — small enough to read clearly
+        # as the "back" of the axis while staying easy to tell apart. Sorting
+        # all six by depth gives correct 3D occlusion (painter's algorithm on
+        # 6 items, negligible cost).
+        br_neg = br * 0.7
+        balls = []
+        for px, py, dz, col, label in proj:
+            balls.append(( dz, cx + px*L, cy_gl + py*L, col, True))   # +: filled
+            balls.append((-dz, cx - px*L, cy_gl - py*L, col, False))  # -: hollow
+        balls.sort(key=lambda t: t[0])            # farthest first, nearest last
+
         segs = 20
-        for (ax,ay,az), col, _ in axes:
-            px, py = project_axis(ax, ay, az)
-            tx = cx + px * L
-            ty = cy_gl + py * L
-            glColor4f(*col)  # Use glColor4f for RGBA
-            glBegin(GL_TRIANGLE_FAN)
-            glVertex2f(tx, ty)
-            for k in range(segs + 1):
-                a = 2 * math.pi * k / segs
-                glVertex2f(tx + br * math.cos(a), ty + br * math.sin(a))
-            glEnd()
+        for dz, tx, ty, col, filled in balls:
+            glColor4f(*col)
+            if filled:
+                glBegin(GL_TRIANGLE_FAN)
+                glVertex2f(tx, ty)
+                for k in range(segs + 1):
+                    a = 2 * math.pi * k / segs
+                    glVertex2f(tx + br * math.cos(a), ty + br * math.sin(a))
+                glEnd()
+            else:
+                glLineWidth(2.0)
+                glBegin(GL_LINE_LOOP)
+                for k in range(segs):
+                    a = 2 * math.pi * k / segs
+                    glVertex2f(tx + br_neg * math.cos(a), ty + br_neg * math.sin(a))
+                glEnd()
     
         # ── DISABLE BLENDING AFTER GIZMO ──────────────────
         glDisable(GL_BLEND)
@@ -680,7 +704,7 @@ class GLViewer(QOpenGLWidget):
         painter.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
         fm = painter.fontMetrics()
         for (ax,ay,az), col, label in axes:
-            px, py = project_axis(ax, ay, az)
+            px, py, _dz = project_axis(ax, ay, az)
             mag = math.hypot(px, py) or 1.0
             ux, uy = px / mag, py / mag
             gx = cx + px * L + ux * (br + 8)     # tip + just past the ball
