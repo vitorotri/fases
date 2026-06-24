@@ -292,7 +292,7 @@ int main(int argc, char *argv[]){
     
     
     /*
-    // force for test with BCs without parsing (no need to comment above)
+    // force for test hypotetical scene with BCs without parsing (no need to comment above)
     Lx = 3.0; Ly = 4.0; Lz = 2.8;
     Nx = (int)(Lx/h); Ny = (int)(Ly/h); Nz = (int)(Lz/h);
     */
@@ -370,7 +370,7 @@ int main(int argc, char *argv[]){
                 	m, (float)Ak[flat(1, m, K_m)],
                 	m, (float)zeta[flat(1, m, K_m)]);
         */
-	}	
+	}
 	
 
 	// ----- device arrays for materials -----
@@ -519,12 +519,7 @@ int main(int argc, char *argv[]){
 	
 	// ---------------------------------- kernel options and extra arrays --------------------------------
 	
-	//int kern;
-	float dm;
-	/*
-	printf("\nChoose an option for time integration:\n\n 1) Godunov + Euler\n 2) WENO3 + SSP-RK3\n\n");
-	scanf("%d", &kern);
-	*/
+	float dm; // device memory
 	
 	float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well, depite below machine precision for float, so results may be wrong even with convergence!!!
 	
@@ -551,55 +546,48 @@ int main(int argc, char *argv[]){
 	cudaMemset(d_v1, 0.0, N * sizeof(float));
 	cudaMemset(d_w1, 0.0, N * sizeof(float));
 	
-	dm = 8*N*sizeof(float);
+	// WENO5 extra arrays
 	
-	// WENO5 option
+    cudaMalloc(&d_p2, N*sizeof(float));
+	cudaMalloc(&d_u2, N*sizeof(float));
+	cudaMalloc(&d_v2, N*sizeof(float));
+	cudaMalloc(&d_w2, N*sizeof(float));
+		
+	cudaMemset(d_p2, 0.0, N * sizeof(float));
+	cudaMemset(d_u2, 0.0, N * sizeof(float));
+	cudaMemset(d_v2, 0.0, N * sizeof(float));
+	cudaMemset(d_w2, 0.0, N * sizeof(float));
+			
+	cudaMallocManaged(&c_rl, 12*sizeof(float)); // coefficients
+	cudaMallocManaged(&beta_rl, 9*sizeof(float)); // coefficients for second term of beta_r
+	cudaMallocManaged(&dd, 3*sizeof(float)); // array
+			
+	c_rl[flat(0,0,12)] = 11.0/6.0; c_rl[flat(0,1,12)] = -7.0/6.0; c_rl[flat(0,2,12)] = 1.0/3.0;
+	c_rl[flat(1,0,12)] = 1.0/3.0; c_rl[flat(1,1,12)] = 5.0/6.0; c_rl[flat(1,2,12)] = -1.0/6.0;
+	c_rl[flat(2,0,12)] = -1.0/6.0; c_rl[flat(2,1,12)] = 5.0/6.0; c_rl[flat(2,2,12)] = 1.0/3.0;
+	c_rl[flat(3,0,12)] = 1.0/3.0; c_rl[flat(3,1,12)] = -7.0/6.0; c_rl[flat(3,2,12)] = 11.0/6.0;
+			
+	beta_rl[flat(0,0,9)] = 3.0; beta_rl[flat(0,1,9)] = -4.0; beta_rl[flat(0,2,9)] = 1.0;
+	beta_rl[flat(1,0,9)] = 1.0; beta_rl[flat(1,1,9)] = 0.0; beta_rl[flat(1,2,9)] = -1.0;
+	beta_rl[flat(2,0,9)] = 1.0; beta_rl[flat(2,1,9)] = -4.0; beta_rl[flat(2,2,9)] = 3.0;
+			
+	dd[0] = 3.0/10.0; dd[1] = 3.0/5.0; dd[2] = 1.0/10.0;
 	
-	//if (kern == 2){
-		/*
-    	p2 = new float[N](); // sound pressure
-    	u2 = new float[N](); // x component of particle velocity 
-    	v2 = new float[N](); // y component of particle velocity
-		w2 = new float[N](); // z component of particle velocity
-		*/
-    	cudaMalloc(&d_p2, N*sizeof(float));
-		cudaMalloc(&d_u2, N*sizeof(float));
-		cudaMalloc(&d_v2, N*sizeof(float));
-		cudaMalloc(&d_w2, N*sizeof(float));
+	dm = (12*N + 12+9+3 + nMat*(2*K_m + 4*L_m) + nB*(3*K_m + 6*L_m))*sizeof(float);
+	dm += N*(sizeof(uint8_t) + sizeof(int)); // oid and bmap
 		
-		cudaMemset(d_p2, 0.0, N * sizeof(float));
-		cudaMemset(d_u2, 0.0, N * sizeof(float));
-		cudaMemset(d_v2, 0.0, N * sizeof(float));
-		cudaMemset(d_w2, 0.0, N * sizeof(float));
-			
-		cudaMallocManaged(&c_rl, 12*sizeof(float)); // coefficients
-		cudaMallocManaged(&beta_rl, 9*sizeof(float)); // coefficients for second term of beta_r
-		cudaMallocManaged(&dd, 3*sizeof(float)); // array
-			
-		c_rl[flat(0,0,12)] = 11.0/6.0; c_rl[flat(0,1,12)] = -7.0/6.0; c_rl[flat(0,2,12)] = 1.0/3.0;
-		c_rl[flat(1,0,12)] = 1.0/3.0; c_rl[flat(1,1,12)] = 5.0/6.0; c_rl[flat(1,2,12)] = -1.0/6.0;
-		c_rl[flat(2,0,12)] = -1.0/6.0; c_rl[flat(2,1,12)] = 5.0/6.0; c_rl[flat(2,2,12)] = 1.0/3.0;
-		c_rl[flat(3,0,12)] = 1.0/3.0; c_rl[flat(3,1,12)] = -7.0/6.0; c_rl[flat(3,2,12)] = 11.0/6.0;
-			
-		beta_rl[flat(0,0,9)] = 3.0; beta_rl[flat(0,1,9)] = -4.0; beta_rl[flat(0,2,9)] = 1.0;
-		beta_rl[flat(1,0,9)] = 1.0; beta_rl[flat(1,1,9)] = 0.0; beta_rl[flat(1,2,9)] = -1.0;
-		beta_rl[flat(2,0,9)] = 1.0; beta_rl[flat(2,1,9)] = -4.0; beta_rl[flat(2,2,9)] = 3.0;
-			
-		dd[0] = 3.0/10.0; dd[1] = 3.0/5.0; dd[2] = 1.0/10.0;
-		
-		dm = (12*N + 12+9+3 + nMat*(2*K_m + 4*L_m) + nB*(3*K_m + 6*L_m))*sizeof(float);
-		dm += N*(sizeof(uint8_t) + sizeof(int)); // oid and bmap
-		
-		cudaDeviceSynchronize();
-	//}
+	cudaDeviceSynchronize();
+
 	
-	// ----------------------- Parse sources and receivers from argv[3] and argv[4] --------------------
+	// --------------------- Parse sources and receiver positions from argv[3] and argv[4] ---------------------
     
     // parse source(s)
     
-    //float *p_time = new float[Nt]();
+    //float *p_time = new float[Nt](); // timed single source
     //float *d_p_time;
     int i_src, j_src, k_src; // discretized position of source
+    
+    std::vector<float> src_arr; // source array on host
     
     //float src_y; // for raised cosine
     
@@ -610,16 +598,24 @@ int main(int argc, char *argv[]){
 	}
 	while (std::getline(file, line)){
     	if (line.empty() || line[0] == '#') continue;
+    	
     	float val_x, val_y, val_z, val_s;
     	std::istringstream iss(line);
+    	
     	if (iss >> val_x >> val_y >> val_z >> val_s){
         	i_src = (int)(val_x / h);
         	j_src = (int)(val_y / h);
         	k_src = (int)(val_z / h);
+        	
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
             	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
+            	
+            	// push positions into source array
+        		src_arr.push_back(val_x);
+        		src_arr.push_back(val_y);
+        		src_arr.push_back(val_z);
             	
             	// single timed source
             	//p_time[0] = val_s;
@@ -637,9 +633,14 @@ int main(int argc, char *argv[]){
         	}
     	}
 	}
-	
 	file.close();
 	file.clear();
+	
+	// copy source arrays to device
+	float *d_src_arr; // device array for source positions
+	cudaMalloc(&d_src_arr, src_arr.size() * sizeof(float));
+	cudaMemcpy(d_src_arr, src_arr.data(), src_arr.size() * sizeof(float), cudaMemcpyHostToDevice);
+	
 	/*
 	// raised cosine
 	float W_full = 0.04f;
@@ -672,9 +673,9 @@ int main(int argc, char *argv[]){
     // parse receiver(s)
     
     int i_rec, j_rec, k_rec; // receiver position
-    //i_rec = Nx/2; j_rec = Ny/2; k_rec = Nz/2; // safe default
     
-    std::vector<int> i_recV, j_recV, k_recV; // vectors for multiple receivers
+    std::vector<int> i_recV, j_recV, k_recV; // vectors for multiple receivers discrete positions (called multiple times on main loop)
+    std::vector<float> rec_arr; // receiver array on host with actual positions
     
     file.open(rec_path);
 	if (!file.is_open()){
@@ -690,6 +691,7 @@ int main(int argc, char *argv[]){
         	i_rec = (int)(val_x / h);
         	j_rec = (int)(val_y / h);
         	k_rec = (int)(val_z / h);
+        	
         	if (!(i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny && k_rec >= 0 && k_rec < Nz)){
         		printf("\n[!] Receiver(s) outside domain, will now stop...\n");
             	return -1;
@@ -698,17 +700,23 @@ int main(int argc, char *argv[]){
         		i_recV.push_back(i_rec);
         		j_recV.push_back(j_rec);
         		k_recV.push_back(k_rec);
+        		
+        		// push positions into receiver array
+        		rec_arr.push_back(val_x);
+        		rec_arr.push_back(val_y);
+        		rec_arr.push_back(val_z);
         	}
     	}
 	}
 	file.close();
 	file.clear();
 	
+	// copy receiver arrays to device
+	float *d_rec_arr; // device arrays for receiver positions
+	cudaMalloc(&d_rec_arr, rec_arr.size() * sizeof(float));
+	cudaMemcpy(d_rec_arr, rec_arr.data(), src_arr.size() * sizeof(float), cudaMemcpyHostToDevice);
 	
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
-	
-	//int opt; // opt param for some user inputs
-	
 	
 	/*
 	// peridoc BCs trick (if used), otherwise comment as well with the ones in the main loop
@@ -788,18 +796,8 @@ int main(int argc, char *argv[]){
 	
 	// Can handle much more memory if save animation in chuncks and assemble together:
 	// e.g., the last sound pressure field is the initial field for the next instant in time.
-	/*
-	printf("\n[OK] Memory to animate is %f GB\nProceed?\n\n 1) Yes\n 2) No\n\n", anim_s/(1000000000));
-	scanf("%d", &opt);
-	if (opt != 1) return -1;
-	*/
-	/*
-	int lim_ID = 0; // limiter_ID
-	if (kern != 2){
-		printf("\nType a limiter option then press ENTER:\n\n 0) no slope\n 1) central\n 2) minmod\n 3) superbee\n 4) MC\n 5) van Leer\n 6) van Albada\n\n");
-		scanf("%d", &lim_ID);
-	}
-	*/
+
+
 	// ---------------------------------- animation arrays ---------------------------------
 	
 	//int i0 = Nx / 2;
@@ -821,7 +819,7 @@ int main(int argc, char *argv[]){
 	
 	float TV_p_, TV_u_, TV_v_, TV_w_, TV_0, TV_1;
 	
-	// compute initial TVs if not using p_time[]
+	// compute initial Total Variations if not using p_time[]
 	
 	TV_p_ = TV(p0, Nx, Ny, Nz, h);
 	TV_u_ = TV(u0, Nx, Ny, Nz, h);
@@ -830,19 +828,8 @@ int main(int argc, char *argv[]){
 	
 	TV_0 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
 	
-	//TV_0 = 3.0 * h * h * p_time[0];
-	
-	// --------------------------------- Initial energy ------------------------------------
-	
-	// if pulse is only p-based sinusoid (max is 1.0)
-	//float E0 = 0.5 * p_time[0] * p_time[0] / (rho * c*c); // initial energy for delta pulse
-	
 	// -------------------------------------------------------------------------------------
-	/*
-	printf("\n[OK] Will now start %d iterations. Proceed?\n\n1) Yes\n2) No\n\n", Nt);
-	scanf("%d", &opt);
-	if (opt != 1) return -1;
-	*/
+
 	// open BIN file for writing pressure fields
 	FILE *file_pX = fopen(out_file("pressureX.bin").c_str(), "ab");
 	if (file_pX == NULL) {
@@ -860,16 +847,7 @@ int main(int argc, char *argv[]){
     	exit(1);
 	}
 	
-	/*
-	// open BIN file for writing pressure at single receiver
-	FILE *f_rec = fopen("output/IR.bin", "ab");
-	if (f_rec == NULL) {
-    	printf("[!] Error opening output/IR.bin file!\n");
-    	exit(1);
-	}
-	*/
-	
-	// open BIN files for writing pressure at multuple receivers
+	// open BIN files for writing pressure at multiple receivers
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
 	for (int ct = 0; ct < i_recV.size(); ct++) {
@@ -892,231 +870,141 @@ int main(int argc, char *argv[]){
 	printf("\n[OK] Simulation start\n\n");
 	tic = clock();
 
-	// Godunov + Euler
-	
-	//if (kern == 1){
+	while(n < Nt){
+				
+		// Launch WENO3 kernel + SSP-RK3
+				
+		// (0)
+			
+		//kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
+			
+		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+			
+		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 		/*
-		while(n < Nt){
-		
-		// Launch Euler kernel
+		kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
+		kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
+		*/
+		//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 			
-		//kernel_Euler<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, 2*lim_ID, 2*lim_ID + 1, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+		// (1)
 			
-		//kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_p1, Nx, Ny, h, d_S, d_R, d_oid, rho, c, n, dt, d_u0, d_v0, d_p0, tol, d_T, d_th, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, phi, psi_1, psi_2);
+		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+
+		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
+		/*
+		kernel_apply_periodic_x<<<BPx, TPx>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
+		kernel_apply_periodic_z<<<BPz, TPz>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
+		*/
+		//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p2, d_u2, d_v2, d_w2);
 			
-		// exchange arrays
-		cudaMemcpy(d_p0, d_p1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-		cudaMemcpy(d_u0, d_u1, N*sizeof(float), cudaMemcpyDeviceToDevice);
-		cudaMemcpy(d_v0, d_v1, N*sizeof(float), cudaMemcpyDeviceToDevice);
+		// (2)
 			
+		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+			
+		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+		/*
+		kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
+		kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
+		*/
+		//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
+
+		// sync
 		cudaDeviceSynchronize();
+
+		// faster than cudammemcoy() DeviceToDevice
+		std::swap(d_p0, d_p1);
+		std::swap(d_u0, d_u1);
+		std::swap(d_v0, d_v1);
+		std::swap(d_w0, d_w1);
 			
-		print_progress(n, Nt, 50);
-	
-		// Copy result back to host
-		cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
+		std::swap(phi_old, phi);
+		std::swap(psi_1_old, psi_1);
+		std::swap(psi_2_old, psi_2);
 			
-		// write to file
-		if (n % anim_step == 0){
-			fwrite(p1, sizeof(float), N, file_pX);
-        	fflush(file_pX);  // Ensure data is written to disk
-        	
-        	pbin_size += 1;
-        	
-        }
+		print_progress(n, Nt, 50); // gui.py loads progress by querrying the output of this function!
 		
+		// Copy result back to host for creating animation
+		cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
+			
+		// write animation slices
+		if (n % anim_step == 0){
+				
+			// YZ slice at i0: dst = j + Ny*k
+			#pragma omp parallel for collapse(2) schedule(static)
+			for (int k = 0; k < Nz; ++k){
+  				for (int j = 0; j < Ny; ++j){
+    				size_t dst = (size_t)j + (size_t)Ny * (size_t)k;
+    				size_t src = (size_t)i0 + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
+    				p_X[dst] = p0[src];
+  				}
+			}
+			fwrite(p_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_pX);
+			
+			// XZ slice at j0: dst = i + Nx*k
+			#pragma omp parallel for collapse(2) schedule(static)
+			for (int k = 0; k < Nz; ++k){
+  				for (int i = 0; i < Nx; ++i){
+    				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;
+    				size_t src = (size_t)i + (size_t)Nx * ((size_t)j0 + (size_t)Ny * (size_t)k);
+    				p_Y[dst] = p0[src];
+  				}
+			}
+			fwrite(p_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_pY);
+			
+			// XY slice in k0 (for z axis, contiguous in row-major order), faster the way below
+			size_t start = (size_t)Nx * (size_t)Ny * (size_t)k0;
+			std::memcpy(p_Z.data(), p0 + start, stride_Z * sizeof(float));
+			fwrite(p_Z.data(), sizeof(float), stride_Z, file_pZ);
+    			
+    		// increment real size of binnaries
+    		pbin_size += 1;
+		}
+        		
+        // write to file for single receiver IR
+		//fwrite(&p0[flat3(i_rec, j_rec, k_rec, Nx, Ny)], sizeof(float), 1, f_rec);
+			
+		// write to file for each receiver
+		// i_recV.size() should be the same as j_recV.size() and k_recV.size()
+		for (int ct = 0; ct < i_recV.size(); ct++){
+			files_rec[ct].write(
+				reinterpret_cast<const char*>(&p0[flat3(i_recV[ct], j_recV[ct], k_recV[ct], Nx, Ny)]),
+				sizeof(float)
+			);
+		}
+        		
 		n += 1; // update time-step
 	}
-	
-	// Copy final results back to host (for computing TVs)
-	
-	cudaMemcpy(p1, d_p1, N*sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(u1, d_u1, N*sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(v1, d_v1, N*sizeof(float), cudaMemcpyDeviceToHost);
 		
-	TV_p_ = TV(p1, Nx, Ny, Nz, h);
-	TV_u_ = TV(u1, Nx, Ny, Nz, h);
-	TV_v_ = TV(v1, Nx, Ny, Nz, h);
-	TV_w_ = TV(w1, Nx, Ny, Nz, h);
+	// Copy final results back to host (for computing TVs / Energy)
+	cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
+		
+	TV_p_ = TV(p0, Nx, Ny, Nz, h);
+	TV_u_ = TV(u0, Nx, Ny, Nz, h);
+	TV_v_ = TV(v0, Nx, Ny, Nz, h);
+	TV_w_ = TV(w0, Nx, Ny, Nz, h);
 		
 	TV_1 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
 	printf("\n\nTV_0 = %f\n", TV_0);
 	printf("\nTV_1 = %f\n", TV_1);
 		
 	is_TVD(TV_0, TV_1);
-
-    // Free memory
-    delete[] p0, delete[] u0, delete[] v0;
-    delete[] p1, delete[] u1, delete[] v1;
+		
+    // Free host memory
+    delete[] p0; delete[] u0; delete[] v0; delete[] w0;
+    delete[] p1; delete[] u1; delete[] v1; delete[] w1;
+    //delete[] p2; delete[] u2; delete[] v2; delete[] w2;
+    	
+    // Free device memory
+    cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0); cudaFree(d_w0);
     cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1); cudaFree(d_w1);
     cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2); cudaFree(d_w2);
-    */
-   // }
-    // WENO5 + SSP-RK3
-    //else{
-		while(n < Nt){
-			/*
-			// counter pressure for directive source
-			// be mindfull as this can work like a local obstacle, so reflections may arise
-			if (n < 10){
-				p0[flat(src_x-3, src_y-3, Nx)] = 0.0;
-				p0[flat(src_x-2, src_y-2, Nx)] = 0.0;
-				p0[flat(src_x-1, src_y-1, Nx)] = 0.0; 
-					
-				p0[flat(src_x-1, src_y, Nx)] = 0.0;
-				p0[flat(src_x, src_y-1, Nx)] = 0.0;
-				p0[flat(src_x-2, src_y, Nx)] = 0.0;
-				p0[flat(src_x, src_y-2, Nx)] = 0.0;
-				p0[flat(src_x-3, src_y, Nx)] = 0.0;
-				p0[flat(src_x, src_y-3, Nx)] = 0.0;
-					
-				cudaMemcpy(d_p, p, N*sizeof(float), cudaMemcpyHostToDevice);
-			}
-			*/
-				
-			// Launch WENO3 kernel + SSP-RK3
-				
-			// (0)
-			
-			//kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
-			
-			kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
-			
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
-			/*
-			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-			*/
-			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
-			
-			// (1)
-			
-			kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
-
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
-			/*
-			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
-			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
-			*/
-			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p2, d_u2, d_v2, d_w2);
-			
-			// (2)
-			
-			kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
-			
-			kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
-			/*
-			kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-			kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-			*/
-			//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
-
-			// sync
-			cudaDeviceSynchronize();
-
-			// faster than cudammemcoy() DeviceToDevice
-			std::swap(d_p0, d_p1);
-			std::swap(d_u0, d_u1);
-			std::swap(d_v0, d_v1);
-			std::swap(d_w0, d_w1);
-			
-			std::swap(phi_old, phi);
-			std::swap(psi_1_old, psi_1);
-			std::swap(psi_2_old, psi_2);
-			
-			print_progress(n, Nt, 50); // gui.py loads progress by querrying the output of this function!
-		
-			// Copy result back to host for creating animation
-			cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
-			
-			// write animation slices
-			if (n % anim_step == 0){
-				
-				// YZ slice at i0: dst = j + Ny*k
-				#pragma omp parallel for collapse(2) schedule(static)
-				for (int k = 0; k < Nz; ++k){
-  					for (int j = 0; j < Ny; ++j){
-    					size_t dst = (size_t)j + (size_t)Ny * (size_t)k;
-    					size_t src = (size_t)i0 + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
-    					p_X[dst] = p0[src];
-  					}
-				}
-				fwrite(p_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_pX);
-				
-				// XZ slice at j0: dst = i + Nx*k
-				#pragma omp parallel for collapse(2) schedule(static)
-				for (int k = 0; k < Nz; ++k){
-  					for (int i = 0; i < Nx; ++i){
-    					size_t dst = (size_t)i + (size_t)Nx * (size_t)k;
-    					size_t src = (size_t)i + (size_t)Nx * ((size_t)j0 + (size_t)Ny * (size_t)k);
-    					p_Y[dst] = p0[src];
-  					}
-				}
-				fwrite(p_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_pY);
-				
-				// XY slice in k0 (for z axis, contiguous in row-major order), faster the way below
-				size_t start = (size_t)Nx * (size_t)Ny * (size_t)k0;
-				std::memcpy(p_Z.data(), p0 + start, stride_Z * sizeof(float));
-				fwrite(p_Z.data(), sizeof(float), stride_Z, file_pZ);
-    			
-    			// increment real size of binnaries
-    			pbin_size += 1;
-			}
-        		
-        	// write to file for single receiver IR
-			//fwrite(&p0[flat3(i_rec, j_rec, k_rec, Nx, Ny)], sizeof(float), 1, f_rec);
-			
-			// write to file for each receiver
-			// i_recV.size() should be the same as j_recV.size() and k_recV.size()
-			for (int ct = 0; ct < i_recV.size(); ct++){
-				files_rec[ct].write(
-					reinterpret_cast<const char*>(&p0[flat3(i_recV[ct], j_recV[ct], k_recV[ct], Nx, Ny)]),
-					sizeof(float)
-				);
-			}
-        		
-			n += 1; // update time-step
-		}
-		
-		// Copy final results back to host (for computing TVs / Energy)
-		cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		
-		TV_p_ = TV(p0, Nx, Ny, Nz, h);
-		TV_u_ = TV(u0, Nx, Ny, Nz, h);
-		TV_v_ = TV(v0, Nx, Ny, Nz, h);
-		TV_w_ = TV(w0, Nx, Ny, Nz, h);
-		
-		TV_1 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
-		printf("\n\nTV_0 = %f\n", TV_0);
-		printf("\nTV_1 = %f\n", TV_1);
-		
-		is_TVD(TV_0, TV_1);
-		
-		/*
-		float E1 = Energy(p0, u0, v0, w0, Nx, Ny, Nz, h, rho, c);
-		
-		printf("\nE0 = %.12f\n", E0);
-		printf("\nE1 = %.12f\n", E1);
-		is_conservative(E0, E1);
-		*/
-    	// Free host memory
-    	delete[] p0; delete[] u0; delete[] v0; delete[] w0;
-    	delete[] p1; delete[] u1; delete[] v1; delete[] w1;
-    	//delete[] p2; delete[] u2; delete[] v2; delete[] w2;
-    	
-    	// Free device memory
-    	cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0); cudaFree(d_w0);
-    	cudaFree(d_p1); cudaFree(d_u1); cudaFree(d_v1); cudaFree(d_w1);
-    	cudaFree(d_p2); cudaFree(d_u2); cudaFree(d_v2); cudaFree(d_w2);
-    	cudaFree(c_rl); cudaFree(dd);
-    	
-    //}
+    cudaFree(c_rl); cudaFree(dd);
     
     fflush(file_pX); fflush(file_pY); fflush(file_pZ);
-	//fflush(f_rec);
     
     toc = clock();
     
@@ -1124,7 +1012,6 @@ int main(int argc, char *argv[]){
     printf("\n[OK] Simulation time: %f min \n\n", elapsed_time); 
     
     fclose(file_pX); fclose(file_pY); fclose(file_pZ);
-    //fclose(f_rec);
     files_rec.clear();
     fclose(fp);
     
@@ -1137,7 +1024,7 @@ int main(int argc, char *argv[]){
     
     printf("\n[OK] Printed header.txt for plot.py\n");
     
-    // ----- free arrays -----
+    // ----- free remaining arrays -----
     
     cudaFree(d_Rinf);
     cudaFree(d_Ak); cudaFree(d_zeta);
