@@ -54,6 +54,7 @@ int main(int argc, char *argv[]){
     std::filesystem::path poles_path = config_path.parent_path() / "poles.txt";
     std::filesystem::path fit_dir    = project_root / "input" / "fit";
     std::filesystem::path output_dir = project_root / "output";
+    std::filesystem::path imp_dir = project_root / "input" / "imp";
 
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
@@ -234,12 +235,10 @@ int main(int argc, char *argv[]){
     // -------------------------------------- process OBJ scene ------------------------------------
     
     std::vector<std::string> names; // global naming
-    
+    Scene3D sc;
    	if (ends_with_dotobj(path)){
    	
    		printf("\n[OK] processing scene...\n");
-   		
-    	Scene3D sc;
 
 		if(!parse_obj3d(path, &sc, h)) return -1;
 		
@@ -276,7 +275,6 @@ int main(int argc, char *argv[]){
 		cudaMalloc(&d_S, (size_t)Nx*Ny*Nz*sizeof(float));
 		cudaMemcpy(d_S, S, (size_t)Nx*Ny*Nz*sizeof(float), cudaMemcpyHostToDevice);
 		
-		scene_free(&sc);
     }
     // process PLY/VOX test
     else {
@@ -357,7 +355,7 @@ int main(int argc, char *argv[]){
 
     
     for (int m = 0; m < nMat; ++m) {
-    	std::string filename = (fit_dir / (names[m+1] + ".fit")).string(); // names[0] = Boundary
+    	std::string filename = (fit_dir / (names[m+1] + ".fit")).string(); // names[0] = BoundingBox
     	//std::cout << "\nReading: " << filename << "\n";	
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
     	/*
@@ -719,30 +717,6 @@ int main(int argc, char *argv[]){
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
 	/*
-	// peridoc BCs trick (if used), otherwise comment as well with the ones in the main loop
-	dim3 TPz(16,16);
-	dim3 BPz((Nx + TPz.x - 1)/TPz.x, (Ny + TPz.y - 1)/TPz.y);
-	kernel_periodic_trick_z<<<BPz, TPz>>>(d_S, d_oid, Nx, Ny, Nz, h);
-	cudaDeviceSynchronize();
-	dim3 TPx(16,16);
-	dim3 BPx((Ny + TPx.x - 1)/TPx.x, (Nz + TPx.y - 1)/TPx.y);
-	kernel_periodic_trick_x<<<BPx, TPx>>>(d_S, d_oid, Nx, Ny, Nz, h);
-	cudaDeviceSynchronize();
-	cudaMemcpy(S, d_S, N*sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(oid, d_oid, N*sizeof(uint8_t), cudaMemcpyDeviceToHost);
-	FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
-	if (file_S) {
-    	fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
-    	fclose(file_S);
-	}
-	FILE *file_oid = fopen(out_file("oid.bin").c_str(), "wb");
-	if (file_oid){
-    	fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
-    	fclose(file_oid);
-	}
-	*/
-	
-	/*
 	// occupancy check
 	int blockSize1D;
 	int minGridSize;
@@ -981,7 +955,7 @@ int main(int argc, char *argv[]){
 	cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
 	cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
 	cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		
+	/*
 	TV_p_ = TV(p0, Nx, Ny, Nz, h);
 	TV_u_ = TV(u0, Nx, Ny, Nz, h);
 	TV_v_ = TV(v0, Nx, Ny, Nz, h);
@@ -992,7 +966,7 @@ int main(int argc, char *argv[]){
 	printf("\nTV_1 = %f\n", TV_1);
 		
 	is_TVD(TV_0, TV_1);
-		
+	*/
     // Free host memory
     delete[] p0; delete[] u0; delete[] v0; delete[] w0;
     delete[] p1; delete[] u1; delete[] v1; delete[] w1;
@@ -1046,7 +1020,30 @@ int main(int argc, char *argv[]){
     
     printf("\n[OK] Freed arrays\n");  
     
-    // -----------------------
+    // --------------------------------------------- ISM Section -----------------------------------------------
+    
+    auto Z = ism_load_impedances_layered(imp_dir, names); // names[0]="BoundingBox"; handles the +1
+	//std::vector<int> g2m; // empty => identity: material_id == group_id
+	std::vector<std::vector<std::vector<ISMPath>>> out;
+	int max_order = 3; // parse from config.txt
+	ISMResult R = ism_solve(sc, src_arr, rec_arr, /*g2m*/{}, Z, max_order); // gets main values for IRs
+	
+	scene_free(&sc); // free scene
+	
+	float octave_bands[8] = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
+	
+	// allocate memory for IRs
+	
+	// compute IRs
+	// resuse variable n, mutse be zeroed each time -> n = 0
+	for (int i = 0; i < 8; i++){
+		if (f_cutoff > octave_bands[i]) continue;
+		else{
+		}
+	}
+	
+    
+    // ---------------------------------------------------------------------------------------------------------
     
     printf("\n[OK] Finished.\n\n"); 
     
