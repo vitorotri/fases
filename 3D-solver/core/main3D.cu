@@ -138,15 +138,6 @@ int main(int argc, char *argv[]){
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
     float tol = 3.0f*h; // tolerance
-
-	/*
-    float *R = NULL; // surfaces reflection coefficient
-    float *d_R = NULL;
-    float *T = NULL; // barrier transmission coefficient
-    float *d_T = NULL;
-    float *th = NULL; // barrier thickness
-    float *d_th = NULL;
-    */
     uint8_t *oid = NULL; // for surface attribution
     uint8_t* d_oid = NULL;
     
@@ -587,6 +578,7 @@ int main(int argc, char *argv[]){
     int i_src, j_src, k_src; // discretized position of source
     
     std::vector<float> src_arr; // source array on host
+    std::vector<float> src_pressure; // sound pressure values for sources
     
     //float src_y; // for raised cosine
     
@@ -615,6 +607,9 @@ int main(int argc, char *argv[]){
         		src_arr.push_back(val_x);
         		src_arr.push_back(val_y);
         		src_arr.push_back(val_z);
+        		
+        		// sound pressure values into pressure array
+        		src_pressure.push_back(val_s);
             	
             	// single timed source
             	//p_time[0] = val_s;
@@ -1018,7 +1013,7 @@ int main(int argc, char *argv[]){
 	//std::vector<int> g2m; // empty => identity: material_id == group_id
 	std::vector<std::vector<std::vector<ISMPath>>> out;
 	int max_order = 3; // parse from config.txt
-	ISMResult R = ism_solve(sc, src_arr, rec_arr, /*g2m*/{}, Z, max_order); // gets main values for IRs
+	ISMResult Q = ism_solve(sc, src_arr, rec_arr, /*g2m*/{}, Z, max_order, src_pressure); // gets main values for IRs
 	
 	scene_free(&sc); // free scene
 	
@@ -1026,27 +1021,47 @@ int main(int argc, char *argv[]){
 	int N_bands = 8; // start with total
 	float octave_bands[8] = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
 	for (int i = 0; i < 8; i++){
-		if (f_cutoff < octave_bands[i]){
+		if (f_cutoff <= octave_bands[i]){
 			N_bands -= i;
 			break;
 		}
 	}
-	std::cout << "\nN_bands = " << N_bands << "\n";
-	/*
+	//std::cout << "\nN_bands = " << N_bands << "\n";
+	
 	// allocate memory for ISM IRs: must have same size as wave-based IR, same dt (same fs), for each rec
 	// first index is receiver's index, second is sample, third one is octave band (flattened)
-	std::vector<float> p_ism(rec_arr.size() * Nt * 8, 0.0f);
+	std::vector<float> p_ism(Q.Nr * Nt * N_bands, 0.0);
 	
 	// compute IRs
-	// reuse variable n, must be zeroed each time -> n = 0
 	// for each band
-	for (int i = 0; i < 8; i++){
-		if (f_cutoff > octave_bands[i]) continue; // skip band
+	for (int j = 0; j < 8; j++){
+		if (f_cutoff > octave_bands[j]) continue; // skip band
 		else{
-			
+			// for each receiver
+			for (int r = 0; r < Q.Nr; r++){
+				// sum contributions of sources
+				for (int s = 0; s < Q.Ns; s++){
+					
+					// sum contributions of real sources
+					float d_0 = Q.direct_at(s,r); // direct distance
+					int t_0 = (int)(d_0 / c); // discrete time variable for direct ray
+					p_ism[flat(r,t_0,k)] += 1.0 / (4.0*M_PI*r_0);
+					
+					// sum contributions of image sources for a given real source
+					// for each image-source is in container Q.images_at()
+					for (const ISMImagePath& is : Q.images_at(s, r)){
+						float d = is.distance;
+						// for each surface k crossed by the image source
+						for(int k = 0; k < is.angle_rad.size(); k++){
+							float theta = is.angle_rad[k];
+							float R = R_from_Z(is.Z_re[][], is.Z_im[][], theta);
+						}
+					}
+				}
+			}
 		}
 	}
-	*/
+	
     
     // ---------------------------------------------------------------------------------------------------------
     

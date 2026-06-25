@@ -565,14 +565,19 @@ struct ISMImagePath {
 
 struct ISMResult {
     int Ns = 0, Nr = 0;
+    std::vector<float>                      src_pressure;  // [Ns]: initial sound pressure per real source (val_s)
     std::vector<float>                      direct;        // [Ns*Nr]: direct distance, 0.0f if invalid (1)
     std::vector<std::vector<ISMImagePath>>  images;        // [Ns*Nr]: valid image sources (2)
     inline int idx(int s, int r) const { return s*Nr + r; }
+    inline float pressure_at(int s) const { return src_pressure[(size_t)s]; }
     inline float direct_at(int s, int r) const { return direct[(size_t)(s*Nr + r)]; }
     inline const std::vector<ISMImagePath>& images_at(int s, int r) const { return images[(size_t)(s*Nr + r)]; }
 };
 
 // One-call entry point. Runs the ISM and returns the flat lists above.
+// src_pressure is the per-source initial pressure (val_s, the 4th column of src.txt);
+// pass {} to default every source to 1.0. It is NOT baked into distances/amplitudes --
+// it is returned per source so you scale that source's contributions: p = val_s * amp/dist * Rprod.
 inline static ISMResult ism_solve(
     const Scene3D& Sc,
     const std::vector<float>& src_arr,
@@ -580,6 +585,7 @@ inline static ISMResult ism_solve(
     const std::vector<int>& group_to_material,            // {} => material_id == group_id
     const std::vector<MaterialImpedance>& impedance_by_material,
     int max_order,
+    const std::vector<float>& src_pressure = {},
     ISMConfig cfg = ISMConfig())
 {
     std::vector<std::vector<std::vector<ISMPath>>> out;
@@ -590,6 +596,16 @@ inline static ISMResult ism_solve(
     R.Nr = R.Ns ? (int)out[0].size() : 0;
     R.direct.assign((size_t)R.Ns*R.Nr, 0.0f);
     R.images.assign((size_t)R.Ns*R.Nr, {});
+
+    // per-source pressure: copy if supplied (must match Ns), else default to 1.0
+    R.src_pressure.assign((size_t)R.Ns, 1.0f);
+    if(!src_pressure.empty()){
+        if((int)src_pressure.size() != R.Ns)
+            std::fprintf(stderr,"[ISM] src_pressure size %zu != number of sources %d; using as far as it goes.\n",
+                         src_pressure.size(), R.Ns);
+        const int n = std::min((int)src_pressure.size(), R.Ns);
+        for(int s=0;s<n;++s) R.src_pressure[(size_t)s] = src_pressure[(size_t)s];
+    }
 
     for(int s=0; s<R.Ns; ++s){
         for(int r=0; r<R.Nr; ++r){
