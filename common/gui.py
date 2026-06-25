@@ -875,7 +875,7 @@ class GLViewer(QOpenGLWidget):
         from PySide6.QtGui import QFont, QColor
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         for sx, sy, col, kind, hl in self._glyph_queue:
-            ch   = "\u25C9" if kind == "source" else "\u25CD"
+            ch   = "\u25C9\uFE0E" if kind == "source" else "\u25CD\uFE0E"
             size = 20 if hl else 16
             f = QFont("Sans", size)
             painter.setFont(f)
@@ -1953,7 +1953,7 @@ class MaterialPanel(QWidget):
 
         # ── buttons ──
         row = QHBoxLayout()
-        self._save_btn = QPushButton("🖫  Save all .mat")
+        self._save_btn = QPushButton("🖫\uFE0E  Save all .mat")
         self._save_btn.clicked.connect(self.save_all)
         row.addWidget(self._save_btn)
         # The fitting buttons moved to the Run tab ("Fit impedances"); the button
@@ -2601,8 +2601,8 @@ class PointTable(QWidget):
         btn_row = QHBoxLayout()
         # '+' / '−' are DRAWN as icons (always render, larger than the text)
         # while the labels stay at the normal button font size.
-        for sign, label, fn in [("+", "Add", self._add),
-                                 ("-", "Remove", self._remove)]:
+        for sign, label, fn in [("+\uFE0E", "Add", self._add),
+                                 ("-\uFE0E", "Remove", self._remove)]:
             b = QPushButton(label); b.clicked.connect(fn)
             b.setIcon(make_pm_icon(sign))
             b.setIconSize(QSize(16, 16))
@@ -3013,11 +3013,12 @@ class MainWindow(QMainWindow):
         root_lay.addWidget(self._tabs)                 # left, fixed width
         root_lay.addWidget(gl_wrap, stretch=1)         # right, takes the rest
 
-        self._tabs.addTab(self._build_scene_tab(),   "🗂  Scene")
-        self._tabs.addTab(self._build_src_tab(),     "🔊  Sources")
-        self._tabs.addTab(self._build_rec_tab(),     "🎙  Receivers")
-        self._tabs.addTab(self._build_config_tab(),  "⚙  Configs")
-        self._tabs.addTab(self._build_run_tab(),     "▶  Run")
+		# append "\uFE0E" in front of symbol to stay monochrome
+        self._tabs.addTab(self._build_scene_tab(),   "🗂\uFE0E  Scene")
+        self._tabs.addTab(self._build_src_tab(),     "🔊\uFE0E  Sources")
+        self._tabs.addTab(self._build_rec_tab(),     "🎙\uFE0E  Receivers")
+        self._tabs.addTab(self._build_config_tab(),  "⚙\uFE0E  Setup")
+        self._tabs.addTab(self._build_run_tab(),     "▶\uFE0E  Run")
 
         # Floating, draggable progress bar overlaying the 3D scene. Parented to
         # the GL container so it sits on top of the viewport; starts hidden and
@@ -3179,9 +3180,9 @@ class MainWindow(QMainWindow):
         self._proj_label.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         pv.addWidget(self._proj_label)
         pb = QHBoxLayout()
-        for lbl, fn in [("\U0001F5C0  New",  self._new_project),
-                        ("\U0001F5C1  Open", self._open_project),
-                        ("\U0001F5AB  Save", self._save_project)]:
+        for lbl, fn in [("\U0001F5C0\uFE0E  New",  self._new_project),
+                        ("\U0001F5C1\uFE0E  Open", self._open_project),
+                        ("\U0001F5AB\uFE0E  Save", self._save_project)]:
             b = QPushButton(lbl); b.clicked.connect(fn); pb.addWidget(b)
         pv.addLayout(pb)
         lay.addWidget(grp_proj)
@@ -3261,8 +3262,8 @@ class MainWindow(QMainWindow):
             self._pml[k] = chk; grid.addWidget(chk, idx//3, idx%3)
         lay.addRow(grid)
 
-        for lbl, fn in [("🖫  Save config.txt", self._save_config),
-                        ("🗁  Load config.txt", self._load_config)]:
+        for lbl, fn in [("🖫\uFE0E  Save config.txt", self._save_config),
+                        ("🗁\uFE0E  Load config.txt", self._load_config)]:
             b = QPushButton(lbl); b.clicked.connect(fn); lay.addRow(b)
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
@@ -3284,8 +3285,8 @@ class MainWindow(QMainWindow):
             lambda: self._on_table_row_selected("source"))
         lay.addWidget(self._src_tbl)
         br = QHBoxLayout()
-        for lbl, fn in [("🗁  Load src.txt", self._load_src),
-                        ("🖫  Save src.txt", self._save_src)]:
+        for lbl, fn in [("🗁\uFE0E  Load src.txt", self._load_src),
+                        ("🖫\uFE0E  Save src.txt", self._save_src)]:
             b = QPushButton(lbl); b.clicked.connect(fn); br.addWidget(b)
         lay.addLayout(br)
         return w
@@ -3302,8 +3303,8 @@ class MainWindow(QMainWindow):
             lambda: self._on_table_row_selected("receiver"))
         lay.addWidget(self._rec_tbl)
         br = QHBoxLayout()
-        for lbl, fn in [("🗁  Load rec.txt", self._load_rec),
-                        ("🖫  Save rec.txt", self._save_rec)]:
+        for lbl, fn in [("🗁\uFE0E  Load rec.txt", self._load_rec),
+                        ("🖫\uFE0E  Save rec.txt", self._save_rec)]:
             b = QPushButton(lbl); b.clicked.connect(fn); br.addWidget(b)
         lay.addLayout(br)
         return w
@@ -3323,14 +3324,14 @@ class MainWindow(QMainWindow):
 
         # ── top row: Fit impedances (left)  |  Run/Stop (right) ──
         top = QHBoxLayout(); top.setSpacing(8)
-        self._fitimp_btn = QPushButton("⡶⣰  Fit impedances")
+        self._fitimp_btn = QPushButton("⡶\uFE0E⣰\uFE0E  Fit impedances")
         self._fitimp_btn.setStyleSheet(
             f"background:{PAL['btn']};color:{PAL['text']};font-weight:bold;padding:8px;")
         self._fitimp_btn.clicked.connect(self._fit_impedances)
         top.addWidget(self._fitimp_btn, 1)
 
         # Single Run/Stop toggle: shows ▶ Run normally, ⏹ Stop while running.
-        self._run_btn = QPushButton("▷  Simulate")
+        self._run_btn = QPushButton("▷\uFE0E  Simulate")
         self._run_btn.setStyleSheet(
             f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
         self._run_btn.clicked.connect(self._toggle_run)
