@@ -1018,7 +1018,7 @@ int main(int argc, char *argv[]){
 	scene_free(&sc); // free scene
 	
 	// determine number of valid bands for ISM (easier array allocation later on)
-	int N_bands = 8; // start with total
+	int N_bands = 8; // number of bands for ISM, start with total
 	float octave_bands[8] = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
 	for (int i = 0; i < 8; i++){
 		if (f_cutoff <= octave_bands[i]){
@@ -1034,8 +1034,8 @@ int main(int argc, char *argv[]){
 	
 	// compute IRs
 	// for each band
-	for (int j = 0; j < 8; j++){
-		if (f_cutoff > octave_bands[j]) continue; // skip band
+	for (int b = 0; b < 8; b++){
+		if (f_cutoff > octave_bands[b]) continue; // skip band
 		else{
 			// for each receiver
 			for (int r = 0; r < Q.Nr; r++){
@@ -1045,17 +1045,21 @@ int main(int argc, char *argv[]){
 					// sum contributions of real sources
 					float d_0 = Q.direct_at(s,r); // direct distance
 					int t_0 = (int)(d_0 / c); // discrete time variable for direct ray
-					p_ism[flat(r,t_0,k)] += 1.0 / (4.0*M_PI*r_0);
+					p_ism[flat(r,t_0,b)] += 1.0 / (4.0*M_PI*d_0);
 					
 					// sum contributions of image sources for a given real source
 					// for each image-source is in container Q.images_at()
 					for (const ISMImagePath& is : Q.images_at(s, r)){
-						float d = is.distance;
+						float P = 1.0; // iterated product
 						// for each surface k crossed by the image source
 						for(int k = 0; k < is.angle_rad.size(); k++){
 							float theta = is.angle_rad[k];
-							float R = R_from_Z(is.Z_re[][], is.Z_im[][], theta);
+							float R = R_from_Z(is.Z_re[k][b], is.Z_im[k][b], theta);
+							P *= R;
 						}
+						float d = is.distance;
+						float t = (int)(d / c);
+						p_ism[flat(r,t,b)] += P / (4*M_PI*d);
 					}
 				}
 			}
