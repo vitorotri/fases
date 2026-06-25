@@ -13,6 +13,7 @@
 #include <sstream>
 #include <unistd.h>
 #include <cuda_runtime.h>
+#include "ism3D.h"
 #include "functions3D.cuh"
 
 unsigned long long available_ram_bytes() {
@@ -634,11 +635,6 @@ int main(int argc, char *argv[]){
 	file.close();
 	file.clear();
 	
-	// copy source arrays to device
-	float *d_src_arr; // device array for source positions
-	cudaMalloc(&d_src_arr, src_arr.size() * sizeof(float));
-	cudaMemcpy(d_src_arr, src_arr.data(), src_arr.size() * sizeof(float), cudaMemcpyHostToDevice);
-	
 	/*
 	// raised cosine
 	float W_full = 0.04f;
@@ -709,10 +705,6 @@ int main(int argc, char *argv[]){
 	file.close();
 	file.clear();
 	
-	// copy receiver arrays to device
-	float *d_rec_arr; // device arrays for receiver positions
-	cudaMalloc(&d_rec_arr, rec_arr.size() * sizeof(float));
-	cudaMemcpy(d_rec_arr, rec_arr.data(), src_arr.size() * sizeof(float), cudaMemcpyHostToDevice);
 	
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
@@ -1030,18 +1022,31 @@ int main(int argc, char *argv[]){
 	
 	scene_free(&sc); // free scene
 	
+	// determine number of valid bands for ISM (easier array allocation later on)
+	int N_bands = 8; // start with total
 	float octave_bands[8] = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
-	
-	// allocate memory for IRs
-	
-	// compute IRs
-	// resuse variable n, mutse be zeroed each time -> n = 0
 	for (int i = 0; i < 8; i++){
-		if (f_cutoff > octave_bands[i]) continue;
-		else{
+		if (f_cutoff < octave_bands[i]){
+			N_bands -= i;
+			break;
 		}
 	}
+	std::cout << "\nN_bands = " << N_bands << "\n";
+	/*
+	// allocate memory for ISM IRs: must have same size as wave-based IR, same dt (same fs), for each rec
+	// first index is receiver's index, second is sample, third one is octave band (flattened)
+	std::vector<float> p_ism(rec_arr.size() * Nt * 8, 0.0f);
 	
+	// compute IRs
+	// reuse variable n, must be zeroed each time -> n = 0
+	// for each band
+	for (int i = 0; i < 8; i++){
+		if (f_cutoff > octave_bands[i]) continue; // skip band
+		else{
+			
+		}
+	}
+	*/
     
     // ---------------------------------------------------------------------------------------------------------
     
