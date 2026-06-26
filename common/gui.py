@@ -105,14 +105,28 @@ OUTSIDE_COLOR = (1.00, 0.15, 0.15)
 # wireframes/box. False = the default dark background with white wireframes.
 SCENE_LIGHT_MODE = False
 
-if SCENE_LIGHT_MODE:
-    SCENE_BG    = (1.00, 1.00, 1.00, 1.0)   # white background (GL clear)
-    WIRE_COLOR  = (0.0, 0.0, 0.0, 0.9)       # black wireframe + domain box
-    GREY_FILL   = (0.45, 0.45, 0.45)          # unselected-layer fill on white
-else:
-    SCENE_BG    = (0.05, 0.055, 0.07, 1.0)   # dark background (GL clear)
-    WIRE_COLOR  = (1.0, 1.0, 1.0, 0.9)        # white wireframe + domain box
-    GREY_FILL   = (0.62, 0.62, 0.62)          # unselected-layer fill on dark
+# These are mutable at runtime: the Dark/Light toggle button calls
+# set_scene_mode() to flip them, and every draw call reads the current values.
+def _scene_palette(light):
+    if light:
+        return {"bg":   (1.00, 1.00, 1.00, 1.0),   # white background (GL clear)
+                "wire": (0.0, 0.0, 0.0, 0.9),       # black wireframe + domain box
+                "grey": (0.45, 0.45, 0.45)}          # unselected fill on white
+    return {"bg":   (0.05, 0.055, 0.07, 1.0),       # dark background (GL clear)
+            "wire": (1.0, 1.0, 1.0, 0.9),           # white wireframe + domain box
+            "grey": (0.62, 0.62, 0.62)}              # unselected fill on dark
+
+_pal = _scene_palette(SCENE_LIGHT_MODE)
+SCENE_BG   = _pal["bg"]
+WIRE_COLOR = _pal["wire"]
+GREY_FILL  = _pal["grey"]
+
+def set_scene_mode(light):
+    """Flip the viewport colour scheme (background / wireframe / fill)."""
+    global SCENE_LIGHT_MODE, SCENE_BG, WIRE_COLOR, GREY_FILL
+    SCENE_LIGHT_MODE = bool(light)
+    p = _scene_palette(SCENE_LIGHT_MODE)
+    SCENE_BG, WIRE_COLOR, GREY_FILL = p["bg"], p["wire"], p["grey"]
 # Transparency of the SELECTED (highlighted) layer's fill, 0.0 (invisible) ..
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
@@ -403,6 +417,7 @@ class GLViewer(QOpenGLWidget):
         self._hl_src = -1
         self._hl_rec = -1
         self._glyph_queue = []   # per-frame source/receiver glyph overlay list
+        self._corner_widget = None   # optional bottom-left overlay (theme button)
 
         # placement state
         self._mode      = self.MODE_NONE
@@ -548,6 +563,21 @@ class GLViewer(QOpenGLWidget):
     def resizeGL(self, w, h):
         glViewport(0, 0, w, h)
 
+    def set_corner_widget(self, w):
+        """Register a child widget to keep pinned at the bottom-left corner,
+        just above the coordinate HUD (10 px in, ~30 px up from the bottom)."""
+        self._corner_widget = w
+        self._anchor_corner_widget()
+
+    def _anchor_corner_widget(self):
+        w = self._corner_widget
+        if w is not None:
+            w.move(10, self.height() - w.height() - 26)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._anchor_corner_widget()
+
     def _setup_camera(self):
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
@@ -584,6 +614,7 @@ class GLViewer(QOpenGLWidget):
         self._proj = glGetDoublev(GL_PROJECTION_MATRIX)
 
     def paintGL(self):
+        glClearColor(*SCENE_BG)        # re-applied each frame so Dark/Light toggles take effect
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._setup_camera()
         self._glyph_queue = []            # collected by _draw_sources/_receivers
@@ -1046,7 +1077,9 @@ class GLViewer(QOpenGLWidget):
                 painter = QPainter(self)
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
                 painter.setFont(QFont("Monospace", 9))
-                painter.setPen(QColor(PAL["subtext"]))
+                # this text has no banner behind it, so flip it with the scheme
+                painter.setPen(QColor(20, 20, 20) if SCENE_LIGHT_MODE
+                               else QColor(PAL["subtext"]))
                 txt = f"x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
                 painter.drawText(10, self.height() - 10, txt)
                 painter.end()
@@ -2828,9 +2861,9 @@ class FillTabBar(QTabBar):
 
 class DraggableProgress(QWidget):
     """
-    A small, floating progress bar that overlays the 3D scene. It is a child of
-    the viewport container (absolute-positioned, not in a layout) and can be
-    dragged anywhere with the mouse. Hidden until a run starts.
+    A small progress bar pinned to the top-left corner of the 3D viewport.
+    It is a child of the viewport container (absolute-positioned at a fixed
+    offset) and is hidden until a run starts.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2849,30 +2882,10 @@ class DraggableProgress(QWidget):
             QProgressBar::chunk {{ background:{PAL['accent']}; border-radius:2px; }}
         """)
         lay.addWidget(self._bar, 1)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self._drag_off = None
         self.hide()
 
     def setValue(self, v):
         self._bar.setValue(max(0, min(100, int(v))))
-
-    # ── drag to reposition within the parent ──
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._drag_off = e.position().toPoint()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-
-    def mouseMoveEvent(self, e):
-        if self._drag_off is not None and self.parent():
-            new = self.mapToParent(e.position().toPoint() - self._drag_off)
-            pr = self.parent().rect()
-            x = max(0, min(new.x(), pr.width()  - self.width()))
-            y = max(0, min(new.y(), pr.height() - self.height()))
-            self.move(x, y)
-
-    def mouseReleaseEvent(self, e):
-        self._drag_off = None
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
 
 
 class MainWindow(QMainWindow):
@@ -3006,11 +3019,11 @@ class MainWindow(QMainWindow):
         self._rec_btn.clicked.connect(lambda: self._toggle_placement("receiver"))
         place_bar.addWidget(self._rec_btn)
 
-        hint = QLabel("Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
+        self._hint_lbl = QLabel(
+                      "Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
                       "T: reset view   S: src   R: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   "
                       "G then LMB-drag: move point (hold X/Y/Z to lock)   RMB: del   Ctrl+Z: undo   Esc: cancel")
-        hint.setStyleSheet(f"color:{PAL['subtext']};font-size:9px;")
-        place_bar.addWidget(hint)
+        place_bar.addWidget(self._hint_lbl)
         place_bar.addStretch()
         bar_wrap = QWidget()
         bar_wrap.setFixedHeight(24)
@@ -3044,6 +3057,16 @@ class MainWindow(QMainWindow):
         self._float_prog = DraggableProgress(gl_wrap)
         self._float_prog.move(16, 16)
 
+        # Dark/Light scene toggle, overlaid on the 3D viewport just ABOVE the
+        # bottom-left coordinate readout. Parented to the GL widget so it sits
+        # over the scene; the GL viewer re-anchors it on resize.
+        self._theme_btn = QPushButton("Dark", self._gl)
+        self._theme_btn.setFixedSize(60, 22)
+        self._theme_btn.clicked.connect(self._toggle_scene_theme)
+        self._gl.set_corner_widget(self._theme_btn)   # bottom-left anchoring
+        self._theme_btn.show()
+        self._restyle_scene_theme()        # initial button + hint styling (both now exist)
+
         # status bar
         self._sb = QStatusBar()
         self.setStatusBar(self._sb)
@@ -3076,6 +3099,30 @@ class MainWindow(QMainWindow):
         self._sb.showMessage("Undid last source/receiver change.")
 
     # ── placement mode ───────────────────────────────────────
+    def _toggle_scene_theme(self):
+        """Flip the viewport between Dark and Light and repaint."""
+        set_scene_mode(not SCENE_LIGHT_MODE)
+        self._restyle_scene_theme()
+        self._gl.update()
+
+    def _restyle_scene_theme(self):
+        """Style the Dark/Light button to mirror the scene (background = scene
+        bg, border = wireframe colour, text contrasts) and recolour the
+        placement-hint text so it stays readable in both modes."""
+        def _hex(rgb):
+            return "#%02x%02x%02x" % (int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255))
+        bg_hex   = _hex(SCENE_BG)
+        wire_hex = _hex(WIRE_COLOR)
+        # text contrasts with the background: dark bg -> light text, light bg -> dark
+        txt_hex  = wire_hex                     # wireframe colour already contrasts
+        self._theme_btn.setText("Light" if SCENE_LIGHT_MODE else "Dark")
+        self._theme_btn.setStyleSheet(
+            f"QPushButton{{background:{bg_hex};color:{txt_hex};"
+            f"border:1px solid {wire_hex};border-radius:3px;font-size:10px;}}")
+        # hint text: grey on dark, near-black on light
+        hint_col = "#202020" if SCENE_LIGHT_MODE else PAL["subtext"]
+        self._hint_lbl.setStyleSheet(f"color:{hint_col};font-size:9px;")
+
     def _toggle_placement(self, kind):
         if kind == "source":
             if self._src_btn.isChecked():
