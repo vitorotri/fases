@@ -811,7 +811,7 @@ int main(int argc, char *argv[]){
 	// open BIN files for writing pressure at multiple receivers
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
-	for (int ct = 0; ct < i_recV.size(); ct++) {
+	for (int ct = 0; ct < i_recV.size(); ct++){
     	std::string str = out_file("IR" + std::to_string(ct) + ".bin");
     	files_rec[ct].open(str, std::ios::app | std::ios::binary);
 	}
@@ -925,7 +925,7 @@ int main(int argc, char *argv[]){
         // write to file for single receiver IR
 		//fwrite(&p0[flat3(i_rec, j_rec, k_rec, Nx, Ny)], sizeof(float), 1, f_rec);
 			
-		// write to file for each receiver
+		// write to file for each receiver and iteration
 		// i_recV.size() should be the same as j_recV.size() and k_recV.size()
 		for (int ct = 0; ct < i_recV.size(); ct++){
 			files_rec[ct].write(
@@ -1027,9 +1027,13 @@ int main(int argc, char *argv[]){
 	}
 	//std::cout << "\nN_bands = " << N_bands << "\n";
 	
-	// allocate memory for ISM IRs: must have same size as wave-based IR, same dt (same fs), for each rec
-	// first index is receiver's index, second is sample, third one is octave band (flattened)
+	fs = 44100.0; // new sample rate
+	dt = 1.0/fs; // new time-step size
+	Nt = (int)(t_max/dt); // new number of samples
+	// allocate memory for ISM IRs: for each rec first index is receiver's index, second is sample, third one is
+	// octave band (flattened)
 	std::vector<float> p_ism(Q.Nr * Nt * N_bands, 0.0);
+	int t_cross = 0.0; // crossover time index, for late tail reverberation
 	
 	// compute IRs
 	// for each band
@@ -1046,6 +1050,7 @@ int main(int argc, char *argv[]){
 					float d_0 = Q.direct_at(s,r); // direct distance (returns 0.0f if invalid)
 					if (d_0 == 0.0f) continue;
 					int t_0 = (int)(fs * d_0 / c); // discrete time variable for direct ray
+					if (t_cross == 0.0) t_cross = t_0; // initialize t_cross to non-zero value once
 					p_ism[flat(r,t_0,b)] += Q.src_pressure[s] / (4.0*M_PI*d_0);
 					
 					// sum contributions of image sources for a given real source
@@ -1054,6 +1059,7 @@ int main(int argc, char *argv[]){
 						float d = is.distance;
 						int t = (int)(fs * d / c);
 						if (t >= Nt) continue; // safety guard
+						if (t > t_cross) t_cross = t;
 						float P = 1.0; // iterated product
 						// for each surface k crossed by the image source
 						for(int k = 0; k < is.angle_rad.size(); k++){
@@ -1070,6 +1076,7 @@ int main(int argc, char *argv[]){
 		}
 	}
 	// Compute late reverberation tail (statisticaly), ref. Svensson (1998)
+	// Comment when comparing with analytic ISM for showbox-shaped rooms per frequency, with 6 distinct faces
 	
 	
 	// save to files for each receiver and bands
