@@ -91,10 +91,12 @@ LAYER_COLORS = [
     (249/255, 160/255, 200/255),  # rose
 ]
 BBOX_COLOR = (0.35, 0.65, 1.0)
-SRC_COLOR  = (1.00, 1.00, 1.00)
-REC_COLOR  = (1.00, 1.00, 1.00)
-HL_COLOR   = (1.00, 0.85, 0.10)   # highlight tint for a selected/hovered point
-SEL_OUTLINE= (1.00, 1.00, 1.00)
+SRC_COLOR  = (138/255, 130/255, 255/255)
+REC_COLOR  = (255/255, 130/255, 130/255)
+HL_COLOR   = (0.2, 1.0, 0.5)   # highlight tint for a selected/hovered point
+# Tint for sources/receivers placed OUTSIDE the domain box (single place to
+# edit; used for placed points and the placement preview). RGB in 0..1.
+OUTSIDE_COLOR = (250/255, 2/255, 2/255)
 # Transparency of the SELECTED (highlighted) layer's fill, 0.0 (invisible) ..
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
@@ -875,9 +877,9 @@ class GLViewer(QOpenGLWidget):
         from PySide6.QtGui import QFont, QColor
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         for sx, sy, col, kind, hl in self._glyph_queue:
-            ch   = "\u25C9\uFE0E" if kind == "source" else "\u25CD\uFE0E"
+            ch   = "\u25C9" if kind == "source" else "\u25CD"
             size = 20 if hl else 16
-            f = QFont("Sans", size)
+            f = QFont("Noto Sans Symbols2", size)
             painter.setFont(f)
             painter.setPen(QColor(int(col[0]*255), int(col[1]*255), int(col[2]*255)))
             fm = painter.fontMetrics()
@@ -890,7 +892,7 @@ class GLViewer(QOpenGLWidget):
         for i, pt in enumerate(self._sources):
             hl  = (i == self._hl_src)
             if self._outside_domain(pt[0], pt[1], pt[2]):
-                col = (1.0, 0.15, 0.15)
+                col = OUTSIDE_COLOR
             else:
                 col = HL_COLOR if hl else SRC_COLOR
             self._point_glyph(pt[0], pt[1], pt[2], col, "source", hl=hl)
@@ -899,7 +901,7 @@ class GLViewer(QOpenGLWidget):
         for i, pt in enumerate(self._receivers):
             hl  = (i == self._hl_rec)
             if self._outside_domain(pt[0], pt[1], pt[2]):
-                col = (1.0, 0.15, 0.15)
+                col = OUTSIDE_COLOR
             else:
                 col = HL_COLOR if hl else REC_COLOR
             self._point_glyph(pt[0], pt[1], pt[2], col, "receiver", hl=hl)
@@ -935,7 +937,7 @@ class GLViewer(QOpenGLWidget):
             glEnd()
 
         # preview: draw the SAME glyph as a placed point, at the exact centre
-        col_override = (1.0, 0.15, 0.15) \
+        col_override = OUTSIDE_COLOR \
                        if self._outside_domain(p[0], p[1], p[2]) else None
         icon_col = col_override if col_override else \
                    (SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR)
