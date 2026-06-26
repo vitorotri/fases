@@ -92,11 +92,27 @@ LAYER_COLORS = [
 ]
 BBOX_COLOR = (0.35, 0.65, 1.0)
 SRC_COLOR  = (138/255, 130/255, 255/255)
-REC_COLOR  = (255/255, 130/255, 130/255)
+REC_COLOR  = (252/255, 118/255, 78/255)
 HL_COLOR   = (0.2, 1.0, 0.5)   # highlight tint for a selected/hovered point
 # Tint for sources/receivers placed OUTSIDE the domain box (single place to
 # edit; used for placed points and the placement preview). RGB in 0..1.
-OUTSIDE_COLOR = (250/255, 2/255, 2/255)
+OUTSIDE_COLOR = (1.00, 0.15, 0.15)
+
+# ─────────────────────────────────────────────────────────────
+#  Scene colour scheme (code-level toggle, not in the GUI)
+# ─────────────────────────────────────────────────────────────
+# Set True for an inverted "light" viewport: white background with black
+# wireframes/box. False = the default dark background with white wireframes.
+SCENE_LIGHT_MODE = False
+
+if SCENE_LIGHT_MODE:
+    SCENE_BG    = (1.00, 1.00, 1.00, 1.0)   # white background (GL clear)
+    WIRE_COLOR  = (0.0, 0.0, 0.0, 0.9)       # black wireframe + domain box
+    GREY_FILL   = (0.45, 0.45, 0.45)          # unselected-layer fill on white
+else:
+    SCENE_BG    = (0.05, 0.055, 0.07, 1.0)   # dark background (GL clear)
+    WIRE_COLOR  = (1.0, 1.0, 1.0, 0.9)        # white wireframe + domain box
+    GREY_FILL   = (0.62, 0.62, 0.62)          # unselected-layer fill on dark
 # Transparency of the SELECTED (highlighted) layer's fill, 0.0 (invisible) ..
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
@@ -527,7 +543,7 @@ class GLViewer(QOpenGLWidget):
         # camera toward whatever you are looking at.
         glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.7, 0.7, 0.7, 1.0])
         glLightfv(GL_LIGHT0, GL_AMBIENT, [0.0, 0.0, 0.0, 1.0])
-        glClearColor(0.05, 0.055, 0.07, 1.0)
+        glClearColor(*SCENE_BG)
 
     def resizeGL(self, w, h):
         glViewport(0, 0, w, h)
@@ -765,7 +781,7 @@ class GLViewer(QOpenGLWidget):
 
         # Depth-write off for the whole mesh overlay so nothing hard-occludes
         # anything else and draw order alone controls layering.
-        GREY = (0.62, 0.62, 0.62)
+        GREY = GREY_FILL
         glDepthMask(GL_FALSE)
 
         # Pass A: FILLS first. Unselected layers get a transparent grey plane;
@@ -780,10 +796,10 @@ class GLViewer(QOpenGLWidget):
             else:
                 draw_triangles(g, alpha=0.22, color=GREY)     # others: grey
 
-        # Pass B: white feature-edge wireframe for ALL visible layers (the
-        # selected one included), drawn last so the edges always sit on top of
-        # every fill, including the highlighted layer.
-        glColor4f(1.0, 1.0, 1.0, 0.9)
+        # Pass B: feature-edge wireframe for ALL visible layers (the selected
+        # one included), drawn last so the edges always sit on top of every
+        # fill. Colour follows the scene scheme (white on dark / black on light).
+        glColor4f(*WIRE_COLOR)
         glLineWidth(1.3)
         for g in self._groups:
             if g["is_bbox"] or not g["visible"]:
@@ -831,7 +847,7 @@ class GLViewer(QOpenGLWidget):
         glDisable(GL_DEPTH_TEST)   # always visible, never occluded
         glDepthMask(GL_FALSE)
         glLineWidth(1.6)
-        glColor4f(1.0, 1.0, 1.0, 0.9)   # white wireframe
+        glColor4f(*WIRE_COLOR)          # wireframe (scheme-dependent)
         glBegin(GL_LINES)
         for a, b in edges:
             glVertex3f(*c[a])
