@@ -1037,6 +1037,7 @@ int main(int argc, char *argv[]){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
 		else{
 			// for each receiver
+			#pragma omp parallel for
 			for (int r = 0; r < Q.Nr; r++){
 				// sum contributions of sources
 				for (int s = 0; s < Q.Ns; s++){
@@ -1057,7 +1058,7 @@ int main(int argc, char *argv[]){
 						// for each surface k crossed by the image source
 						for(int k = 0; k < is.angle_rad.size(); k++){
 							float theta = is.angle_rad[k];
-							float R = R_from_Z(is.Z_re[k][b], is.Z_im[k][b], theta);
+							float R = R_from_Z(is.Z_re[k][b], is.Z_im[k][b], theta, rho, c);
 							P *= R;
 						}
 						p_ism[flat(r,t,b)] += Q.src_pressure[s] * is.amp * P / (4*M_PI*d);
@@ -1068,6 +1069,10 @@ int main(int argc, char *argv[]){
 			}
 		}
 	}
+	// Compute late reverberation tail (statisticaly), ref. Svensson (1998)
+	
+	
+	// save to files for each receiver and bands
 	
     
     // ---------------------------------------------------------------------------------------------------------

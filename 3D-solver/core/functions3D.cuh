@@ -39,6 +39,13 @@ __host__ float SPL(float p){
 	return 20.0*log10f(fabsf(p)/(0.00002));
 }
 
+__host__ float R_from_Z(float re, float im, float theta, float rho, float c){
+	float A, B;
+	A = sqrtf(pow(re*cos(theta) - rho*c,2) + pow(im*cos(theta),2));
+	B = sqrtf(pow(re*cos(theta) + rho*c,2) + pow(im*cos(theta),2));
+	return A/B;
+}
+
 // Total variations
 
 // compute on regular variables
