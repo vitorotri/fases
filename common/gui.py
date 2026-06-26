@@ -137,7 +137,7 @@ SEL_ALPHA  = 0.9
 AXIS_COLORS = {
     'X': (0.55, 0.20, 0.95),          # royal purple
     'Y': (252/255, 5/255, 95/255),    # vivid pink-magenta
-    'Z': (135/255, 210/255, 35/255),          # bright lime
+    'Z': (105/255, 210/255, 45/255),          # bright lime
 }
 
 # Opacity of the gizmo's opposite-side (negative-axis) balls, 0.0..1.0.
