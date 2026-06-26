@@ -96,7 +96,7 @@ REC_COLOR  = (252/255, 118/255, 78/255)
 HL_COLOR   = (0.2, 1.0, 0.5)   # highlight tint for a selected/hovered point
 # Tint for sources/receivers placed OUTSIDE the domain box (single place to
 # edit; used for placed points and the placement preview). RGB in 0..1.
-OUTSIDE_COLOR = (1.00, 0.15, 0.15)
+OUTSIDE_COLOR = (252/255, 245/255, 35/255)
 
 # ─────────────────────────────────────────────────────────────
 #  Scene colour scheme (code-level toggle, not in the GUI)
