@@ -1011,7 +1011,6 @@ int main(int argc, char *argv[]){
     
     auto Z = ism_load_impedances_layered(imp_dir, names); // names[0]="BoundingBox"; handles the +1
 	//std::vector<int> g2m; // empty => identity: material_id == group_id
-	std::vector<std::vector<std::vector<ISMPath>>> out;
 	int max_order = 3; // parse from config.txt
 	ISMResult Q = ism_solve(sc, src_arr, rec_arr, /*g2m*/{}, Z, max_order, src_pressure); // gets main values for IRs
 	
@@ -1043,13 +1042,17 @@ int main(int argc, char *argv[]){
 				for (int s = 0; s < Q.Ns; s++){
 					
 					// sum contributions of real sources
-					float d_0 = Q.direct_at(s,r); // direct distance
-					int t_0 = (int)(d_0 / c); // discrete time variable for direct ray
-					p_ism[flat(r,t_0,b)] += 1.0 / (4.0*M_PI*d_0);
+					float d_0 = Q.direct_at(s,r); // direct distance (returns 0.0f if invalid)
+					if (d_0 == 0.0f) continue;
+					int t_0 = (int)(fs * d_0 / c); // discrete time variable for direct ray
+					p_ism[flat(r,t_0,b)] += Q.src_pressure[s] / (4.0*M_PI*d_0);
 					
 					// sum contributions of image sources for a given real source
 					// for each image-source is in container Q.images_at()
 					for (const ISMImagePath& is : Q.images_at(s, r)){
+						float d = is.distance;
+						int t = (int)(fs * d / c);
+						if (t >= Nt) continue; // safety guard
 						float P = 1.0; // iterated product
 						// for each surface k crossed by the image source
 						for(int k = 0; k < is.angle_rad.size(); k++){
@@ -1057,9 +1060,9 @@ int main(int argc, char *argv[]){
 							float R = R_from_Z(is.Z_re[k][b], is.Z_im[k][b], theta);
 							P *= R;
 						}
-						float d = is.distance;
-						float t = (int)(d / c);
-						p_ism[flat(r,t,b)] += P / (4*M_PI*d);
+						p_ism[flat(r,t,b)] += Q.src_pressure[s] * is.amp * P / (4*M_PI*d);
+						// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
+						// parser's heuristics)
 					}
 				}
 			}
