@@ -365,6 +365,7 @@ class GLViewer(QOpenGLWidget):
     pointRemoved  = Signal(str, int)                   # kind, index
     pointMoved    = Signal(str, int, float, float, float)  # kind, index, x, y, z
     pointHovered  = Signal(str, int)                   # kind, index (G-mode hover)
+    pointDragStarted = Signal()                        # a grab/drag just began
     coordsChanged = Signal(float, float, float)        # live HUD coords
 
     # placement modes
@@ -389,12 +390,12 @@ class GLViewer(QOpenGLWidget):
         self._last_pos  = None
         self._mouse_btn = None
         # Drag-to-move state for already-placed sources/receivers.
-        # A point is grabbed only when the user holds the "grab" key (G) at
+        # A point is grabbed only when the user holds the "edit" key (E) at
         # mouse-press time, so the (cheap) closest-point search runs once per
         # press rather than on every mouse-move.
         self._drag_kind = None    # "source"/"receiver" while dragging, else None
         self._drag_idx  = -1      # index into the corresponding list
-        self._grab_held = False   # True while "edit positions" (G) mode is armed
+        self._grab_held = False   # True while "edit positions" (E) mode is armed
         # Axis constraint while dragging a point (mirrors placement's X/Y/Z lock).
         self._drag_axis      = None            # None / 'X' / 'Y' / 'Z'
         self._drag_axis_base = None            # point position when axis was locked
@@ -995,7 +996,7 @@ class GLViewer(QOpenGLWidget):
 
     def _draw_drag_guide(self):
         """
-        While moving an existing point with G + LMB, draw the same crosshair and
+        While moving an existing point with E + LMB, draw the same crosshair and
         (when an axis is locked) the axis guide line, using the shared axis
         colours. Mirrors the placement cursor so the two interactions feel alike.
         """
@@ -1136,7 +1137,7 @@ class GLViewer(QOpenGLWidget):
         self._last_pos  = e.position()
         self._mouse_btn = e.button()
         self._drag_moved = False
-        # If G is held and LMB is pressed in normal mode, grab the nearest
+        # If edit mode (E) is armed and LMB is pressed, grab the nearest
         # placed source/receiver instead of rotating the camera.
         if (self._grab_held and e.button() == Qt.MouseButton.LeftButton
                 and self._mode == self.MODE_NONE):
@@ -1220,7 +1221,7 @@ class GLViewer(QOpenGLWidget):
         self._last_pos  = None
 
         # Finish a point drag: emit the final position so the table updates,
-        # then auto-disarm "edit positions" mode (one move per G activation).
+        # then auto-disarm "edit positions" mode (one move per E activation).
         if self._drag_kind is not None and self._drag_idx >= 0:
             lst = self._sources if self._drag_kind == "source" else self._receivers
             if 0 <= self._drag_idx < len(lst):
@@ -1232,7 +1233,7 @@ class GLViewer(QOpenGLWidget):
             self._drag_axis      = None
             self._drag_axis_base = None
             self._drag_anchor_px = None
-            self._grab_held = False                      # G mode off after a move
+            self._grab_held = False                      # edit mode off after a move
             self._hl_src = -1
             self._hl_rec = -1
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -1323,10 +1324,10 @@ class GLViewer(QOpenGLWidget):
             # reset camera to the exact initial view captured at load time
             self._reset_view()
             e.accept(); return
-        # "G" toggles "edit positions" mode: press once to arm, press again to
+        # "E" toggles "edit positions" (Edit) mode: press once to arm, again to
         # disarm. While armed, LMB grabs and drags the nearest placed point.
         # The mode also self-deactivates after a completed move (see release).
-        if key == Qt.Key.Key_G and self._mode == self.MODE_NONE:
+        if key == Qt.Key.Key_E and self._mode == self.MODE_NONE:
             self._grab_held = not self._grab_held
             self.setCursor(Qt.CursorShape.OpenHandCursor if self._grab_held
                            else Qt.CursorShape.ArrowCursor)
@@ -1417,11 +1418,13 @@ class GLViewer(QOpenGLWidget):
     def _begin_point_drag(self, qpos):
         """
         Grab the nearest placed source/receiver within a screen-space radius so
-        it can be dragged. Called once on LMB press while G is held, so the
+        it can be dragged. Called once on LMB press while edit mode is armed, so the
         closest-point search is not repeated on every mouse-move (keeps it light).
         """
         kind, idx = self._find_nearest_point(qpos, radius=30.0)
         if kind is not None:
+            # snapshot for undo BEFORE any drag motion mutates the point
+            self.pointDragStarted.emit()
             self._drag_kind = kind
             self._drag_idx  = idx
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -1579,6 +1582,10 @@ class GLViewer(QOpenGLWidget):
             # previous layer highlighted or selected in the list/material panel.
             self._selected_layer = None
             self.layerPicked.emit("")
+            # also clear any source/receiver highlight (scene + table selection)
+            if self._hl_src != -1 or self._hl_rec != -1:
+                self.set_highlight(None, -1)
+                self.pointHovered.emit("", -1)
         self.update()
 
 
@@ -1757,16 +1764,17 @@ class AlphaCurveEditor(QWidget):
         from PySide6.QtCore import QRectF, QPointF
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # white plotting background to match the previous look
-        p.fillRect(self.rect(), QColor("white"))
+        # dark plotting background matching the GUI
+        p.fillRect(self.rect(), QColor(PAL["bg"]))
         x0, y0, w, h = self._plot_rect()
 
         accent = QColor(PAL["accent"])
-        grey   = QColor("#888888")
-        dark   = QColor("#444444")
+        grey   = QColor(PAL["subtext"])      # muted light grey for labels/numbers
+        light  = QColor(PAL["text"])         # bright text for name / α / Hz
+        rail   = QColor(PAL["border"])       # slider-rail colour
 
         # title (material name) and α / Hz labels
-        p.setPen(dark)
+        p.setPen(light)
         p.setFont(QFont("Sans", 9, QFont.Weight.Bold))
         if self._name:
             p.drawText(QRectF(0, 2, self.width(), 18),
@@ -1774,7 +1782,7 @@ class AlphaCurveEditor(QWidget):
         p.setFont(QFont("Sans", 10, QFont.Weight.Bold))
         p.drawText(QRectF(2, y0, 24, h), Qt.AlignmentFlag.AlignCenter, "α")
         p.setFont(QFont("Sans", 8))
-        p.setPen(dark)                       # as dark as the α symbol
+        p.setPen(light)
         p.drawText(QRectF(0, self.height() - 16, self.width(), 14),
                    Qt.AlignmentFlag.AlignCenter, "Frequency [Hz]")
 
@@ -1786,13 +1794,9 @@ class AlphaCurveEditor(QWidget):
             p.end()
             return
 
-        # light-grey grid: horizontal lines at α = 0,.25,.5,.75,1 and a vertical
-        # line at every band, same colour as the frequency numbers.
-        gpen = QPen(QColor("#cccccc"), 1)
-        p.setPen(gpen)
-        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-            gy = y0 + h * frac
-            p.drawLine(int(x0), int(gy), int(x0 + w), int(gy))
+        # one VERTICAL slider rail per band (full 0..1 height); no horizontal
+        # grid, so each band reads as a small vertical slider.
+        p.setPen(QPen(rail, 2))
         for i in range(self._n):
             gx, _ = self._point_xy(i)
             p.drawLine(int(gx), int(y0), int(gx), int(y0 + h))
@@ -2609,7 +2613,7 @@ def make_pm_icon(sign, size=18, color=None):
     m = size * 0.22                       # margin
     cy = size / 2.0
     p.drawLine(int(m), int(cy), int(size - m), int(cy))      # horizontal bar
-    if sign == "+":
+    if sign.startswith("+"):     # '+' may carry a U+FE0E suffix; match loosely
         cx = size / 2.0
         p.drawLine(int(cx), int(m), int(cx), int(size - m))  # vertical bar
     p.end()
@@ -2637,6 +2641,13 @@ class PointTable(QWidget):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
         self._tbl.setColumnWidth(0, 90)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # Cells are edited ONLY by a deliberate double-click (or clicking an
+        # already-selected cell). Keyboard triggers are excluded so stray
+        # keystrokes — e.g. while moving a point in edit mode — can never
+        # overwrite coordinates by accident.
+        self._tbl.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked |
+            QAbstractItemView.EditTrigger.SelectedClicked)
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
@@ -2998,6 +3009,7 @@ class MainWindow(QMainWindow):
         self._gl.layerPicked.connect(self._on_layer_picked)
         self._gl.pointPlaced.connect(self._on_point_placed)
         self._gl.pointMoved.connect(self._on_point_moved)
+        self._gl.pointDragStarted.connect(self._remember_points_for_undo)
         self._gl.pointHovered.connect(self._on_point_hovered)
         self._gl.pointRemoved.connect(self._on_point_removed)
         gl_vlay.addWidget(self._gl, stretch=1)
@@ -3022,7 +3034,7 @@ class MainWindow(QMainWindow):
         self._hint_lbl = QLabel(
                       "Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
                       "T: reset view   S: src   R: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   "
-                      "G then LMB-drag: move point (hold X/Y/Z to lock)   RMB: del   Ctrl+Z: undo   Esc: cancel")
+                      "E then LMB-drag: edit/move point (hold X/Y/Z to lock)   RMB: del   Ctrl+Z: undo   Esc: cancel")
         place_bar.addWidget(self._hint_lbl)
         place_bar.addStretch()
         bar_wrap = QWidget()
@@ -3179,7 +3191,8 @@ class MainWindow(QMainWindow):
 
     def _on_point_moved(self, kind, idx, x, y, z):
         # Drag-to-move finished: write the new coordinates into the table row.
-        self._remember_points_for_undo()
+        # (The undo snapshot was already taken at drag start, so the move can
+        # be reverted with Ctrl+Z.)
         tbl = self._src_tbl if kind == "source" else self._rec_tbl
         tbl.update_point(idx, x, y, z)
         self._refresh_gl_points()
