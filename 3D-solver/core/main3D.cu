@@ -442,10 +442,10 @@ int main(int argc, char *argv[]){
 	
 	// should to to config later
 	
-	float R_spec = 287.05f; // specific gas constant for air [J] [kg]^-1 [K]^-1
-	float gamma = 1.4f; // specific heat ratio for air
+	float R_spec = 287.05; // specific gas constant for air [J] [kg]^-1 [K]^-1
+	float gamma = 1.4; // specific heat ratio for air
 	
-	rho = 1.225f; // average sea level density for air [kg/m3]. For dry air, proportional to p0/R_spec*T
+	rho = 1.225; // average sea level density for air [kg/m3]. For dry air, proportional to p0/R_spec*T
 	Temp = conf_arr[3] + 273.15f; // temperature [K] = Celsius_temp + 273.15
 	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
 	// c = sqrt(K/rho) in case of liquids
@@ -1009,10 +1009,12 @@ int main(int argc, char *argv[]){
     
     // --------------------------------------------- ISM Section -----------------------------------------------
     
+    ISMConfig cfg;
+	cfg.frame = ISMFrame::OBJECT_SPACE; // apply (p+shift)*scale to src/rec, identical to the walls
     auto Z = ism_load_impedances_layered(imp_dir, names); // names[0]="BoundingBox"; handles the +1
 	//std::vector<int> g2m; // empty => identity: material_id == group_id
 	int max_order = 3; // parse from config.txt
-	ISMResult Q = ism_solve(sc, src_arr, rec_arr, /*g2m*/{}, Z, max_order, src_pressure); // gets main values for IRs
+	ISMResult Q = ism_solve(sc, src_arr, rec_arr, {}, Z, max_order, src_pressure, cfg); // gets main values for IRs
 	
 	scene_free(&sc); // free scene
 	
@@ -1030,9 +1032,9 @@ int main(int argc, char *argv[]){
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
 	Nt = (int)(t_max/dt); // new number of samples
-	// allocate memory for ISM IRs: for each rec, first index is receiver's index, second is sample in time,
+	// allocate memory for ISM IRs: for each rec, first index sample in time, second is receiver's index,
 	// third one is octave band (flattened)
-	std::vector<float> p_ism((size_t)Q.Nr * Nt);
+	std::vector<float> p_ism(Nt * (size_t)Q.Nr);
 	
 	// compute IRs
 	// for each band
@@ -1047,12 +1049,15 @@ int main(int argc, char *argv[]){
 			// sum contributions of sources
 			for (int s = 0; s < Q.Ns; s++){
 				
-				// sum contributions of real sources
-				float d_0 = Q.direct_at(s,r); // direct distance (returns 0.0f if invalid)
-				if (d_0 == 0.0f) continue;
-				int t_0 = (int)(fs * d_0 / c); // discrete time variable for direct ray
-				if (t_cross == 0.0) t_cross = t_0; // initialize t_cross to non-zero value once
-				p_ism[flat(r,t_0,b)] += Q.src_pressure[s] / (4.0*M_PI*d_0);
+				// direct: guard the deposit only - do NOT skip the image loop
+    			float d_0 = Q.direct_at(s, r); // 0.0f if blocked
+    			if (d_0 > 0.0f){
+        			int t_0 = (int)(fs * d_0 / c);
+        			if (t_0 < Nt){
+            			p_ism[flat(t_0, r, Nt)] += Q.src_pressure[s] / (4.0*M_PI*d_0);
+            			if (t_0 > t_cross) t_cross = t_0;
+        			}
+    			}
 					
 				// sum contributions of image sources for a given real source
 				// for each image-source is in container Q.images_at()
@@ -1068,12 +1073,12 @@ int main(int argc, char *argv[]){
 						float R = R_from_Z(is.Z_re[k][b], is.Z_im[k][b], theta, rho, c);
 						P *= R;
 					}
-					p_ism[flat(r,t,b)] += Q.src_pressure[s] * is.amp * P / (4.0*M_PI*d);
+					p_ism[flat(t,r,Nt)] += Q.src_pressure[s] * is.amp * P / (4.0*M_PI*d);
 					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
 					// parser's heuristics)
 				}
 			}
-			// this receiver is done for this band -> write its slice now
+			// this receiver is done for this band -> write its slice to associated binary file
         	std::string fname = out_file("RIR" + std::to_string(r) + "_"
                                     		+ std::to_string((int)octave_bands[b]) + ".bin");
         	FILE* f = std::fopen(fname.c_str(), "wb");
@@ -1087,9 +1092,6 @@ int main(int argc, char *argv[]){
 	}
 	// Compute late reverberation tail (statisticaly), ref. Svensson (1998)
 	// Comment when comparing with analytic ISM for showbox-shaped rooms per frequency, with 6 distinct faces
-	
-	
-	// save to files for each receiver and bands
 	
     
     // ---------------------------------------------------------------------------------------------------------
