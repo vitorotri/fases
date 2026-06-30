@@ -664,7 +664,7 @@ int main(int argc, char *argv[]){
     int i_rec, j_rec, k_rec; // receiver position
     
     std::vector<int> i_recV, j_recV, k_recV; // vectors for multiple receivers discrete positions (called multiple times on main loop)
-    std::vector<float> rec_arr; // receiver array on host with actual positions
+    std::vector<float> rec_arr; // receiver array on host with actual positions, 2D flattened
     
     file.open(rec_path);
 	if (!file.is_open()){
@@ -1030,50 +1030,60 @@ int main(int argc, char *argv[]){
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
 	Nt = (int)(t_max/dt); // new number of samples
-	// allocate memory for ISM IRs: for each rec first index is receiver's index, second is sample, third one is
-	// octave band (flattened)
-	std::vector<float> p_ism(Q.Nr * Nt * N_bands, 0.0);
-	int t_cross = 0.0; // crossover time index, for late tail reverberation
+	// allocate memory for ISM IRs: for each rec, first index is receiver's index, second is sample in time,
+	// third one is octave band (flattened)
+	std::vector<float> p_ism((size_t)Q.Nr * Nt);
 	
 	// compute IRs
 	// for each band
 	for (int b = 0; b < 8; b++){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
-		else{
-			// for each receiver
-			#pragma omp parallel for
-			for (int r = 0; r < Q.Nr; r++){
-				// sum contributions of sources
-				for (int s = 0; s < Q.Ns; s++){
+		// fill the shared buffer for this band
+		std::fill(p_ism.begin(), p_ism.end(), 0.0);
+		// for each receiver
+		#pragma omp parallel for schedule(dynamic)
+		for (int r = 0; r < Q.Nr; r++){
+			int t_cross = 0.0; // crossover time index, for late tail reverberation
+			// sum contributions of sources
+			for (int s = 0; s < Q.Ns; s++){
+				
+				// sum contributions of real sources
+				float d_0 = Q.direct_at(s,r); // direct distance (returns 0.0f if invalid)
+				if (d_0 == 0.0f) continue;
+				int t_0 = (int)(fs * d_0 / c); // discrete time variable for direct ray
+				if (t_cross == 0.0) t_cross = t_0; // initialize t_cross to non-zero value once
+				p_ism[flat(r,t_0,b)] += Q.src_pressure[s] / (4.0*M_PI*d_0);
 					
-					// sum contributions of real sources
-					float d_0 = Q.direct_at(s,r); // direct distance (returns 0.0f if invalid)
-					if (d_0 == 0.0f) continue;
-					int t_0 = (int)(fs * d_0 / c); // discrete time variable for direct ray
-					if (t_cross == 0.0) t_cross = t_0; // initialize t_cross to non-zero value once
-					p_ism[flat(r,t_0,b)] += Q.src_pressure[s] / (4.0*M_PI*d_0);
-					
-					// sum contributions of image sources for a given real source
-					// for each image-source is in container Q.images_at()
-					for (const ISMImagePath& is : Q.images_at(s, r)){
-						float d = is.distance;
-						int t = (int)(fs * d / c);
-						if (t >= Nt) continue; // safety guard
-						if (t > t_cross) t_cross = t;
-						float P = 1.0; // iterated product
-						// for each surface k crossed by the image source
-						for(int k = 0; k < is.angle_rad.size(); k++){
-							float theta = is.angle_rad[k];
-							float R = R_from_Z(is.Z_re[k][b], is.Z_im[k][b], theta, rho, c);
-							P *= R;
-						}
-						p_ism[flat(r,t,b)] += Q.src_pressure[s] * is.amp * P / (4*M_PI*d);
-						// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
-						// parser's heuristics)
+				// sum contributions of image sources for a given real source
+				// for each image-source is in container Q.images_at()
+				for (const ISMImagePath& is : Q.images_at(s, r)){
+					float d = is.distance;
+					int t = (int)(fs * d / c);
+					if (t >= Nt) continue; // safety guard
+					if (t > t_cross) t_cross = t;
+					float P = 1.0; // iterated product
+					// for each surface k crossed by the image source
+					for(int k = 0; k < is.angle_rad.size(); k++){
+						float theta = is.angle_rad[k];
+						float R = R_from_Z(is.Z_re[k][b], is.Z_im[k][b], theta, rho, c);
+						P *= R;
 					}
+					p_ism[flat(r,t,b)] += Q.src_pressure[s] * is.amp * P / (4.0*M_PI*d);
+					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
+					// parser's heuristics)
 				}
 			}
-		}
+			// this receiver is done for this band -> write its slice now
+        	std::string fname = out_file("RIR" + std::to_string(r) + "_"
+                                    		+ std::to_string((int)octave_bands[b]) + ".bin");
+        	FILE* f = std::fopen(fname.c_str(), "wb");
+        	if (f){
+           		std::fwrite(p_ism.data() + (size_t)r*Nt, sizeof(float), (size_t)Nt, f);
+           		std::fclose(f);
+        	} else {
+           		std::fprintf(stderr, "[ISM] could not open %s for writing\n", fname.c_str());
+        	}
+		}	
 	}
 	// Compute late reverberation tail (statisticaly), ref. Svensson (1998)
 	// Comment when comparing with analytic ISM for showbox-shaped rooms per frequency, with 6 distinct faces
