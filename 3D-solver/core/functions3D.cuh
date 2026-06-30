@@ -4,7 +4,7 @@
 #include "filterABC.h"
 
 __host__ __device__ inline size_t flat3(int i, int j, int k, int Nx, int Ny){
-    return i + Nx*(j + k*Ny) ;
+    return i + Nx*(j + k*Ny); // columns-major convention
 }
 
 // Godunov and Roe fluxes (for WENO, no simple substitutions)
@@ -37,13 +37,6 @@ __host__ __device__ float H_w_Godunov(float pM, float pP, float wM, float wP, fl
 
 __host__ float SPL(float p){
 	return 20.0*log10f(fabsf(p)/(0.00002));
-}
-
-__host__ float R_from_Z(float re, float im, float theta, float rho, float c){
-	float A, B;
-	A = sqrtf(pow(re*cos(theta) - rho*c,2) + pow(im*cos(theta),2));
-	B = sqrtf(pow(re*cos(theta) + rho*c,2) + pow(im*cos(theta),2));
-	return A/B;
 }
 
 // Total variations

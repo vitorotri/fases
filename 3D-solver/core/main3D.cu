@@ -1060,20 +1060,20 @@ int main(int argc, char *argv[]){
     			}
 					
 				// sum contributions of image sources for a given real source
-				// for each image-source is in container Q.images_at()
-				for (const ISMImagePath& is : Q.images_at(s, r)){
-					float d = is.distance;
+				// for each image-source 'iS' in container Q.images_at()
+				for (const ISMImagePath& iS : Q.images_at(s, r)){
+					float d = iS.distance;
 					int t = (int)(fs * d / c);
 					if (t >= Nt) continue; // safety guard
 					if (t > t_cross) t_cross = t;
 					float P = 1.0; // iterated product
 					// for each surface k crossed by the image source
-					for(int k = 0; k < is.angle_rad.size(); k++){
-						float theta = is.angle_rad[k];
-						float R = R_from_Z(is.Z_re[k][b], is.Z_im[k][b], theta, rho, c);
+					for(int k = 0; k < iS.angle_rad.size(); k++){
+						float theta = iS.angle_rad[k];
+						float R = R_from_Z(iS.Z_re[k][b], iS.Z_im[k][b], theta, rho, c);
 						P *= R;
 					}
-					p_ism[flat(t,r,Nt)] += Q.src_pressure[s] * is.amp * P / (4.0*M_PI*d);
+					p_ism[flat(t,r,Nt)] += Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
 					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
 					// parser's heuristics)
 				}

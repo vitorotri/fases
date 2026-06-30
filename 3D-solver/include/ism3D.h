@@ -44,6 +44,7 @@ Threading: host + optional OpenMP over receivers.
 #include <cstdint>
 #include <cmath>
 #include <cfloat>
+#include <set>
 #include <algorithm>
 #include <cstdio>
 #include <string>
@@ -54,6 +55,14 @@ Threading: host + optional OpenMP over receivers.
 #ifdef _OPENMP
   #include <omp.h>
 #endif
+
+
+__host__ float R_from_Z(float re, float im, float theta, float rho, float c){
+	float A, B;
+	A = sqrtf(pow(re*cos(theta) - rho*c,2) + pow(im*cos(theta),2));
+	B = sqrtf(pow(re*cos(theta) + rho*c,2) + pow(im*cos(theta),2));
+	return A/B;
+}
 
 static constexpr int ISM_NBANDS = 8;
 enum class ISMFrame { AUTO, SOLVER_WORLD, OBJECT_SPACE };
@@ -530,8 +539,19 @@ inline static void ism_paths_for_pairs(
             if(!ism_occluded(Sc,tri2plane,source,receiver,-1,-1,cfg.seg_eps)){
                 ISMPath p0; p0.length=std::sqrt(norm2_3(sub3(receiver,source))); dst.push_back(std::move(p0));
             }
+            // Deduplicate by image source position before validation.
+            // Commuting reflections (e.g. W→S and S→W) produce the same image position
+            // and must be counted once. Distinct paths that happen to be equidistant
+            // (e.g. south+floor vs north+ceiling) have different positions and are kept.
+            std::set<std::tuple<int,int,int>> seen_images;
+            auto img_key=[](const vec3& v)->std::tuple<int,int,int>{
+                return {(int)std::round(v.x*1e4f),
+                        (int)std::round(v.y*1e4f),
+                        (int)std::round(v.z*1e4f)};  // 0.1 mm resolution
+            };
             std::vector<int> hit_tris; std::vector<float> cchain; float len,amp; bool approx;
             for(int leaf=1; leaf<(int)nodes.size(); ++leaf){
+                if(!seen_images.insert(img_key(nodes[(size_t)leaf].image)).second) continue;
                 if(ism_validate_path(Sc,planes,tri2plane,nodes,leaf,source,receiver,cfg,hit_tris,cchain,len,amp,approx)){
                     ISMPath path; path.length=len; path.order=(int)hit_tris.size(); path.amp=amp; path.approx=approx;
                     path.reflections.reserve(hit_tris.size());
@@ -539,7 +559,6 @@ inline static void ism_paths_for_pairs(
                         const int gid=Sc.tris[(size_t)hit_tris[k]].group_id;
                         path.reflections.push_back(make_refl(gid,cchain[k]));
                     }
-                    // mark path curved if any bounce used a curved reflector (amp!=1 or flagged)
                     path.curved = (amp!=1.f) || approx;
                     dst.push_back(std::move(path));
                 }
