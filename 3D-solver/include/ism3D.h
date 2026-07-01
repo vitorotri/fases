@@ -44,8 +44,8 @@ Threading: host + optional OpenMP over receivers.
 #include <cstdint>
 #include <cmath>
 #include <cfloat>
-#include <set>
 #include <algorithm>
+#include <set>
 #include <cstdio>
 #include <string>
 #include <fstream>
@@ -55,7 +55,6 @@ Threading: host + optional OpenMP over receivers.
 #ifdef _OPENMP
   #include <omp.h>
 #endif
-
 
 __host__ float R_from_Z(float re, float im, float theta, float rho, float c){
 	float A, B;
@@ -433,7 +432,7 @@ inline static bool ism_validate_path(const Scene3D& Sc,const std::vector<Reflect
         const vec3 dir=sub3(nd.image,point); const float denom=dot3(R.n,dir);
         if(std::fabs(denom)<1e-12f) return false;
         const float t=(R.d-dot3(R.n,point))/denom;
-        if(t<=cfg.seg_eps||t>=1.f-cfg.seg_eps) return false;
+        if(t<-cfg.seg_eps||t>=1.f-cfg.seg_eps) return false;
         const vec3 refl=add3(point,mul3(dir,t));
         const int htri=ism_hit_tri(Sc,R.tri_ids,refl,R.hit_band);
         if(htri<0) return false;
@@ -551,8 +550,9 @@ inline static void ism_paths_for_pairs(
             };
             std::vector<int> hit_tris; std::vector<float> cchain; float len,amp; bool approx;
             for(int leaf=1; leaf<(int)nodes.size(); ++leaf){
-                if(!seen_images.insert(img_key(nodes[(size_t)leaf].image)).second) continue;
+                if(seen_images.count(img_key(nodes[(size_t)leaf].image))) continue;
                 if(ism_validate_path(Sc,planes,tri2plane,nodes,leaf,source,receiver,cfg,hit_tris,cchain,len,amp,approx)){
+                    seen_images.insert(img_key(nodes[(size_t)leaf].image));
                     ISMPath path; path.length=len; path.order=(int)hit_tris.size(); path.amp=amp; path.approx=approx;
                     path.reflections.reserve(hit_tris.size());
                     for(size_t k=0;k<hit_tris.size();++k){
@@ -563,6 +563,7 @@ inline static void ism_paths_for_pairs(
                     dst.push_back(std::move(path));
                 }
             }
+            std::fprintf(stderr,"[ISM] src%d rec%d: %d paths (incl direct)\n",s,r,(int)dst.size());
             std::sort(dst.begin(),dst.end(),[](const ISMPath& a,const ISMPath& b){return a.length<b.length;});
         }
     }
