@@ -56,6 +56,7 @@ int main(int argc, char *argv[]){
     std::filesystem::path fit_dir    = project_root / "input" / "fit";
     std::filesystem::path output_dir = project_root / "output";
     std::filesystem::path imp_dir = project_root / "input" / "imp";
+    std::filesystem::path nMat_path = config_path.parent_path() / "nMat";
 
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
@@ -268,7 +269,7 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(d_S, S, (size_t)Nx*Ny*Nz*sizeof(float), cudaMemcpyHostToDevice);
 		
     }
-    // process PLY/VOX test
+    // process DXF test (not implemented yet)
     else {
     	return -1;
     }
@@ -277,8 +278,8 @@ int main(int argc, char *argv[]){
 	pre_header = fopen(out_file("pre_header.txt").c_str(), "w");
 	if (pre_header != NULL){
     	fprintf(pre_header, "%d %d %d %f %d\n", Nx, Ny, Nz, h, (int)(tol/h));
-    	fclose(pre_header);
     }
+    fclose(pre_header);
     
     
     /*
@@ -302,7 +303,12 @@ int main(int argc, char *argv[]){
     float *Ak, *zeta;
     float *Bl, *Cl, *alpha, *beta;
     
-    int nMat = nObj - 1; // exclude bounding box
+    //int nMat = nObj - 1; // exclude bounding box
+    int32_t nMat = 0;
+    std::ifstream f_nMat(nMat_path, std::ios::binary);
+    f_nMat.read(reinterpret_cast<char*>(&nMat), sizeof(int32_t));
+    
+    std::cout << "\n[OK] nMat = " << nMat << "\n";
     
     try {
     	Rinf = new float[nMat]();
@@ -1070,6 +1076,7 @@ int main(int argc, char *argv[]){
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
 						float theta = iS.angle_rad[k];
+						//float theta = 1.0;
 						float R = R_from_Z(iS.Z_re[k][b], iS.Z_im[k][b], theta, rho, c);
 						P *= R;
 					}
