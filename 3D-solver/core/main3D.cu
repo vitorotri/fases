@@ -56,6 +56,7 @@ int main(int argc, char *argv[]){
     std::filesystem::path fit_dir    = project_root / "input" / "fit";
     std::filesystem::path output_dir = project_root / "output";
     std::filesystem::path imp_dir = project_root / "input" / "imp";
+    std::filesystem::path mat_dir = project_root / "input" / "mat";
     std::filesystem::path nMat_path = config_path.parent_path() / "nMat";
 
     std::error_code ec;
@@ -340,13 +341,14 @@ int main(int argc, char *argv[]){
     float *Ak, *zeta;
     float *Bl, *Cl, *alpha, *beta;
     
-    //int nMat = nObj - 1; // exclude bounding box
+    int nMat = nObj - 1; // exclude bounding box
+    // test for using same material for different objects when they match
+    /*
     int32_t nMat = 0;
     std::ifstream f_nMat(nMat_path, std::ios::binary);
     f_nMat.read(reinterpret_cast<char*>(&nMat), sizeof(int32_t));
-    
     std::cout << "\n[OK] nMat = " << nMat << "\n";
-    
+    */
     try {
     	Rinf = new float[nMat]();
     } catch (const std::bad_alloc&){
@@ -1054,7 +1056,7 @@ int main(int argc, char *argv[]){
     
     ISMConfig cfg;
 	cfg.frame = ISMFrame::OBJECT_SPACE; // apply (p+shift)*scale to src/rec, identical to the walls
-    auto Z = ism_load_impedances_layered(imp_dir, names); // names[0]="BoundingBox"; handles the +1
+    auto Z = ism_load_impedances_layered(imp_dir, names, mat_dir); // names[0]="BoundingBox"; handles the +1
 	//std::vector<int> g2m; // empty => identity: material_id == group_id
 	int max_order = 3; // parse from config.txt
 	ISMResult Q = ism_solve(sc, src_arr, rec_arr, {}, Z, max_order, src_pressure, cfg); // gets main values for IRs
@@ -1107,6 +1109,7 @@ int main(int argc, char *argv[]){
 				for (const ISMImagePath& iS : Q.images_at(s, r)){
 					float d = iS.distance;
 					int t = (int)(fs * d / c);
+					//std::cout << "t = " << t << "\n";
 					if (t >= Nt) continue; // safety guard
 					if (t > t_cross) t_cross = t;
 					float P = 1.0; // iterated product
@@ -1114,7 +1117,8 @@ int main(int argc, char *argv[]){
 					for(int k = 0; k < iS.angle_rad.size(); k++){
 						float theta = iS.angle_rad[k];
 						//float theta = 1.0;
-						float R = R_from_Z(iS.Z_re[k][b], iS.Z_im[k][b], theta, rho, c);
+						//float R = R_from_Z(iS.Z_re[k][b], iS.Z_im[k][b], theta, rho, c);
+						float R = sqrtf(1.0 - iS.alpha[k][b]);
 						P *= R;
 					}
 					p_ism[flat(t,r,Nt)] += Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);

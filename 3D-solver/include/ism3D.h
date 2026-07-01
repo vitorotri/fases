@@ -95,12 +95,16 @@ struct ISMConfig {
 struct MaterialImpedance {
     std::array<float, ISM_NBANDS> Z_re;
     std::array<float, ISM_NBANDS> Z_im;
+    std::array<float, ISM_NBANDS> alpha;  // octave-band absorption from the .mat file (Allen-Berkley)
     bool loaded = false;
-    MaterialImpedance(){ Z_re.fill(0.f); Z_im.fill(0.f); }
+    MaterialImpedance(){ Z_re.fill(0.f); Z_im.fill(0.f); alpha.fill(0.f); }
 };
 
+// mat_dir (optional): directory of the raw .mat absorption files; when given,
+// the first 8 values of <mat_dir>/<name>.mat are loaded into alpha (0 on miss).
 inline static std::vector<MaterialImpedance> ism_load_impedances(
-    const std::string& imp_dir, const std::vector<std::string>& material_names)
+    const std::string& imp_dir, const std::vector<std::string>& material_names,
+    const std::string& mat_dir = std::string())
 {
     std::vector<MaterialImpedance> out(material_names.size());
     auto parse_row = [](const std::string& s, std::array<float, ISM_NBANDS>& dst)->int{
@@ -130,6 +134,21 @@ inline static std::vector<MaterialImpedance> ism_load_impedances(
                                            path.c_str(),ISM_NBANDS,nr,ni);
             } else std::fprintf(stderr,"[ISM] %s: fewer than two data lines\n", path.c_str());
         }
+        if(!mat_dir.empty()){
+            std::string mpath = mat_dir;
+            if(!mpath.empty() && mpath.back()!='/' && mpath.back()!='\\') mpath += '/';
+            mpath += material_names[m] + ".mat";
+            std::ifstream mf(mpath);
+            std::string line; int n=0;
+            while(n<ISM_NBANDS && std::getline(mf, line)){
+                const size_t hp=line.find('#'); if(hp!=std::string::npos) line.erase(hp);
+                std::istringstream iss(line); float v;
+                while(n<ISM_NBANDS && (iss>>v)) M.alpha[(size_t)n++]=v;
+            }
+            if(n<ISM_NBANDS)
+                std::fprintf(stderr,"[ISM] %s: expected %d alphas, got %d (missing set to 0)\n",
+                             mpath.c_str(), ISM_NBANDS, n);
+        }
         out[m]=M;
     }
     return out;
@@ -141,11 +160,12 @@ inline static std::vector<MaterialImpedance> ism_load_impedances(
 // table indexed by group_id; call ism_paths_for_pairs with group_to_material={} so
 // reflection.material_id == group_id, and its name is names[material_id+1].
 inline static std::vector<MaterialImpedance> ism_load_impedances_layered(
-    const std::string& imp_dir, const std::vector<std::string>& names)
+    const std::string& imp_dir, const std::vector<std::string>& names,
+    const std::string& mat_dir = std::string())
 {
     if(names.size() < 2) return {};                       // only BoundingBox, or empty
     std::vector<std::string> mats(names.begin()+1, names.end());
-    return ism_load_impedances(imp_dir, mats);
+    return ism_load_impedances(imp_dir, mats, mat_dir);
 }
 
 // ============================================================
@@ -169,7 +189,8 @@ struct ISMReflection {
     float theta     = 0.f;
     std::array<float, ISM_NBANDS> Z_re;
     std::array<float, ISM_NBANDS> Z_im;
-    ISMReflection(){ Z_re.fill(0.f); Z_im.fill(0.f); }
+    std::array<float, ISM_NBANDS> alpha;
+    ISMReflection(){ Z_re.fill(0.f); Z_im.fill(0.f); alpha.fill(0.f); }
 };
 
 struct ISMPath {
@@ -517,7 +538,7 @@ inline static void ism_paths_for_pairs(
         ISMReflection R; R.group_id=gid; R.material_id=material_of(gid);
         R.cos_theta=ct; R.theta=std::acos(std::min(1.f,std::max(0.f,ct)));
         const int mid=R.material_id;
-        if(mid>=0&&mid<(int)impedance_by_material.size()){ R.Z_re=impedance_by_material[(size_t)mid].Z_re; R.Z_im=impedance_by_material[(size_t)mid].Z_im; }
+        if(mid>=0&&mid<(int)impedance_by_material.size()){ R.Z_re=impedance_by_material[(size_t)mid].Z_re; R.Z_im=impedance_by_material[(size_t)mid].Z_im; R.alpha=impedance_by_material[(size_t)mid].alpha; }
         return R;
     };
 
@@ -580,6 +601,7 @@ struct ISMImagePath {
     std::vector<float> angle_rad;                          // same angle in radians, 2b
     std::vector<std::array<float, ISM_NBANDS>> Z_re;       // impedance (real) per surface, per band, 2c
     std::vector<std::array<float, ISM_NBANDS>> Z_im;       // impedance (imag) per surface, per band, 2c
+    std::vector<std::array<float, ISM_NBANDS>> alpha;      // absorption per surface, per band (Allen-Berkley)
     float amp = 1.f;                                       // curvature amplitude factor (1 unless curved)
 };
 
@@ -642,11 +664,13 @@ inline static ISMResult ism_solve(
                 ip.angle_rad.reserve(p.reflections.size());
                 ip.Z_re.reserve(p.reflections.size());
                 ip.Z_im.reserve(p.reflections.size());
+                ip.alpha.reserve(p.reflections.size());
                 for(const ISMReflection& rf : p.reflections){
                     ip.cos_inc.push_back(rf.cos_theta);
                     ip.angle_rad.push_back(rf.theta);
                     ip.Z_re.push_back(rf.Z_re);
                     ip.Z_im.push_back(rf.Z_im);
+                    ip.alpha.push_back(rf.alpha);
                 }
                 R.images[key].push_back(std::move(ip));
             }
