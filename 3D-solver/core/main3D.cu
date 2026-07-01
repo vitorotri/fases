@@ -119,11 +119,12 @@ int main(int argc, char *argv[]){
     
     n = 0; // initial time-step
     
-    // ---------------------- load OBJ/PLY/XYZ/etc file and create scene ---------------------
+    // ------------------------ load OBJ/PLY/XYZ/etc file and create scene variables ------------------------
     
     // Remove stale outputs from the project output directory, not from cwd.
+    // S.bin / oid.bin are kept: they double as a cache (see scene_cache.txt below)
     for (const char* fn : {"pressureX.bin", "pressureY.bin", "pressureZ.bin",
-                           "oid.bin", "S.bin", "header.txt", "pre_header.txt"}) {
+                           "header.txt", "pre_header.txt"}) {
         std::remove(out_file(fn).c_str());
     }
         
@@ -134,7 +135,7 @@ int main(int argc, char *argv[]){
         perror("Error opening file");
         return -1;
     }
-    int nObj = 0; // number of obejcts in the scene (initialization)
+    int nObj = 0; // number of objects in the scene (initialization)
     //int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
@@ -142,7 +143,7 @@ int main(int argc, char *argv[]){
     uint8_t *oid = NULL; // for surface attribution
     uint8_t* d_oid = NULL;
     
-    // ------------------------------- get Device(s) information -----------------------------------
+    // ---------------------------------- get Device(s) information ----------------------------------------
     //
     // Important: always check the return value from cudaGetDeviceCount().
     // If the CUDA runtime cannot talk to the installed driver, nDevices is not
@@ -234,31 +235,67 @@ int main(int argc, char *argv[]){
    		printf("\n[OK] processing scene...\n");
 
 		if(!parse_obj3d(path, &sc, h)) return -1;
-		
-		if(!build_sdf(&sc, h, &Nx, &Ny, &Nz, &Lx, &Ly, &Lz, &S)){
-        // grid_dims_checked already printed the reason + suggested h
-        scene_free(&sc);
-        return -1;
-    	}
-	
-    	if(!build_oid_dense(sc, S, Nx, Ny, Nz, h, tol, &oid)){   // GPU, CPU fallback
-        	fprintf(stderr,"Failed to build OID map\n");
-        	free(S); scene_free(&sc);
-        	return -1;
-    	}
-		
-		FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
-		if (file_S) {
-    		fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
-    		fclose(file_S);
+
+		// S.bin/oid.bin double as a cache, keyed by scene mtime + h + tol
+		std::error_code fec;
+		std::ostringstream key_s;
+		key_s << scene_str << " "
+		      << std::filesystem::last_write_time(scene_path, fec).time_since_epoch().count()
+		      << " " << h << " " << tol;
+		std::string cache_key = key_s.str(), old_key;
+
+		std::ifstream ck(out_file("scene_cache.txt"));
+		bool cached = std::getline(ck, old_key) && old_key == cache_key
+		           && (ck >> Nx >> Ny >> Nz >> Lx >> Ly >> Lz);
+		ck.close();
+		if (cached){
+			size_t Ncells = (size_t)Nx*Ny*Nz;
+			S   = (float*)malloc(Ncells*sizeof(float));
+			oid = (uint8_t*)malloc(Ncells);
+			FILE *fS = fopen(out_file("S.bin").c_str(), "rb");
+			FILE *fO = fopen(out_file("oid.bin").c_str(), "rb");
+			cached = S && oid && fS && fO
+			      && fread(S, sizeof(float), Ncells, fS) == Ncells
+			      && fread(oid, 1, Ncells, fO) == Ncells;
+			if (fS) fclose(fS);
+			if (fO) fclose(fO);
+			if (!cached){ free(S); S = NULL; free(oid); oid = NULL; }
 		}
-		
-		FILE *file_oid = fopen(out_file("oid.bin").c_str(), "wb");
-		if (file_oid){
-    		fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
-    		fclose(file_oid);
+
+		if (cached){
+			printf("\n[OK] scene unchanged, reusing cached S.bin / oid.bin\n");
 		}
-		
+		else {
+			if(!build_sdf(&sc, h, &Nx, &Ny, &Nz, &Lx, &Ly, &Lz, &S)){
+			// grid_dims_checked already printed the reason + suggested h
+			scene_free(&sc);
+			return -1;
+			}
+
+			if(!build_oid_dense(sc, S, Nx, Ny, Nz, h, tol, &oid)){   // GPU, CPU fallback
+				fprintf(stderr,"Failed to build OID map\n");
+				free(S); scene_free(&sc);
+				return -1;
+			}
+
+			FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
+			if (file_S) {
+				fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
+				fclose(file_S);
+			}
+
+			FILE *file_oid = fopen(out_file("oid.bin").c_str(), "wb");
+			if (file_oid){
+				fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
+				fclose(file_oid);
+			}
+
+			// stamp the cache only after both bins are on disk
+			std::ofstream(out_file("scene_cache.txt"), std::ios::trunc)
+			    << cache_key << "\n" << Nx << " " << Ny << " " << Nz << " "
+			    << Lx << " " << Ly << " " << Lz << "\n";
+		}
+
 		cudaMalloc(&d_oid, (size_t)Nx*Ny*Nz*sizeof(uint8_t));
 		cudaMemcpy(d_oid, oid, (size_t)Nx*Ny*Nz*sizeof(uint8_t), cudaMemcpyHostToDevice);
 		
