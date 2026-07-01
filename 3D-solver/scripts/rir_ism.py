@@ -14,12 +14,12 @@ MAX_ORDER = 3                 		# total ISM reflection order
 #   south / north   →  y = 0   / y = Ly
 #   floor / ceiling →  z = 0   / z = Lz
 ALPHA = {
-    "west":    0.02,
-    "east":    0.06,
-    "south":   0.04,
-    "north":   0.53,
-    "floor":   0.04,
-    "ceiling": 0.31,
+    "west":    0.1,
+    "east":    0.1,
+    "south":   0.1,
+    "north":   0.1,
+    "floor":   0.1,
+    "ceiling": 0.1,
 }
 
 SOURCES = [
@@ -109,7 +109,7 @@ _count = sum(
     if abs(l-p)+abs(l) + abs(m-q)+abs(m) + abs(n-r)+abs(n) <= MAX_ORDER
 )
 assert _count == _EXPECTED[MAX_ORDER], f"image source count {_count} ≠ {_EXPECTED[MAX_ORDER]}"
-print(f"[check] {_count} image sources ✓  (order={MAX_ORDER})")
+print(f"[check] {_count} candidate image sources ✓  (order={MAX_ORDER}, before path validity filter)")
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 
