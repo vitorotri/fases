@@ -1076,7 +1076,7 @@ int main(int argc, char *argv[]){
 	
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
-	Nt = (int)(t_max/dt); // new number of samples
+	Nt = (int)(t_max/dt); // new number of samples (estimate from shoebox extrapolation?)
 	// allocate memory for ISM IRs: for each rec, first index sample in time, second is receiver's index,
 	// third one is octave band (flattened)
 	std::vector<float> p_ism(Nt * (size_t)Q.Nr);
