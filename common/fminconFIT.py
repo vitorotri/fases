@@ -556,6 +556,7 @@ def fit_material(read_file, coefs_path, soft=False):
             # global pi phase shift: R = -|R| (also flips the saved constant)
             R_tgt = -R_tgt; Rinf = -Rinf
             print(f"[{name}] soft material: R sign inverted")
+        R_oct_target = Rinf * np.ones_like(OCTAVE_FC, dtype=complex)
         # skip min-phase + skip vector fitting
         K = 0; L = 0
         Acoef = np.array([], float); zeta = np.array([], float)
@@ -566,11 +567,15 @@ def fit_material(read_file, coefs_path, soft=False):
     else:
         R_tgt, Rmag_interp, phi = min_phase_octave_cepstrum(freq, Rmag_oct, ext_oct=2, n_w=4096)
         #R_tgt, Rmag_interp, phi = min_phase_octave_hilbert(freq, Rmag_oct, ext_oct=2, n_w=8192)
+        # same min-phase completion evaluated AT the octave centres (full
+        # 63-8000 Hz band data) — used for the .imp export below
+        R_oct_target, _, _ = min_phase_octave_cepstrum(OCTAVE_FC, Rmag_oct, ext_oct=2, n_w=4096)
         if soft:
             # soft (pressure-release) surface: R = -|R|·e^{j·phi_min}, a global
             # pi phase shift. Causality/stability of the min-phase completion
             # are untouched; the fit absorbs the sign.
             R_tgt = -R_tgt
+            R_oct_target = -R_oct_target
             print(f"[{name}] soft material: R sign inverted")
         # proceed with VF as usual
 
@@ -713,23 +718,19 @@ def fit_material(read_file, coefs_path, soft=False):
     # The ISM solver builds the angle-dependent, local-reaction reflection
     # coefficient   R(theta) = (zeta*cos(theta) - 1) / (zeta*cos(theta) + 1),
     # zeta = Z / z0 the NORMALISED specific impedance, so it needs Z at the 8
-    # octave-band centres. We evaluate the SAME fitted ADE model the wave solver
-    # realises (R_expected) at those centres and map R -> Z = z0*(1+R)/(1-R).
-    # CRITICAL: these are the FINAL coefficients, i.e. AFTER the Option A
-    # (Hornikx/Cotte) refinement above — the exact poles/residues written to the
-    # .fit and thus realised by the wave solver. Using the post-refinement model
-    # (not the raw VF output, not the raw octave target) keeps the ISM and the
-    # wave solver on the same surface. Near-rigid -> R~1 -> large real Z; soft ->
-    # R<0 -> sign carried through.
+    # octave-band centres, mapped from R via Z = z0*(1+R)/(1-R).
+    # We export the MIN-PHASE OCTAVE TARGET (R_oct_target), not the fitted ADE
+    # model: the fit only sees f <= f_cutoff, while the ISM reads exactly the
+    # bands >= f_cutoff — evaluating the fitted model there would be pure
+    # extrapolation. The target is built from the full 63-8000 Hz band data.
+    # Near-rigid -> R~1 -> large real Z; soft -> R<0 -> sign carried through.
     #
     # Format (exactly two lines, 8 space-separated values each):
     #   line 1: Re(Z) per band, 63 -> 8000 Hz
     #   line 2: Im(Z) per band, 63 -> 8000 Hz
     # Z is the specific acoustic impedance [Pa.s/m]; the ISM normalises by
     # z0 = rho0*c0 (both available from config) to get zeta.
-    w_oct      = 2.0 * np.pi * OCTAVE_FC
-    R_oct_fit  = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w_oct)
-    Z_oct_fit  = Z_from_R(R_oct_fit, z0)
+    Z_oct_fit  = Z_from_R(R_oct_target, z0)
 
     os.makedirs(imp_dir, exist_ok=True)
     imp_path = os.path.join(imp_dir, name + ".imp")
