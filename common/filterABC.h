@@ -5,7 +5,7 @@
 #include <cstdlib>
 
 __host__ __device__ size_t flat(int i, int j, int Nx){
-    return (j * Nx) + i;
+    return (j * Nx) + i; // column-major convention
 }
 
 static void skip_to_data(std::ifstream& in) {
