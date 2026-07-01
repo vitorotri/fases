@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 import os
 import sys
 import glob
+import shutil
+import struct
 from scipy.io import savemat
 from scipy.interpolate import PchipInterpolator
 from scipy.signal import hilbert
@@ -321,6 +323,12 @@ def _read_soft_registry(mat_dir):
             pass
     return reg
 
+
+def _alpha_key(mat_path, soft):
+    """Hashable key from the 8 octave-band alphas + soft flag. Used to detect
+    duplicate materials so their .fit/.imp can be copied instead of re-fitted."""
+    arr = np.atleast_1d(np.loadtxt(mat_path)).ravel()[:8]
+    return (tuple(np.round(arr, 8)), bool(soft))
 
 def is_near_one(arr, atol=0.02):
     return np.all(np.isclose(arr, 1.0, atol=atol))
@@ -746,6 +754,11 @@ results = []
 K_all = 0; L_all = 0
 # Central hard/soft registry (ALL.mat) lives in the same dir as the materials.
 soft_reg = _read_soft_registry(os.path.dirname(mat_files[0])) if mat_files else {}
+
+# Cache: alpha_key -> (src_fit_path, src_imp_path, K, L, result_tuple)
+# Avoids re-fitting materials that share identical octave-band absorptions.
+_alpha_cache = {}
+
 for m in mat_files:
     base = os.path.splitext(os.path.basename(m))[0]
     if base == "ALL":
@@ -754,9 +767,26 @@ for m in mat_files:
         coefs_path = os.path.abspath(_args.out)
     else:
         coefs_path = os.path.join(fit_dir, base + ".fit")
+    imp_path = os.path.join(imp_dir, base + ".imp")
     soft = soft_reg.get(base, False)
-    name, R_tgt, R_hat, K, L, rms = fit_material(m, coefs_path, soft=soft)
-    results.append((name, R_tgt, R_hat, rms))
+
+    key = _alpha_key(m, soft)
+    if key in _alpha_cache:
+        src_fit, src_imp, K, L, cached_result = _alpha_cache[key]
+        src_name = os.path.splitext(os.path.basename(src_fit))[0]
+        print(f"[{base}] alphas identical to '{src_name}' — copying .fit and .imp")
+        os.makedirs(os.path.dirname(coefs_path), exist_ok=True)
+        shutil.copy2(src_fit, coefs_path)
+        os.makedirs(imp_dir, exist_ok=True)
+        shutil.copy2(src_imp, imp_path)
+        _cached_name, R_tgt, R_hat, rms = cached_result
+        results.append((base, R_tgt, R_hat, rms))
+    else:
+        name, R_tgt, R_hat, K, L, rms = fit_material(m, coefs_path, soft=soft)
+        results.append((name, R_tgt, R_hat, rms))
+        K_all = max(K_all, K); L_all = max(L_all, L)
+        _alpha_cache[key] = (coefs_path, imp_path, K, L, (name, R_tgt, R_hat, rms))
+
     K_all = max(K_all, K); L_all = max(L_all, L)
 
 # --------------------
@@ -794,6 +824,15 @@ Npoles = np.array([[int(K_m), int(L_m)]], dtype=int)
 os.makedirs(os.path.dirname(Npoles_path), exist_ok=True)
 np.savetxt(Npoles_path, Npoles, fmt="%d", delimiter=" ")
 print(f"[poles] K_m={int(K_m)} L_m={int(L_m)} (scanned {len(_fit_files)} .fit files) -> {Npoles_path}")
+
+# Write number of distinct materials (unique alpha combinations actually fitted)
+# as a single little-endian int32 binary file so C/C++ can read it with:
+#   int n; fread(&n, sizeof(int), 1, fp);
+nMat_path = os.path.join(os.path.dirname(Npoles_path), "nMat")
+n_distinct = len(_alpha_cache)
+with open(nMat_path, "wb") as _f:
+    _f.write(struct.pack("<I", n_distinct))
+print(f"[nMat] {n_distinct} distinct material(s) -> {nMat_path}")
 
 # ============================================================
 # OUTPUTS SUMMARY — absolute paths + file counts, so there is never any
