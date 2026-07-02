@@ -1076,7 +1076,7 @@ int main(int argc, char *argv[]){
 	
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
-	Nt = (int)(t_max/dt); // new number of samples (estimate from shoebox extrapolation?)
+	Nt = (int)(t_max/dt); // new number of samples
 	// allocate memory for ISM IRs: for each rec, first index sample in time, second is receiver's index,
 	// third one is octave band (flattened)
 	std::vector<float> p_ism(Nt * (size_t)Q.Nr);
@@ -1085,12 +1085,11 @@ int main(int argc, char *argv[]){
 	// for each band
 	for (int b = 0; b < 8; b++){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
-		// fill the shared buffer for this band
-		std::fill(p_ism.begin(), p_ism.end(), 0.0);
+		int t_cross = 0.0; // crossover time index, for late tail reverberation
+		std::fill(p_ism.begin(), p_ism.end(), 0.0); // fill the shared buffer for this band
 		// for each receiver
-		#pragma omp parallel for schedule(dynamic)
+		#pragma omp parallel for
 		for (int r = 0; r < Q.Nr; r++){
-			int t_cross = 0.0; // crossover time index, for late tail reverberation
 			// sum contributions of sources
 			for (int s = 0; s < Q.Ns; s++){
 				
@@ -1115,10 +1114,10 @@ int main(int argc, char *argv[]){
 					float P = 1.0; // iterated product
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
-						float theta = iS.angle_rad[k];
-						//float theta = 1.0;
-						//float R = R_from_Z(iS.Z_re[k][b], iS.Z_im[k][b], theta, rho, c);
-						float R = sqrtf(1.0 - iS.alpha[k][b]);
+						//float theta = iS.angle_rad[k];
+						float theta = 0.0;
+						float R = R_angled(iS.alpha[k][b], theta);
+						//R = sqrtf(1.0 - iS.alpha[k][b]);
 						P *= R;
 					}
 					p_ism[flat(t,r,Nt)] += Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);

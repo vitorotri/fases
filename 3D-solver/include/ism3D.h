@@ -56,11 +56,11 @@ Threading: host + optional OpenMP over receivers.
   #include <omp.h>
 #endif
 
-__host__ float R_from_Z(float re, float im, float theta, float rho, float c){
-	float A, B;
-	A = sqrtf(pow(re*cos(theta) - rho*c,2) + pow(im*cos(theta),2));
-	B = sqrtf(pow(re*cos(theta) + rho*c,2) + pow(im*cos(theta),2));
-	return A/B;
+__host__ float R_angled(float alpha, float theta){
+	float R = sqrtf(1.0 - alpha);
+	if (theta == 0.0) return R;
+	float xi = (1.0 + R) / (1.0 - R);
+	return (xi*cos(theta) - 1.0) / (xi*cos(theta) + 1.0);
 }
 
 static constexpr int ISM_NBANDS = 8;

@@ -14,12 +14,12 @@ MAX_ORDER = 3                 		# total ISM reflection order
 #   south / north   →  y = 0   / y = Ly
 #   floor / ceiling →  z = 0   / z = Lz
 ALPHA = {
-    "west":    0.1,
-    "east":    0.1,
-    "south":   0.1,
-    "north":   0.1,
-    "floor":   0.1,
-    "ceiling": 0.1,
+    "west":    0.51,
+    "east":    0.90,
+    "south":   0.31,
+    "north":   0.10,
+    "floor":   0.10,
+    "ceiling": 0.04,
 }
 
 SOURCES = [
