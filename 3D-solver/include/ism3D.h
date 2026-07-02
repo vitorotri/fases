@@ -51,6 +51,7 @@ Threading: host + optional OpenMP over receivers.
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <random>
 
 #ifdef _OPENMP
   #include <omp.h>
@@ -65,6 +66,21 @@ float R_angled(float alpha, float theta){
 
 float sinc(float x){
 	return x == 0.0 ? 1.0 : std::sin(x)/x;
+}
+
+// Statistical late-reverberation tail, ref. Svensson (1998) / Heutschi (2021),
+// same method as statRIR.py: decaying Gaussian noise from t_cross+1 onward.
+// The envelope is referenced to t = 0 (source emission), so the noise level at
+// t_cross splices onto the already-decayed ISM level instead of restarting at
+// full amplitude. Pass a per-band T60 and a per-(receiver,band) seed.
+void stat_tail(float* p, int Nt, int t_cross,
+               float fs, float c, float V, float T60, unsigned seed){
+	std::mt19937 rng(seed);
+	std::normal_distribution<float> eps(0.0f, 1.0f);
+	const float dell = 3.0f * std::log(10.0f) / T60; // -60 dB at t = T60
+	const float A = std::sqrt(4.0f * (float)M_PI * c / (V * fs));
+	for (int n = t_cross + 1; n < Nt; n++)
+		p[n] += A * std::exp(-dell * n / fs) * eps(rng);
 }
 
 static constexpr int ISM_NBANDS = 8;

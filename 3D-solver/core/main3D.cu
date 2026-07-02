@@ -1085,12 +1085,13 @@ int main(int argc, char *argv[]){
 	#pragma omp parallel for
 	for (int b = 0; b < 8; b++){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
-		int t_cross = 0.0; // crossover time index, for late tail reverberation
+		
 		// allocate memory for ISM IRs: for each rec, first index sample is time, second is receiver's index
 		// (flattened)
 		std::vector<float> p_ism(Nt * (size_t)Q.Nr);
 		// for each receiver
 		for (int r = 0; r < Q.Nr; r++){
+			int t_cross = 0.0; // crossover time index, for late tail reverberation
 			// sum contributions of sources
 			for (int s = 0; s < Q.Ns; s++){
 				
@@ -1150,6 +1151,9 @@ int main(int argc, char *argv[]){
 					
 				}
 			}
+			
+			// statistical tail
+			stat_tail(p_ism.data() + (size_t)r*Nt, Nt, t_cross, fs, c, V, T60[b], 1234u + 8u*r + b);
 			
 			// this receiver is done for this band -> write its slice to associated binary file
         	std::string fname = out_file("RIR" + std::to_string(r) + "_"
