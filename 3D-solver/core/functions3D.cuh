@@ -195,7 +195,7 @@ __host__ __device__ float raised_cosine(float x, float x0, float w){
 // tol need to be 4*h (?)
 __device__ float nu_phi(float r){
 	if (r <= 4.0f && r >= 0.0f){
-		return 0.5f*(1.0f + cos(0.25f*M_PI*r));
+		return 0.5f*(1.0f + std::cos(0.25f*M_PI*r));
 	}
 	return 0.0f;
 }
