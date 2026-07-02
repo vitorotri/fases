@@ -229,6 +229,8 @@ int main(int argc, char *argv[]){
     
     // -------------------------------------- process OBJ scene ------------------------------------
     
+    float A_tot; // total surface area of domain
+    std::vector<float> A; // vector of surface area per material
     std::vector<std::string> names; // global naming
     Scene3D sc;
    	if (ends_with_dotobj(path)){
@@ -236,6 +238,9 @@ int main(int argc, char *argv[]){
    		printf("\n[OK] processing scene...\n");
 
 		if(!parse_obj3d(path, &sc, h)) return -1;
+		
+		A = mesh_group_areas(sc, &A_tot); // A[i] is aligned with Z[i+1].alpha[b], for band b
+		// created in the ISM section
 
 		// S.bin/oid.bin double as a cache, keyed by scene mtime + h + tol
 		std::error_code fec;
@@ -311,6 +316,9 @@ int main(int argc, char *argv[]){
     else {
     	return -1;
     }
+    
+    size_t n_air = count_air_voxels(S, (size_t)Nx*Ny*Nz);
+	float V = n_air * h*h*h; // effective air volume of domain
     
     FILE *pre_header; // file for data output (sdf_plot.py TST)
 	pre_header = fopen(out_file("pre_header.txt").c_str(), "w");
@@ -1077,8 +1085,12 @@ int main(int argc, char *argv[]){
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
 	Nt = (int)(t_max/dt); // new number of samples
-	int Nw = 128; // Hann window size for fractional delay
+	int Nw = 1024; // Hann window size for fractional delay
 	//std::cout << "Nw = " << Nw << "\n";
+	
+	// compute estimated T60's
+	std::vector<float> T60(8, 0.5f);
+	estimate_T60s(T60, V, c, A_tot, A, Z);
 	
 	// compute IRs
 	// for each band
@@ -1153,6 +1165,8 @@ int main(int argc, char *argv[]){
 			}
 			
 			// statistical tail
+			// A[i] is aligned with Z[i+1].alpha[b], for band b
+			
 			stat_tail(p_ism.data() + (size_t)r*Nt, Nt, t_cross, fs, c, V, T60[b], 1234u + 8u*r + b);
 			
 			// this receiver is done for this band -> write its slice to associated binary file

@@ -92,6 +92,30 @@ struct Mesh3D {
     }
 };
 
+// Surface area per group/material [m^2] (computed on transformed vertices,
+// so shift/scale are accounted for). total gets the summed area if non-null.
+inline static std::vector<float> mesh_group_areas(const Mesh3D& mesh, float* total = nullptr){
+    std::vector<float> A(mesh.group_names.size(), 0.f);
+    float tot = 0.f;
+    for (const Tri& t : mesh.tris){
+        const vec3 a = mesh.vertex_transformed(t.v0);
+        const vec3 b = mesh.vertex_transformed(t.v1);
+        const vec3 c = mesh.vertex_transformed(t.v2);
+        const float ar = 0.5f * std::sqrt(norm2_3(cross3(sub3(b,a), sub3(c,a))));
+        if (t.group_id >= 0 && t.group_id < (int)A.size()) A[(size_t)t.group_id] += ar;
+        tot += ar;
+    }
+    if (total) *total = tot;
+    return A;
+}
+
+// Number of air voxels: entries of S with S > 0 (interior).
+inline static size_t count_air_voxels(const float* S, size_t N){
+    size_t n = 0;
+    for (size_t i = 0; i < N; i++) if (S[i] > 0.f) n++;
+    return n;
+}
+
 // ============================================================
 // OBJ parsing helpers
 // ============================================================

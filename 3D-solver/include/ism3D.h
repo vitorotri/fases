@@ -698,3 +698,24 @@ inline static ISMResult ism_solve(
     }
     return R;
 }
+
+//
+// Ref: Kuttruff equation 5.22 (b), equivalent to Thomas's thesis equation 2.24
+// Also check https://strutt.arup.com/help/Building_Acoustics/RTInsert.html
+// Not considering absorption of air here
+//
+void estimate_T60s(std::vector<float>& T60, float V, float c, float A_tot, const std::vector<float>& A,
+				   const std::vector<MaterialImpedance>& Z){
+	float num, den, alpha_m;
+	num = 55.25 * V;
+	// estimate T60 for each octave band
+	for (int b = 0; b < 8; b++){
+		alpha_m = 0.0;
+		for (int i = 0; i < A.size(); i++){
+			alpha_m += A[i] * Z[i+1].alpha[b]; // Z[0] is for BoundingBox
+		}
+		alpha_m /= A_tot;
+		den = c * A_tot * std::log(1.0 - alpha_m);
+		T60[b] = -num / den;
+	}
+}
