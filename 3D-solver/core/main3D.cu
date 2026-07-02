@@ -1077,9 +1077,8 @@ int main(int argc, char *argv[]){
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
 	Nt = (int)(t_max/dt); // new number of samples
-	// allocate memory for ISM IRs: for each rec, first index sample in time, second is receiver's index,
-	// third one is octave band (flattened)
-	std::vector<float> p_ism(Nt * (size_t)Q.Nr);
+	int Nw = 128; // Hann window size for fractional delay
+	//std::cout << "Nw = " << Nw << "\n";
 	
 	// compute IRs
 	// for each band
@@ -1087,7 +1086,9 @@ int main(int argc, char *argv[]){
 	for (int b = 0; b < 8; b++){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
 		int t_cross = 0.0; // crossover time index, for late tail reverberation
-		std::fill(p_ism.begin(), p_ism.end(), 0.0); // fill the shared buffer for this band
+		// allocate memory for ISM IRs: for each rec, first index sample is time, second is receiver's index
+		// (flattened)
+		std::vector<float> p_ism(Nt * (size_t)Q.Nr);
 		// for each receiver
 		for (int r = 0; r < Q.Nr; r++){
 			// sum contributions of sources
@@ -1096,9 +1097,21 @@ int main(int argc, char *argv[]){
 				// direct: guard the deposit only - do NOT skip the image loop
     			float d_0 = Q.direct_at(s, r); // 0.0f if blocked
     			if (d_0 > 0.0f){
-        			int t_0 = (int)(fs * d_0 / c);
+        			float tau_0 = fs * d_0 / c;
+        			int t_0 = (int)tau_0;
         			if (t_0 < Nt){
-            			p_ism[flat(t_0, r, Nt)] += Q.src_pressure[s] / (4.0*M_PI*d_0);
+        				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0);
+        				// no fractional delay
+            			//p_ism[flat(t_0, r, Nt)] += gS_0;
+            			
+            			// fractional delay
+            			for (int n0 = -(int)(0.5*Nw); n0 <= (int)(0.5*Nw); n0++){
+							int nn = t_0 + n0;
+							if (nn < 0 || nn >= Nt) continue;
+							float xx = nn - tau_0;
+							p_ism[flat(nn,r,Nt)] += gS_0 * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw))*sinc(M_PI*xx);
+						}
+            			
             			if (t_0 > t_cross) t_cross = t_0;
         			}
     			}
@@ -1107,7 +1120,8 @@ int main(int argc, char *argv[]){
 				// for each image-source 'iS' in container Q.images_at()
 				for (const ISMImagePath& iS : Q.images_at(s, r)){
 					float d = iS.distance;
-					int t = (int)(fs * d / c);
+					float tau = fs * d / c;
+					int t = (int)tau;
 					//std::cout << "t = " << t << "\n";
 					if (t >= Nt) continue; // safety guard
 					if (t > t_cross) t_cross = t;
@@ -1115,16 +1129,28 @@ int main(int argc, char *argv[]){
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
 						float theta = iS.angle_rad[k];
-						//float theta = 0.0; (test for normal incidence)
+						//float theta = 0.0; // (test for normal incidence, shoebox comparison)
 						float R = R_angled(iS.alpha[k][b], theta);
-						//R = sqrtf(1.0 - iS.alpha[k][b]);
 						P *= R;
 					}
-					p_ism[flat(t,r,Nt)] += Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
 					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
 					// parser's heuristics)
+					
+					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
+					// no fractionl delay
+					//p_ism[flat(t,r,Nt)] += gS;
+					
+					// fractional delay, ref. Reuben Thomas (Thesis), Fu & Li (2016)
+					for (int n0 = -(int)(0.5*Nw); n0 <= (int)(0.5*Nw); n0++){
+						int nn = t + n0;
+						if (nn < 0 || nn >= Nt) continue;
+						float xx = nn - tau;
+						p_ism[flat(nn,r,Nt)] += gS * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
+					}
+					
 				}
 			}
+			
 			// this receiver is done for this band -> write its slice to associated binary file
         	std::string fname = out_file("RIR" + std::to_string(r) + "_"
                                     		+ std::to_string((int)octave_bands[b]) + ".bin");
