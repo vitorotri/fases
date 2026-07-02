@@ -56,11 +56,15 @@ Threading: host + optional OpenMP over receivers.
   #include <omp.h>
 #endif
 
-__host__ float R_angled(float alpha, float theta){
+float R_angled(float alpha, float theta){
 	float R = sqrtf(1.0 - alpha);
 	if (R > 0.99999) return R; // near-rigid safeguard: xi -> inf
 	float xi = (1.0 + R) / (1.0 - R);
-	return (xi*cos(theta) - 1.0) / (xi*cos(theta) + 1.0);
+	return (xi*std::cos(theta) - 1.0) / (xi*std::cos(theta) + 1.0);
+}
+
+float sinc(float x){
+	return x == 0.0 ? 1.0 : std::sin(x)/x;
 }
 
 static constexpr int ISM_NBANDS = 8;
