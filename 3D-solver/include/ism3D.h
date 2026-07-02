@@ -58,7 +58,7 @@ Threading: host + optional OpenMP over receivers.
 
 __host__ float R_angled(float alpha, float theta){
 	float R = sqrtf(1.0 - alpha);
-	if (theta == 0.0) return R;
+	if (R > 0.99999) return R; // near-rigid safeguard: xi -> inf
 	float xi = (1.0 + R) / (1.0 - R);
 	return (xi*cos(theta) - 1.0) / (xi*cos(theta) + 1.0);
 }

@@ -1083,12 +1083,12 @@ int main(int argc, char *argv[]){
 	
 	// compute IRs
 	// for each band
+	#pragma omp parallel for
 	for (int b = 0; b < 8; b++){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
 		int t_cross = 0.0; // crossover time index, for late tail reverberation
 		std::fill(p_ism.begin(), p_ism.end(), 0.0); // fill the shared buffer for this band
 		// for each receiver
-		#pragma omp parallel for
 		for (int r = 0; r < Q.Nr; r++){
 			// sum contributions of sources
 			for (int s = 0; s < Q.Ns; s++){
@@ -1114,8 +1114,8 @@ int main(int argc, char *argv[]){
 					float P = 1.0; // iterated product
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
-						//float theta = iS.angle_rad[k];
-						float theta = 0.0;
+						float theta = iS.angle_rad[k];
+						//float theta = 0.0; (test for normal incidence)
 						float R = R_angled(iS.alpha[k][b], theta);
 						//R = sqrtf(1.0 - iS.alpha[k][b]);
 						P *= R;
