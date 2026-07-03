@@ -57,7 +57,7 @@ Threading: host + optional OpenMP over receivers.
   #include <omp.h>
 #endif
 
-float R_angled(float alpha, float theta){
+float R_oblique(float alpha, float theta){
 	float R = sqrtf(1.0 - alpha);
 	if (R > 0.99999) return R; // near-rigid safeguard: xi -> inf
 	float xi = (1.0 + R) / (1.0 - R);
@@ -69,18 +69,21 @@ float sinc(float x){
 }
 
 // Statistical late-reverberation tail, ref. Svensson (1998) / Heutschi (2021),
-// same method as statRIR.py: decaying Gaussian noise from t_cross+1 onward.
+// Decaying Gaussian noise from t_cross+1 onward.
 // The envelope is referenced to t = 0 (source emission), so the noise level at
 // t_cross splices onto the already-decayed ISM level instead of restarting at
 // full amplitude. Pass a per-band T60 and a per-(receiver,band) seed.
-void stat_tail(float* p, int Nt, int t_cross,
-               float fs, float c, float V, float T60, unsigned seed){
+// src_scale: sqrt of summed squared source pressures (val_s), so the tail level
+// matches ISM deposits gS = val_s/(4*pi*d). Density 4*pi*c^3*t^2/V times amplitude
+// (val_s/(4*pi*c*t))^2 gives per-sample variance val_s^2 * c/(4*pi*V*fs); the t^2 cancels.
+void stat_tail(std::vector<float>& p_ism, int Nt, int t_cross, int r,
+               float fs, float c, float V, float T60, unsigned seed, float src_scale){
 	std::mt19937 rng(seed);
 	std::normal_distribution<float> eps(0.0f, 1.0f);
-	const float dell = 3.0f * std::log(10.0f) / T60; // -60 dB at t = T60
-	const float A = std::sqrt(4.0f * (float)M_PI * c / (V * fs));
+	float dell = 3.0f * std::log(10.0f) / T60; // -60 dB at t = T60
+	float A = src_scale * std::sqrt(c / (4.0f * (float)M_PI * V * fs));
 	for (int n = t_cross + 1; n < Nt; n++)
-		p[n] += A * std::exp(-dell * n / fs) * eps(rng);
+		p_ism[flat(n,r,Nt)] += A * std::exp(-dell * n / fs) * eps(rng);
 }
 
 static constexpr int ISM_NBANDS = 8;
@@ -150,9 +153,9 @@ inline static std::vector<MaterialImpedance> ism_load_impedances(
             if(rows.size()>=2){
                 const int nr=parse_row(rows[0],M.Z_re), ni=parse_row(rows[1],M.Z_im);
                 M.loaded=(nr==ISM_NBANDS && ni==ISM_NBANDS);
-                if(!M.loaded) std::fprintf(stderr,"[ISM] %s: expected %d values/line; got re=%d im=%d\n",
+                if(!M.loaded) std::fprintf(stderr,"\n[ISM] %s: expected %d values/line; got re=%d im=%d\n",
                                            path.c_str(),ISM_NBANDS,nr,ni);
-            } else std::fprintf(stderr,"[ISM] %s: fewer than two data lines\n", path.c_str());
+            } else std::fprintf(stderr,"\n[ISM] %s: fewer than two data lines\n", path.c_str());
         }
         if(!mat_dir.empty()){
             std::string mpath = mat_dir;
@@ -166,7 +169,7 @@ inline static std::vector<MaterialImpedance> ism_load_impedances(
                 while(n<ISM_NBANDS && (iss>>v)) M.alpha[(size_t)n++]=v;
             }
             if(n<ISM_NBANDS)
-                std::fprintf(stderr,"[ISM] %s: expected %d alphas, got %d (missing set to 0)\n",
+                std::fprintf(stderr,"\n[ISM] %s: expected %d alphas, got %d (missing set to 0)\n",
                              mpath.c_str(), ISM_NBANDS, n);
         }
         out[m]=M;
@@ -604,7 +607,7 @@ inline static void ism_paths_for_pairs(
                     dst.push_back(std::move(path));
                 }
             }
-            std::fprintf(stderr,"[ISM] src%d rec%d: %d paths (incl direct)\n",s,r,(int)dst.size());
+            std::fprintf(stderr,"\n\n[ISM] src%d rec%d: %d paths (incl direct)\n",s,r,(int)dst.size());
             std::sort(dst.begin(),dst.end(),[](const ISMPath& a,const ISMPath& b){return a.length<b.length;});
         }
     }
@@ -663,7 +666,7 @@ inline static ISMResult ism_solve(
     R.src_pressure.assign((size_t)R.Ns, 1.0f);
     if(!src_pressure.empty()){
         if((int)src_pressure.size() != R.Ns)
-            std::fprintf(stderr,"[ISM] src_pressure size %zu != number of sources %d; using as far as it goes.\n",
+            std::fprintf(stderr,"\n[ISM] src_pressure size %zu != number of sources %d; using as far as it goes.\n",
                          src_pressure.size(), R.Ns);
         const int n = std::min((int)src_pressure.size(), R.Ns);
         for(int s=0;s<n;++s) R.src_pressure[(size_t)s] = src_pressure[(size_t)s];
@@ -712,7 +715,7 @@ void estimate_T60s(std::vector<float>& T60, float V, float c, float A_tot, const
 	for (int b = 0; b < 8; b++){
 		alpha_m = 0.0;
 		for (int i = 0; i < A.size(); i++){
-			alpha_m += A[i] * Z[i+1].alpha[b]; // Z[0] is for BoundingBox
+			alpha_m += A[i] * Z[i].alpha[b];
 		}
 		alpha_m /= A_tot;
 		den = c * A_tot * std::log(1.0 - alpha_m);

@@ -3331,6 +3331,11 @@ class MainWindow(QMainWindow):
         self._npoles.setValue(8); self._npoles.setMinimumWidth(130)
         lay.addRow("ADE poles:", self._npoles)
 
+        # Max reflection order for the ISM (line 13 of config.txt; main3D reads v[12])
+        self._ism_order = QSpinBox(); self._ism_order.setRange(0, 10)
+        self._ism_order.setValue(3); self._ism_order.setMinimumWidth(130)
+        lay.addRow("ISM max order:", self._ism_order)
+
         lay.addRow(QLabel("PML faces  (check = active):"))
         grid = QGridLayout(); self._pml = {}
         for idx, (k, lbl) in enumerate([("U_PML","Up"),("D_PML","Down"),
@@ -3764,6 +3769,7 @@ class MainWindow(QMainWindow):
             f.write(f"{self._npoles.value()}                               # number of poles for the ADE\n")
             for k in ["U_PML","D_PML","R_PML","L_PML","F_PML","B_PML"]:
                 f.write(f"{pml[k]:.1f}  # {k}\n")
+            f.write(f"{self._ism_order.value()}                               # ISM max reflection order\n")
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -3785,6 +3791,8 @@ class MainWindow(QMainWindow):
         for j, k in enumerate(["U_PML","D_PML","R_PML","L_PML","F_PML","B_PML"]):
             idx = 6+j
             if idx < len(vals): self._pml[k].setChecked(vals[idx] != 0.0)
+        if len(vals) > 12:
+            self._ism_order.setValue(int(vals[12]))  # ISM max reflection order
 
     def _save_src(self):
         if not self._proj_root: return

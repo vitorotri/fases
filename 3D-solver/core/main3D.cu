@@ -239,7 +239,7 @@ int main(int argc, char *argv[]){
 
 		if(!parse_obj3d(path, &sc, h)) return -1;
 		
-		A = mesh_group_areas(sc, &A_tot); // A[i] is aligned with Z[i+1].alpha[b], for band b
+		A = mesh_group_areas(sc, &A_tot); // A[i] is aligned with Z[i].alpha[b], for band b (layered Z, no BoundingBox)
 		// created in the ISM section
 
 		// S.bin/oid.bin double as a cache, keyed by scene mtime + h + tol
@@ -326,7 +326,6 @@ int main(int argc, char *argv[]){
     	fprintf(pre_header, "%d %d %d %f %d\n", Nx, Ny, Nz, h, (int)(tol/h));
     }
     fclose(pre_header);
-    
     
     /*
     // force for test hypotetical scene with BCs without parsing (no need to comment above)
@@ -502,6 +501,18 @@ int main(int argc, char *argv[]){
 	Temp = conf_arr[3] + 273.15f; // temperature [K] = Celsius_temp + 273.15
 	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
 	// c = sqrt(K/rho) in case of liquids
+    
+    // later for ISM parsing, must call here to estimate T60s and give user f_Schroeder, since it depends on c
+    // as well
+    ISMConfig cfg;
+	cfg.frame = ISMFrame::OBJECT_SPACE; // apply (p+shift)*scale to src/rec, identical to the walls
+    auto Z = ism_load_impedances_layered(imp_dir, names, mat_dir); // names[0]="BoundingBox"; handles the +1
+    // compute estimated T60's
+	std::vector<float> T60(8, 0.5f);
+	estimate_T60s(T60, V, c, A_tot, A, Z);
+	printf("\n[OK] estimated T60 per band [s]:");
+	for (int b = 0; b < 8; b++) printf(" %.3f", T60[b]);
+	printf("\n");
     
     printf("\n	c = %.2f m/s\n",c);
     
@@ -1062,11 +1073,10 @@ int main(int argc, char *argv[]){
     
     // --------------------------------------------- ISM Section -----------------------------------------------
     
-    ISMConfig cfg;
-	cfg.frame = ISMFrame::OBJECT_SPACE; // apply (p+shift)*scale to src/rec, identical to the walls
-    auto Z = ism_load_impedances_layered(imp_dir, names, mat_dir); // names[0]="BoundingBox"; handles the +1
-	//std::vector<int> g2m; // empty => identity: material_id == group_id
-	int max_order = 3; // parse from config.txt
+	// ISM max reflection order: config.txt line 13 (conf_arr[12]); 3 if absent (older configs)
+	int max_order = (conf_arr.size() > 12) ? (int)conf_arr[12] : 3;
+	if (max_order < 0) max_order = 0;
+	printf("\n[OK] ISM max_order = %d\n", max_order);
 	ISMResult Q = ism_solve(sc, src_arr, rec_arr, {}, Z, max_order, src_pressure, cfg); // gets main values for IRs
 	
 	scene_free(&sc); // free scene
@@ -1088,10 +1098,6 @@ int main(int argc, char *argv[]){
 	int Nw = 1024; // Hann window size for fractional delay
 	//std::cout << "Nw = " << Nw << "\n";
 	
-	// compute estimated T60's
-	std::vector<float> T60(8, 0.5f);
-	estimate_T60s(T60, V, c, A_tot, A, Z);
-	
 	// compute IRs
 	// for each band
 	#pragma omp parallel for
@@ -1103,10 +1109,13 @@ int main(int argc, char *argv[]){
 		std::vector<float> p_ism(Nt * (size_t)Q.Nr);
 		// for each receiver
 		for (int r = 0; r < Q.Nr; r++){
-			int t_cross = 0.0; // crossover time index, for late tail reverberation
-			// sum contributions of sources
+			int t_cross = 0.0; // crossover time index, for late tail reverberation (private to thread)
+			std::vector<int> arrivals; // sample index of every deposited arrival, for the crossover
+			float src_scale2 = 0.0f; // summed squared val_s: tail level scale (powers add)
+			// sum contributions of sources (real and virtual)
 			for (int s = 0; s < Q.Ns; s++){
-				
+				src_scale2 += Q.src_pressure[s] * Q.src_pressure[s];
+
 				// direct: guard the deposit only - do NOT skip the image loop
     			float d_0 = Q.direct_at(s, r); // 0.0f if blocked
     			if (d_0 > 0.0f){
@@ -1126,6 +1135,7 @@ int main(int argc, char *argv[]){
 						}
             			
             			if (t_0 > t_cross) t_cross = t_0;
+            			arrivals.push_back(t_0);
         			}
     			}
 					
@@ -1138,12 +1148,13 @@ int main(int argc, char *argv[]){
 					//std::cout << "t = " << t << "\n";
 					if (t >= Nt) continue; // safety guard
 					if (t > t_cross) t_cross = t;
+					arrivals.push_back(t);
 					float P = 1.0; // iterated product
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
 						float theta = iS.angle_rad[k];
 						//float theta = 0.0; // (test for normal incidence, shoebox comparison)
-						float R = R_angled(iS.alpha[k][b], theta);
+						float R = R_oblique(iS.alpha[k][b], theta);
 						P *= R;
 					}
 					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
@@ -1160,14 +1171,22 @@ int main(int argc, char *argv[]){
 						float xx = nn - tau;
 						p_ism[flat(nn,r,Nt)] += gS * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
 					}
-					
 				}
 			}
 			
-			// statistical tail
-			// A[i] is aligned with Z[i+1].alpha[b], for band b
-			
-			stat_tail(p_ism.data() + (size_t)r*Nt, Nt, t_cross, fs, c, V, T60[b], 1234u + 8u*r + b);
+			// Crossover where the computed arrival count falls 2 sigma (Poisson) below the
+			// theoretical count Ns*(4/3)*pi*(c*t)^3/V: the ISM is complete before that point
+			// and misses a significant echo density after it. Fallback: last arrival (t_cross
+			// as accumulated above). Later ISM arrivals still sit on top as specular echoes.
+			std::sort(arrivals.begin(), arrivals.end());
+			for (int i = 0; i < (int)arrivals.size(); i++){
+				float ct = c * (arrivals[i] + 1) / fs;
+				float theo = Q.Ns * 4.0f * (float)M_PI * ct*ct*ct / (3.0f * V);
+				if (theo - (i + 1) > 2.0f * std::sqrt(theo)){ t_cross = arrivals[i]; break; }
+			}
+
+			// statistical tail, level-matched to the ISM's val_s/(4*pi*d) convention
+			stat_tail(p_ism, Nt, t_cross, r, fs, c, V, T60[b], 1234u + 8u*r + b, std::sqrt(src_scale2));
 			
 			// this receiver is done for this band -> write its slice to associated binary file
         	std::string fname = out_file("RIR" + std::to_string(r) + "_"
@@ -1177,7 +1196,7 @@ int main(int argc, char *argv[]){
            		std::fwrite(p_ism.data() + (size_t)r*Nt, sizeof(float), (size_t)Nt, f);
            		std::fclose(f);
         	} else {
-           		std::fprintf(stderr, "[ISM] could not open %s for writing\n", fname.c_str());
+           		std::fprintf(stderr, "\n[ISM] could not open %s for writing\n", fname.c_str());
         	}
 		}	
 	}
