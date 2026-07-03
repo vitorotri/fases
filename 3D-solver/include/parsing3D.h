@@ -46,6 +46,10 @@ Scope:
   #define HD inline
 #endif
 
+__host__ __device__ size_t flat(int i, int j, int Nx){
+    return (j * Nx) + i; // column-major convention
+}
+
 // ============================================================
 // Basic math types (CUDA-safe)
 // ============================================================
