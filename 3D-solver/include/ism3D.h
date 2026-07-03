@@ -546,6 +546,24 @@ inline static void ism_paths_for_pairs(
 
     std::vector<Reflector> planes; std::vector<int> tri2plane; std::vector<uint8_t> curvedflag;
     ism_build_reflectors(Sc,cfg,planes,tri2plane,curvedflag);
+
+    // Clamp order so the image tree (~P*(P-1)^(order-1) nodes) cannot exhaust RAM:
+    // find the deepest order whose predicted node count stays under the cap.
+    // ponytail: hard cap of 2e6 images (~56 MB tree); raise if you truly need deeper trees
+    {
+        const double cap = 2e6, P = (double)planes.size();
+        double total = 1.0, level = 1.0; int ord = 0;
+        while(ord < cfg.max_order){
+            level *= (ord == 0) ? P : std::max(P - 1.0, 0.0);
+            if(total + level > cap) break;
+            total += level; ++ord;
+        }
+        if(ord < cfg.max_order){
+            std::fprintf(stderr,"[ISM] max_order %d with %d reflectors exceeds %.0f images; clamped to order %d.\n",
+                         cfg.max_order,(int)planes.size(),cap,ord);
+            cfg.max_order = ord;
+        }
+    }
     if(planes_out)*planes_out=planes;
     if(group_is_curved_out)*group_is_curved_out=curvedflag;
 

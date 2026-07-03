@@ -57,7 +57,6 @@ int main(int argc, char *argv[]){
     std::filesystem::path output_dir = project_root / "output";
     std::filesystem::path imp_dir = project_root / "input" / "imp";
     std::filesystem::path mat_dir = project_root / "input" / "mat";
-    std::filesystem::path nMat_path = config_path.parent_path() / "nMat";
 
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
@@ -131,13 +130,7 @@ int main(int argc, char *argv[]){
         
     std::string scene_str = scene_path.string();
     const char *path = scene_str.c_str();
-    FILE *fp = fopen(path, "r");
-    if (!fp) {
-        perror("Error opening file");
-        return -1;
-    }
     int nObj = 0; // number of objects in the scene (initialization)
-    //int file_opt = 0; // o for OBJ, 1 for VOX/PLY (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
     float tol = 3.0f*h; // tolerance
@@ -215,16 +208,9 @@ int main(int argc, char *argv[]){
             continue;
         }
 
-        std::cout << "\n Device Number: " << i << (i == selectedDevice ? " [selected]" : "") << std::endl;
-        std::cout << " Device Name: " << prop.name << std::endl;
-        std::cout << " Compute Capability: " << prop.major << "." << prop.minor << std::endl;
-        std::cout << " Total Global Memory (bytes): " << prop.totalGlobalMem << std::endl;
-        std::cout << " Max Threads per Block: " << prop.maxThreadsPerBlock << std::endl;
-        std::cout << " Memory Clock Rate (kHz): " << prop.memoryClockRate << std::endl;
-        std::cout << " Memory Bus Width (bits): " << prop.memoryBusWidth << std::endl;
-        std::cout << " L2 Cache Size (bytes): " << prop.l2CacheSize << std::endl;
-        std::cout << " Shared Memory per Block (bytes): " << prop.sharedMemPerBlock << std::endl;
-        std::cout << " Shared Memory per SM (bytes): " << prop.sharedMemPerMultiprocessor << std::endl;
+        std::cout << "\n Device " << i << (i == selectedDevice ? " [selected]" : "") << ": " << prop.name
+                  << " (CC " << prop.major << "." << prop.minor << ", "
+                  << prop.totalGlobalMem << " bytes global)" << std::endl;
     }
     
     // -------------------------------------- process OBJ scene ------------------------------------
@@ -327,16 +313,31 @@ int main(int argc, char *argv[]){
     }
     fclose(pre_header);
     
-    /*
-    // force for test hypotetical scene with BCs without parsing (no need to comment above)
-    Lx = 3.0; Ly = 4.0; Lz = 2.8;
-    Nx = (int)(Lx/h); Ny = (int)(Ly/h); Nz = (int)(Lz/h);
-    */
     
-    // ----------------------------- Print scene parameters ---------------------------------------
+    // ----------------------------- Print scene dimensions ---------------------------------------
     
     size_t N = Nx * Ny * Nz; // number of grid cells
-    
+
+    // Fail fast before the big allocations: the solver still needs ~36 B/voxel host
+    // (bmap + 8 field arrays; S/oid already resident) and ~52 B/voxel device
+    // (bmap + 12 field arrays). Swapping past this point is what freezes the machine.
+    {
+        unsigned long long avail = available_ram_bytes();
+        size_t gpu_free = 0, gpu_total = 0;
+        cudaMemGetInfo(&gpu_free, &gpu_total);
+        double need_host = 36.0 * (double)N, need_dev = 52.0 * (double)N;
+        double over = 0.0;
+        if (avail > 0     && need_host > 0.7 * (double)avail)    over = std::max(over, need_host / (0.7 * (double)avail));
+        if (gpu_total > 0 && need_dev  > 0.9 * (double)gpu_free) over = std::max(over, need_dev  / (0.9 * (double)gpu_free));
+        if (over > 0.0) {
+            fprintf(stderr, "\n[!] h = %g gives %zu voxels: ~%.2f GB host / ~%.2f GB device needed, "
+                            "~%.2f GB host / ~%.2f GB device free. Increase h to >= %.4g.\n",
+                    h, N, need_host / 1e9, need_dev / 1e9,
+                    (double)avail / 1e9, (double)gpu_free / 1e9, h * cbrt(over));
+            return -1;
+        }
+    }
+
     printf("\n[OK] Nx = %d  Ny = %d  Nz = %d\n", Nx, Ny, Nz);
     printf("\n[Ok] Lx = %f  Ly = %f  Lz = %f\n", Lx, Ly, Lz);
     
@@ -349,17 +350,11 @@ int main(int argc, char *argv[]){
     float *Bl, *Cl, *alpha, *beta;
     
     int nMat = nObj - 1; // exclude bounding box
-    // test for using same material for different objects when they match
-    /*
-    int32_t nMat = 0;
-    std::ifstream f_nMat(nMat_path, std::ios::binary);
-    f_nMat.read(reinterpret_cast<char*>(&nMat), sizeof(int32_t));
-    std::cout << "\n[OK] nMat = " << nMat << "\n";
-    */
     try {
     	Rinf = new float[nMat]();
     } catch (const std::bad_alloc&){
     	std::cerr << "\n[!] Allocation for R_inf[] failed, not enough memory\n";
+    	return -1;
     }
     
     // read K_m and L_m from file
@@ -390,6 +385,7 @@ int main(int argc, char *argv[]){
     	beta 	= new float[L_m * nMat]();
     } catch (const std::bad_alloc&){
     	std::cerr << "\n[!] Allocation for remaining materials' coefficients, not enough memory\n";
+    	return -1;
     }
     
     printf("\nChecking materials\n\n");
@@ -400,18 +396,7 @@ int main(int argc, char *argv[]){
     
     for (int m = 0; m < nMat; ++m) {
     	std::string filename = (fit_dir / (names[m+1] + ".fit")).string(); // names[0] = BoundingBox
-    	//std::cout << "\nReading: " << filename << "\n";	
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
-    	/*
-		// simple print test
-    	std::printf("Rinf[%d] = %.15f\n", m, (float)Rinf[m]);
-    	std::printf("Ak(0,%d)  = %.15f   zeta(0,%d) = %.15f\n",
-                	m, (float)Ak[flat(0, m, K_m)],
-                	m, (float)zeta[flat(0, m, K_m)]);
-    	std::printf("Ak(1,%d)  = %.15f   zeta(1,%d) = %.15f\n\n",
-                	m, (float)Ak[flat(1, m, K_m)],
-                	m, (float)zeta[flat(1, m, K_m)]);
-        */
 	}
 	
 
@@ -519,12 +504,7 @@ int main(int argc, char *argv[]){
     // ---------------------------------------------------------------------------------------------------------
 
     // Allocate main host memory arrays and initilize to 0.0f
-    unsigned long long avail = available_ram_bytes();
-    std::size_t needed = 4 * N * sizeof(float);
-    if (needed > 0.7 * avail) {
-        std::cerr << "\n[!] Requested memory too large, skipping allocation\nTry a larger grid spacing or smaller cutoff frequency";
-        return -1;
-    }
+    // (budget already verified by the upfront check after N was computed)
     try {
     	p0 = new float[N](); // pressure deviations from p0
     	u0 = new float[N](); // x component of particle velocity 
@@ -532,6 +512,7 @@ int main(int argc, char *argv[]){
     	w0 = new float[N](); // z component of particle velocity
     } catch (const std::bad_alloc&){
     	std::cerr << "\n[!] Allocation for initial pressures and velocities failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n";
+    	return -1;
     }
 
 	float C_CFL = conf_arr[4]; // Courant number: pick values < 0.5 (not equal to)
@@ -573,14 +554,9 @@ int main(int argc, char *argv[]){
 	
 	// ---------------------------------- kernel options and extra arrays --------------------------------
 	
-	float dm; // device memory
 	
 	float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well, depite below machine precision for float, so results may be wrong even with convergence!!!
 	
-    if (needed > 0.7 * avail) {
-        std::cerr << "\n[!] Requested memory too large, skipping allocation\nTry a larger grid spacing or smaller cutoff frequency\n";
-        return -1;
-    }
 	try {
 		p1 = new float[N](); // sound pressure
     	u1 = new float[N](); // x component of particle velocity 
@@ -588,6 +564,7 @@ int main(int argc, char *argv[]){
     	w1 = new float[N](); // z component of particle velocity
     } catch (const std::bad_alloc&){
     	std::cerr << "\n[!] Allocation for remaining host arrays failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n";
+    	return -1;
     }
 	
 	cudaMalloc(&d_p1, N*sizeof(float));
@@ -627,8 +604,6 @@ int main(int argc, char *argv[]){
 			
 	dd[0] = 3.0/10.0; dd[1] = 3.0/5.0; dd[2] = 1.0/10.0;
 	
-	dm = (12*N + 12+9+3 + nMat*(2*K_m + 4*L_m) + nB*(3*K_m + 6*L_m))*sizeof(float);
-	dm += N*(sizeof(uint8_t) + sizeof(int)); // oid and bmap
 		
 	cudaDeviceSynchronize();
 
@@ -637,14 +612,11 @@ int main(int argc, char *argv[]){
     
     // parse source(s)
     
-    //float *p_time = new float[Nt](); // timed single source
-    //float *d_p_time;
     int i_src, j_src, k_src; // discretized position of source
     
     std::vector<float> src_arr; // source array on host
     std::vector<float> src_pressure; // sound pressure values for sources
     
-    //float src_y; // for raised cosine
     
     file.open(src_path);
 	if (!file.is_open()){
@@ -674,54 +646,12 @@ int main(int argc, char *argv[]){
         		
         		// sound pressure values into pressure array
         		src_pressure.push_back(val_s);
-            	
-            	// single timed source
-            	//p_time[0] = val_s;
-            	//p_time[1] = -val_s;
-            	//src_y = val_y;
-            	//p_time[2] = 0.25 * val_s;
-            	
-            	// single plane wave
-            	//for (int i = 0; i < Nx; i++){
-            	//	for (int k = 0; k < Nz; k++){
-            	//		p0[flat3(i, j_src, k, Nx, Ny)] = 0.1f*val_s;
-            	//		u0[flat3(i, j_src, k, Nx, Ny)] = val_s;
-            	//	}
-            	//}
         	}
     	}
 	}
 	file.close();
 	file.clear();
 	
-	/*
-	// raised cosine
-	float W_full = 0.04f;
-	float ww = 0.5f * W_full;
-	float A = 0.1f;
-    for (int k = 0; k < Nz; ++k){
-    	for (int j = 0; j < Ny; ++j){
-        	for (int i = 0; i < Nx; ++i){
-            	// y-location of cell center
-            	float yy = (j + 0.5f) * h;
-	
-            	float g  = raised_cosine(yy, src_y, ww);
-            	float pI = A * g;
-	
-            	int Cijk = flat3(i, j, k, Nx, Ny);
-	
-            	p0[Cijk] = pI;
-            	v0[Cijk] = pI / (rho * c);  // +y traveling wave
-        	}
-    	}
-	}
-	*/
-	/*
-	// oscillating source
-	for (int nn = 0; nn < Nt; nn++){
-		p_time[nn] = sin(2.0*M_PI*1000.0*nn*dt);
-	}
-    */
     
     // parse receiver(s)
     
@@ -740,7 +670,6 @@ int main(int argc, char *argv[]){
     	float val_x, val_y, val_z;
     	std::istringstream iss(line);
     	if (iss >> val_x >> val_y >> val_z){
-    		//printf("\nrec values ---> %f %f %f\n", val_x, val_y, val_z);
         	i_rec = (int)(val_x / h);
         	j_rec = (int)(val_y / h);
         	k_rec = (int)(val_z / h);
@@ -767,20 +696,12 @@ int main(int argc, char *argv[]){
 	
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
-	/*
-	// occupancy check
-	int blockSize1D;
-	int minGridSize;
-	cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize1D, kernel_WENO_step0, 0, 0);
-	printf("\nOptimal block size (1D): %d\n", blockSize1D); // 512 on the laptop GTX 1050
-	printf("Minimum grid size for full occupancy: %d\n", minGridSize);
-	*/
 	
 	// Kernel launch parameters
-	dim3 TP(32,4,4); // row-major order. From the occupancy output right above, 32 * 4 * 4 = 512
+	dim3 TP(32,4,4); // row-major order, 32*4*4 = 512 threads/block
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 
-	// Copy initial data to device if not using p_time[]
+	// Copy initial data to device
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -796,9 +717,6 @@ int main(int argc, char *argv[]){
     	return -1;
     }
 	
-	// if using p_time
-    //cudaMalloc(&d_p_time, Nt*sizeof(float));
-    //cudaMemcpy(d_p_time, p_time, Nt*sizeof(float), cudaMemcpyHostToDevice);
 	
 	// --------------------------------- Memory assessment ---------------------------------
 	
@@ -806,10 +724,9 @@ int main(int argc, char *argv[]){
 	if (err != cudaSuccess) {
 		printf("[!] CUDA error: %s\n", cudaGetErrorString(err));
 	}
-	printf("\n[OK] Memory to allocate in device is %f GB\n", dm/(1000000000));
 	
-	//printf("float is %zu", sizeof(float));
 	size_t anim_step = (int)(0.025*Nt);
+	if (anim_step == 0) anim_step = 1; // ponytail: Nt < 40 would make n % anim_step divide by zero
 	size_t frames = Nt/anim_step; // make denominator smaller for more frames
 	printf("\n[OK] anim_step = %d\n\n",anim_step);
 	size_t anim_s = frames*N*sizeof(float); // animation size in bytess
@@ -825,36 +742,18 @@ int main(int argc, char *argv[]){
 
 	// ---------------------------------- animation arrays ---------------------------------
 	
-	//int i0 = Nx / 2;
 	int i0 = i_src;
 	size_t stride_X = (size_t)Ny * (size_t)Nz;
 	std::vector<float> p_X(stride_X); // reuse each frame
 	
-	//int j0 = Ny / 2;
 	int j0 = j_src;
 	size_t stride_Y = (size_t)Nx * (size_t)Nz;
 	std::vector<float> p_Y(stride_Y); // reuse each frame
 	
-	//int k0 = Nz / 2;
 	int k0 = k_src;
 	size_t stride_Z = (size_t)Nx * (size_t)Ny;
 	std::vector<float> p_Z(stride_Z); // reuse each frame
 	
-	// -------------------------------------- Initial TV ------------------------------------
-	
-	float TV_p_, TV_u_, TV_v_, TV_w_, TV_0, TV_1;
-	
-	// compute initial Total Variations if not using p_time[]
-	
-	TV_p_ = TV(p0, Nx, Ny, Nz, h);
-	TV_u_ = TV(u0, Nx, Ny, Nz, h);
-	TV_v_ = TV(v0, Nx, Ny, Nz, h);
-	TV_w_ = TV(w0, Nx, Ny, Nz, h);
-	
-	TV_0 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
-	
-	// -------------------------------------------------------------------------------------
-
 	// open BIN file for writing pressure fields
 	FILE *file_pX = fopen(out_file("pressureX.bin").c_str(), "ab");
 	if (file_pX == NULL) {
@@ -880,7 +779,6 @@ int main(int argc, char *argv[]){
     	files_rec[ct].open(str, std::ios::app | std::ios::binary);
 	}
 	
-	//Nt = 100; // for testing
 	
 	size_t pbin_size = 0; // for plotting animation correctly
 	
@@ -901,38 +799,22 @@ int main(int argc, char *argv[]){
 				
 		// (0)
 			
-		//kernel_inject_source<<<1,1>>>(d_p0, d_p_time, i_src, j_src, k_src, Nx, Ny, n);
 			
 		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
-		/*
-		kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-		kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-		*/
-		//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 			
 		// (1)
 			
 		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
-		/*
-		kernel_apply_periodic_x<<<BPx, TPx>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
-		kernel_apply_periodic_z<<<BPz, TPz>>>(d_p2, d_u2, d_v2, d_w2, Nx, Ny, Nz);
-		*/
-		//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p2, d_u2, d_v2, d_w2);
 			
 		// (2)
 			
 		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
-		/*
-		kernel_apply_periodic_x<<<BPx, TPx>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-		kernel_apply_periodic_z<<<BPz, TPz>>>(d_p1, d_u1, d_v1, d_w1, Nx, Ny, Nz);
-		*/
-		//kernel_test_BCs_no_parsing<<<BP, TP>>>(Nx, Ny, Nz, d_p1, d_u1, d_v1, d_w1);
 
 		// sync
 		cudaDeviceSynchronize();
@@ -986,8 +868,6 @@ int main(int argc, char *argv[]){
     		pbin_size += 1;
 		}
         		
-        // write to file for single receiver IR
-		//fwrite(&p0[flat3(i_rec, j_rec, k_rec, Nx, Ny)], sizeof(float), 1, f_rec);
 			
 		// write to file for each receiver and iteration
 		// i_recV.size() should be the same as j_recV.size() and k_recV.size()
@@ -1001,27 +881,9 @@ int main(int argc, char *argv[]){
 		n += 1; // update time-step
 	}
 		
-	// Copy final results back to host (for computing TVs / Energy)
-	cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
-	/*
-	TV_p_ = TV(p0, Nx, Ny, Nz, h);
-	TV_u_ = TV(u0, Nx, Ny, Nz, h);
-	TV_v_ = TV(v0, Nx, Ny, Nz, h);
-	TV_w_ = TV(w0, Nx, Ny, Nz, h);
-		
-	TV_1 = TV_p_ + TV_u_ + TV_v_ + TV_w_;
-	printf("\n\nTV_0 = %f\n", TV_0);
-	printf("\nTV_1 = %f\n", TV_1);
-		
-	is_TVD(TV_0, TV_1);
-	*/
     // Free host memory
     delete[] p0; delete[] u0; delete[] v0; delete[] w0;
     delete[] p1; delete[] u1; delete[] v1; delete[] w1;
-    //delete[] p2; delete[] u2; delete[] v2; delete[] w2;
     	
     // Free device memory
     cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0); cudaFree(d_w0);
@@ -1037,8 +899,6 @@ int main(int argc, char *argv[]){
     printf("\n[OK] Simulation time: %f min \n\n", elapsed_time); 
     
     fclose(file_pX); fclose(file_pY); fclose(file_pZ);
-    files_rec.clear();
-    fclose(fp);
     
     FILE *header; // file for data output
 	header = fopen(out_file("header.txt").c_str(), "w");
@@ -1107,6 +967,16 @@ int main(int argc, char *argv[]){
 		// allocate memory for ISM IRs: for each rec, first index sample is time, second is receiver's index
 		// (flattened)
 		std::vector<float> p_ism(Nt * (size_t)Q.Nr);
+		// fractional-delay deposit, ref. Reuben Thomas (Thesis), Fu & Li (2016)
+		auto deposit = [&](float tau, float g, int rr){
+			int tt = (int)tau;
+			for (int n0 = -(int)(0.5*Nw); n0 <= (int)(0.5*Nw); n0++){
+				int nn = tt + n0;
+				if (nn < 0 || nn >= (int)Nt) continue;
+				float xx = nn - tau;
+				p_ism[flat(nn,rr,Nt)] += g * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
+			}
+		};
 		// for each receiver
 		for (int r = 0; r < Q.Nr; r++){
 			int t_cross = 0.0; // crossover time index, for late tail reverberation (private to thread)
@@ -1123,16 +993,7 @@ int main(int argc, char *argv[]){
         			int t_0 = (int)tau_0;
         			if (t_0 < Nt){
         				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0);
-        				// no fractional delay
-            			//p_ism[flat(t_0, r, Nt)] += gS_0;
-            			
-            			// fractional delay
-            			for (int n0 = -(int)(0.5*Nw); n0 <= (int)(0.5*Nw); n0++){
-							int nn = t_0 + n0;
-							if (nn < 0 || nn >= Nt) continue;
-							float xx = nn - tau_0;
-							p_ism[flat(nn,r,Nt)] += gS_0 * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw))*sinc(M_PI*xx);
-						}
+            			deposit(tau_0, gS_0, r);
             			
             			if (t_0 > t_cross) t_cross = t_0;
             			arrivals.push_back(t_0);
@@ -1161,16 +1022,7 @@ int main(int argc, char *argv[]){
 					// parser's heuristics)
 					
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
-					// no fractionl delay
-					//p_ism[flat(t,r,Nt)] += gS;
-					
-					// fractional delay, ref. Reuben Thomas (Thesis), Fu & Li (2016)
-					for (int n0 = -(int)(0.5*Nw); n0 <= (int)(0.5*Nw); n0++){
-						int nn = t + n0;
-						if (nn < 0 || nn >= Nt) continue;
-						float xx = nn - tau;
-						p_ism[flat(nn,r,Nt)] += gS * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
-					}
+					deposit(tau, gS, r);
 				}
 			}
 			
