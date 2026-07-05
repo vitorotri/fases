@@ -3321,7 +3321,9 @@ class MainWindow(QMainWindow):
             ("t_max",   "Simulation time",  0.5,  0.001, 60.0, 3, "s"),
             ("f_cutoff","Cutoff frequency", 250., 50., 10000., 1, "Hz"),
             ("T_C",     "Temperature",      20., -30.,   50., 1, "°C"),
-            ("CFL",     "CFL number",        0.40,  0.05,  0.50, 2, ""),
+            ("CFL",     "CFL number",       0.40,  0.05,  0.50, 2, ""),
+            # shown above ADE poles, but written as line 14 of config.txt (v[13])
+            ("altitude","Altitude",         408., -500., 9000., 1, "m"),
         ]:
             sp = ds(val, mn, mx, dec, sfx); self._cfg[key] = sp
             lay.addRow(f"{lbl}:", sp)
@@ -3332,7 +3334,7 @@ class MainWindow(QMainWindow):
         lay.addRow("ADE poles:", self._npoles)
 
         # Max reflection order for the ISM (line 13 of config.txt; main3D reads v[12])
-        self._ism_order = QSpinBox(); self._ism_order.setRange(0, 10)
+        self._ism_order = QSpinBox(); self._ism_order.setRange(0, 8)
         self._ism_order.setValue(3); self._ism_order.setMinimumWidth(130)
         lay.addRow("ISM max order:", self._ism_order)
 
@@ -3770,6 +3772,7 @@ class MainWindow(QMainWindow):
             for k in ["U_PML","D_PML","R_PML","L_PML","F_PML","B_PML"]:
                 f.write(f"{pml[k]:.1f}  # {k}\n")
             f.write(f"{self._ism_order.value()}                               # ISM max reflection order\n")
+            f.write(f"{self._cfg['altitude'].value():.6g}      # altitude [m]\n")
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -3793,6 +3796,8 @@ class MainWindow(QMainWindow):
             if idx < len(vals): self._pml[k].setChecked(vals[idx] != 0.0)
         if len(vals) > 12:
             self._ism_order.setValue(int(vals[12]))  # ISM max reflection order
+        if len(vals) > 13:
+            self._cfg["altitude"].setValue(vals[13])  # altitude [m]
 
     def _save_src(self):
         if not self._proj_root: return
