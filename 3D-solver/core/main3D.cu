@@ -981,7 +981,7 @@ int main(int argc, char *argv[]){
 				if (nn < 0 || nn >= (int)Nt) continue;
 				float xx = nn - tau;
 				p_ism[flat(nn,rr,Nt)] += g * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
-				p_ism[flat(nn,rr,Nt)] *= std::exp(-m_air * dist); // attenuation of air at 500 Hz (test)
+				p_ism[flat(nn,rr,Nt)] *= std::exp(-m_air[b] * dist); // attenuation of air at 500 Hz (test)
 			}
 		};
 		// for each receiver

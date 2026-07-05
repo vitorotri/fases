@@ -15,7 +15,7 @@ __host__ float frO(float p_a, float h){
 __host__ float frN(float p_a, float h, float T){
 	float A, B;
 	A = p_a*std::sqrt(T/T_0)/P_0;
-	B = 9.0 + 180.0*h*std::exp(-4.17*(std::pow(T/T_0,-1.0/3.0) - 1.0))
+	B = 9.0 + 180.0*h*std::exp(-4.17*(std::pow(T/T_0,-1.0/3.0) - 1.0));
 	return A*B;
 }
 
@@ -25,8 +25,8 @@ __host__ float alpha_air(float p_a, float h, float T, float f){
 	float A, B, C, D;
 	A = 1.84*1e-11*P_0*std::sqrt(T/T_0)/p_a;
 	B = std::pow(T/T_0,-5.0/2.0);
-	C = 0.01275*std::exp(-2239.1/T)*(1.0/(frO(pa,h) + (f*f/frO(pa,h))));
-	D = 0.10680*std::exp(-3352.0/T)*(1.0/(frN(pa,h,T) + (f*f/frN(pa,h,T))));
+	C = 0.01275*std::exp(-2239.1/T)*(1.0/(frO(p_a,h) + (f*f/frO(p_a,h))));
+	D = 0.10680*std::exp(-3352.0/T)*(1.0/(frN(p_a,h,T) + (f*f/frN(p_a,h,T))));
 	return 0.115*1e-3*8.686*f*f*(A + B*(C+D));
 }
 
