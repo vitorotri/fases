@@ -10,7 +10,7 @@ COMMON_DIR= $(ROOT)../common
 BUILD_DIR = $(ROOT)build
 
 SRC       = $(SRC_DIR)/main3D.cu
-HDRS      = $(SRC_DIR)/functions3D.cuh $(INC_DIR)/parsing3D.h $(INC_DIR)/ism3D.h $(COMMON_DIR)/filterABC.h
+HDRS      = $(SRC_DIR)/functions3D.cuh $(INC_DIR)/parsing3D.h $(INC_DIR)/raytrace3D.h $(INC_DIR)/ism3D.h $(COMMON_DIR)/filterABC.h
 OUT       = $(BUILD_DIR)/$(TARGET)
 
 NVCCFLAGS = -std=c++17 -O3 -arch=sm_61 -I$(INC_DIR) -I$(COMMON_DIR) -Xcompiler "-fopenmp"
