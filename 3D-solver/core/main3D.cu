@@ -390,7 +390,7 @@ int main(int argc, char *argv[]){
     
     printf("\nChecking materials\n\n");
     for (size_t i = 0; i < names.size(); ++i){
-  		std::cout << i << " -> " << names[i] << "\n";
+  		printf("%d -> %s\n", i, names[i]);
   	}
 
     
@@ -929,11 +929,11 @@ int main(int argc, char *argv[]){
     cudaFree(d_S);
     cudaFree(d_oid);
     
-    printf("\n[OK] Freed arrays\n");  
+    printf("\n[OK] Freed wave-based arrays\n");  
     
     // --------------------------------------------- ISM Section -----------------------------------------------
     
-	// ISM max reflection order: config.txt line 13 (conf_arr[12]); 3 if absent (older configs)
+	// ISM max reflection order: config.txt line 13 (conf_arr[12]); 3 if absent
 	int max_order = (conf_arr.size() > 12) ? (int)conf_arr[12] : 3;
 	if (max_order < 0) max_order = 0;
 	printf("\n[OK] ISM max_order = %d\n", max_order);
@@ -950,13 +950,19 @@ int main(int argc, char *argv[]){
 			break;
 		}
 	}
-	//std::cout << "\nN_bands = " << N_bands << "\n";
 	
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
 	Nt = (int)(t_max/dt); // new number of samples
 	int Nw = 1024; // Hann window size for fractional delay
-	//std::cout << "Nw = " << Nw << "\n";
+	
+	// attenuation coefficients for sound pressure according to ISO 9613-1
+	std::vector<float> m_air(8);
+	float p_a = p_atm(alt,Temp);
+	float hh = 1.1; // average concentration of water vapour
+	for (int i = 0; i < 8; i++){
+		m_air[i] = alpha_air(p_a, hh, Temp, octave_bands[i]);
+	}
 	
 	// compute IRs
 	// for each band
@@ -967,14 +973,15 @@ int main(int argc, char *argv[]){
 		// allocate memory for ISM IRs: for each rec, first index sample is time, second is receiver's index
 		// (flattened)
 		std::vector<float> p_ism(Nt * (size_t)Q.Nr);
-		// fractional-delay deposit, ref. Reuben Thomas (Thesis), Fu & Li (2016)
-		auto deposit = [&](float tau, float g, int rr){
+		// lambda expression for fractional-delay deposit, ref. Reuben Thomas (Thesis), Fu & Li (2016)
+		auto deposit = [&](float tau, float g, int rr, float dist){
 			int tt = (int)tau;
 			for (int n0 = -(int)(0.5*Nw); n0 <= (int)(0.5*Nw); n0++){
 				int nn = tt + n0;
 				if (nn < 0 || nn >= (int)Nt) continue;
 				float xx = nn - tau;
 				p_ism[flat(nn,rr,Nt)] += g * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
+				p_ism[flat(nn,rr,Nt)] *= std::exp(-m_air * dist); // attenuation of air at 500 Hz (test)
 			}
 		};
 		// for each receiver
@@ -993,7 +1000,7 @@ int main(int argc, char *argv[]){
         			int t_0 = (int)tau_0;
         			if (t_0 < Nt){
         				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0);
-            			deposit(tau_0, gS_0, r);
+            			deposit(tau_0, gS_0, r, d_0);
             			
             			if (t_0 > t_cross) t_cross = t_0;
             			arrivals.push_back(t_0);
@@ -1006,7 +1013,6 @@ int main(int argc, char *argv[]){
 					float d = iS.distance;
 					float tau = fs * d / c;
 					int t = (int)tau;
-					//std::cout << "t = " << t << "\n";
 					if (t >= Nt) continue; // safety guard
 					if (t > t_cross) t_cross = t;
 					arrivals.push_back(t);
@@ -1022,7 +1028,7 @@ int main(int argc, char *argv[]){
 					// parser's heuristics)
 					
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
-					deposit(tau, gS, r);
+					deposit(tau, gS, r, d);
 				}
 			}
 			

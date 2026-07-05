@@ -3,8 +3,43 @@
 #include "parsing3D.h"
 #include "filterABC.h"
 
+#define P_0 101325 // [Pa]
+#define T_0 293.15 // [K]
+
+// Computes relaxation frequency for Oxygen in air
+__host__ float frO(float p_a, float h){
+	return p_a*(24.0 + 4.04*1e4*h*(0.02 + h)/(0.391 + h))/P_0;
+}
+
+// Computes relaxation frequency for Nitrogen in air
+__host__ float frN(float p_a, float h, float T){
+	float A, B;
+	A = p_a*std::sqrt(T/T_0)/P_0;
+	B = 9.0 + 180.0*h*std::exp(-4.17*(std::pow(T/T_0,-1.0/3.0) - 1.0))
+	return A*B;
+}
+
+// Computes the coefficient of attenuation of air given, frequency, temperature, directly multiplied by 0.115
+// and converted to [1/m] units
+__host__ float alpha_air(float p_a, float h, float T, float f){
+	float A, B, C, D;
+	A = 1.84*1e-11*P_0*std::sqrt(T/T_0)/p_a;
+	B = std::pow(T/T_0,-5.0/2.0);
+	C = 0.01275*std::exp(-2239.1/T)*(1.0/(frO(pa,h) + (f*f/frO(pa,h))));
+	D = 0.10680*std::exp(-3352.0/T)*(1.0/(frN(pa,h,T) + (f*f/frN(pa,h,T))));
+	return 0.115*1e-3*8.686*f*f*(A + B*(C+D));
+}
+
+// Barometric formula
+__host__ float p_atm(float alt, float T){
+	float M_air = 0.02897; // [Kg]/[mol]
+	float g = 9.8067; // [m]/[s^2]
+	float R = 8.314; // [J]/[mol K]
+	return P_0*std::exp(-M_air*g*alt/(R*T));
+}
+
 __host__ __device__ inline size_t flat3(int i, int j, int k, int Nx, int Ny){
-    return i + Nx*(j + k*Ny); // columns-major convention
+    return i + Nx*(j + k*Ny);
 }
 
 // Godunov and Roe fluxes (for WENO, no simple substitutions)
