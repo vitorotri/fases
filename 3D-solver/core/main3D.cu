@@ -380,7 +380,7 @@ int main(int argc, char *argv[]){
     
     printf("\nChecking materials\n\n");
     for (size_t i = 0; i < names.size(); ++i){
-  		printf("%d -> %s\n", i, names[i]);
+  		printf("%zu -> %s\n", i, names[i].c_str());
   	}
 
     
