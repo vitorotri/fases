@@ -981,6 +981,13 @@ int main(int argc, char *argv[]){
 			int t_cross = 0.0; // crossover time index, for late tail reverberation (private to thread)
 			std::vector<int> arrivals; // sample index of every deposited arrival, for the crossover
 			float src_scale2 = 0.0f; // summed squared val_s: tail level scale (powers add)
+			// distance-binned mean reflection ENERGY of the validated paths -> r_eff.
+			// Energy average (not log average): the late field follows the energy
+			// decay, dominated by the low-loss walls; the log/path average is
+			// dominated by path counts through lossy walls and decays too fast.
+			const float MFP = 4.0f*V/A_tot;    // mean free path = natural bin width
+			float binP2[64] = {0.f}; int binN[64] = {0};
+			float binL[64] = {0.f}, binLL[64] = {0.f}; // ln|P| moments: within-bin spread -> tail peak texture
 			// sum contributions of sources (real and virtual)
 			for (int s = 0; s < Q.Ns; s++){
 				src_scale2 += Q.src_pressure[s] * Q.src_pressure[s];
@@ -1021,7 +1028,17 @@ int main(int argc, char *argv[]){
 					}
 					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
 					// parser's heuristics)
-					
+
+					// encode this path's reflection energy + spread for the tail
+					if (std::fabs(P) > 0.f){
+						const int bi = (int)(d/MFP);
+						if (bi >= 0 && bi < 64){
+							const float lp = std::log(std::fabs(P));
+							binP2[bi] += P*P; binN[bi] += 1;
+							binL[bi] += lp;  binLL[bi] += lp*lp;
+						}
+					}
+
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
 					// no fractionl delay
 					p_ism[flat(t,r,Nt)] += gS;
@@ -1041,8 +1058,36 @@ int main(int argc, char *argv[]){
 				if (theo - (i + 1) > 2.0f * std::sqrt(theo)){ t_cross = arrivals[i]; break; }
 			}
 
-			// statistical tail, level-matched to the ISM's val_s/(4*pi*d) convention
-			stat_tail(p_ism, Nt, t_cross, r, fs, c, V, T60[b], 1234u + 8u*r + b, std::sqrt(src_scale2));
+			// FRA-RIR late tail; ln(mean P^2 per bin) = 2*kappa*d least-squares over
+			// occupied bins gives the energy decay per metre; r_eff = e^(kappa*MFP).
+			// Falls back to Eyring inside stat_tail when the fit is unusable.
+			float r_eff = -1.f;
+			{
+				int nb = 0; float sx = 0.f, sy = 0.f, sxx = 0.f, sxy = 0.f;
+				for (int bi = 0; bi < 64; ++bi){
+					if (binN[bi] < 4 || binP2[bi] <= 0.f) continue;   // sparse bin: skip
+					const float x = (bi + 0.5f)*MFP, y = std::log(binP2[bi]/binN[bi]);
+					++nb; sx += x; sy += y; sxx += x*x; sxy += x*y;
+				}
+				const float det = nb*sxx - sx*sx;
+				if (nb >= 3 && det > 0.f){
+					const float k2 = (nb*sxy - sx*sy)/det;            // = 2*kappa
+					if (k2 < 0.f) r_eff = std::exp(0.5f*k2*MFP);
+				}
+			}
+			// pooled within-bin std of ln|P|: how spread the real path amplitudes
+			// are at a given distance -> lognormal deposit spread in stat_tail
+			float sig_lnP = 0.f;
+			{
+				float ss = 0.f; int dof = 0;
+				for (int bi = 0; bi < 64; ++bi){
+					if (binN[bi] < 4) continue;
+					ss  += binLL[bi] - binL[bi]*binL[bi]/binN[bi];
+					dof += binN[bi] - 1;
+				}
+				if (dof > 0 && ss > 0.f) sig_lnP = std::sqrt(ss/dof);
+			}
+			stat_tail(p_ism, Nt, t_cross, r, fs, c, V, A_tot, T60[b], 1234u + 8u*r + b, std::sqrt(src_scale2), r_eff, sig_lnP);
 			
 			// this receiver is done for this band -> write its slice to associated binary file
         	std::string fname = out_file("RIR" + std::to_string(r) + "_"
