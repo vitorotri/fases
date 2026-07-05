@@ -1607,7 +1607,7 @@ class _FitAllThread(QThread):
         try:
             proc = subprocess.Popen(
                 self._cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, cwd=self._cwd, bufsize=1)
+                text=True, encoding="utf-8", errors="replace", cwd=self._cwd, bufsize=1)
             lines = []
             for raw in proc.stdout:
                 ln = raw.rstrip("\n")
@@ -2510,6 +2510,7 @@ class MaterialPanel(QWidget):
         QApplication.processEvents()
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
                                   cwd=proj, timeout=600)
             out = (proc.stdout or "") + (proc.stderr or "")
             for ln in out.splitlines():
@@ -2815,7 +2816,7 @@ class SolverThread(QThread):
         try:
             self._proc = subprocess.Popen(self._cmd, cwd=self._cwd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
+                text=True, encoding="utf-8", errors="replace", bufsize=1)
             for line in self._proc.stdout:
                 line = line.rstrip()
                 self.output.emit(line)
