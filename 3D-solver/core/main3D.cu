@@ -6,7 +6,6 @@
 #include <new>
 #include <string>
 #include <filesystem>
-#include <iostream>
 #include <fstream>
 #include <vector>
 #include <array>
@@ -61,8 +60,8 @@ int main(int argc, char *argv[]){
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
     if (ec) {
-        std::cerr << "[!] Cannot create output directory: " << output_dir
-                  << " (" << ec.message() << ")\n";
+        fprintf(stderr, "[!] Cannot create output directory: %s (%s)\n",
+                output_dir.string().c_str(), ec.message().c_str());
         return EXIT_FAILURE;
     }
 
@@ -145,44 +144,39 @@ int main(int argc, char *argv[]){
     // "no CUDA devices found" even when nvidia-smi could see the GPU.
 
     const char *visible_devices = std::getenv("CUDA_VISIBLE_DEVICES");
-    std::cout << "\n CUDA_VISIBLE_DEVICES="
-              << (visible_devices ? visible_devices : "<unset>") << std::endl;
+    printf("\n CUDA_VISIBLE_DEVICES=%s\n", visible_devices ? visible_devices : "<unset>");
 
     int nDevices = 0;
     cudaError_t devErr = cudaGetDeviceCount(&nDevices);
     if (devErr != cudaSuccess) {
-        std::cerr << "\n[!] FAILED: cudaGetDeviceCount() returned "
-                  << static_cast<int>(devErr) << " ("
-                  << cudaGetErrorName(devErr) << "): "
-                  << cudaGetErrorString(devErr) << "\n";
+        fprintf(stderr, "\n[!] FAILED: cudaGetDeviceCount() returned %d (%s): %s\n",
+                (int)devErr, cudaGetErrorName(devErr), cudaGetErrorString(devErr));
 
         if (devErr == cudaErrorInsufficientDriver) {
-            std::cerr << "[!] The executable was probably built with a CUDA runtime newer "
-                         "than the installed NVIDIA driver supports. Rebuild with CUDA 11.x "
-                         "for driver 470.x, or update the NVIDIA driver.\n";
+            fprintf(stderr, "[!] The executable was probably built with a CUDA runtime newer "
+                            "than the installed NVIDIA driver supports. Rebuild with CUDA 11.x "
+                            "for driver 470.x, or update the NVIDIA driver.\n");
         } else if (devErr == cudaErrorNoDevice) {
-            std::cerr << "[!] The CUDA runtime did not expose any CUDA-capable GPU to this process.\n";
+            fprintf(stderr, "[!] The CUDA runtime did not expose any CUDA-capable GPU to this process.\n");
         } else if (devErr == cudaErrorInitializationError) {
-            std::cerr << "[!] CUDA runtime initialization failed. Check driver state, permissions, "
-                         "and whether another environment/library path is interfering.\n";
+            fprintf(stderr, "[!] CUDA runtime initialization failed. Check driver state, permissions, "
+                            "and whether another environment/library path is interfering.\n");
         }
 
-        std::cerr << std::endl;
+        fprintf(stderr, "\n");
         return -1;
     }
 
     if (nDevices <= 0){
-        std::cerr << "\n[!] FAILED: no CUDA devices found by the CUDA runtime\n\n";
+        fprintf(stderr, "\n[!] FAILED: no CUDA devices found by the CUDA runtime\n\n");
         return -1;
     }
 
     int selectedDevice = 0;
     cudaError_t setErr = cudaSetDevice(selectedDevice);
     if (setErr != cudaSuccess) {
-        std::cerr << "\n[!] FAILED: cudaSetDevice(" << selectedDevice << ") returned "
-                  << static_cast<int>(setErr) << " ("
-                  << cudaGetErrorName(setErr) << "): "
-                  << cudaGetErrorString(setErr) << "\n\n";
+        fprintf(stderr, "\n[!] FAILED: cudaSetDevice(%d) returned %d (%s): %s\n\n",
+                selectedDevice, (int)setErr, cudaGetErrorName(setErr), cudaGetErrorString(setErr));
         return -1;
     }
 
@@ -190,10 +184,8 @@ int main(int argc, char *argv[]){
     // rather than much later as a misleading allocation/kernel failure.
     cudaError_t initErr = cudaFree(0);
     if (initErr != cudaSuccess) {
-        std::cerr << "\n[!] FAILED: CUDA context initialization returned "
-                  << static_cast<int>(initErr) << " ("
-                  << cudaGetErrorName(initErr) << "): "
-                  << cudaGetErrorString(initErr) << "\n\n";
+        fprintf(stderr, "\n[!] FAILED: CUDA context initialization returned %d (%s): %s\n\n",
+                (int)initErr, cudaGetErrorName(initErr), cudaGetErrorString(initErr));
         return -1;
     }
 
@@ -201,16 +193,14 @@ int main(int argc, char *argv[]){
         cudaDeviceProp prop{};
         cudaError_t propErr = cudaGetDeviceProperties(&prop, i);
         if (propErr != cudaSuccess) {
-            std::cerr << "\n[!] WARNING: cudaGetDeviceProperties(" << i << ") returned "
-                      << static_cast<int>(propErr) << " ("
-                      << cudaGetErrorName(propErr) << "): "
-                      << cudaGetErrorString(propErr) << "\n";
+            fprintf(stderr, "\n[!] WARNING: cudaGetDeviceProperties(%d) returned %d (%s): %s\n",
+                    i, (int)propErr, cudaGetErrorName(propErr), cudaGetErrorString(propErr));
             continue;
         }
 
-        std::cout << "\n Device " << i << (i == selectedDevice ? " [selected]" : "") << ": " << prop.name
-                  << " (CC " << prop.major << "." << prop.minor << ", "
-                  << prop.totalGlobalMem << " bytes global)" << std::endl;
+        printf("\n Device %d%s: %s (CC %d.%d, %zu bytes global)\n",
+               i, (i == selectedDevice) ? " [selected]" : "", prop.name,
+               prop.major, prop.minor, prop.totalGlobalMem);
     }
     
     // -------------------------------------- process OBJ scene ------------------------------------
@@ -353,7 +343,7 @@ int main(int argc, char *argv[]){
     try {
     	Rinf = new float[nMat]();
     } catch (const std::bad_alloc&){
-    	std::cerr << "\n[!] Allocation for R_inf[] failed, not enough memory\n";
+    	fprintf(stderr, "\n[!] Allocation for R_inf[] failed, not enough memory\n");
     	return -1;
     }
     
@@ -364,7 +354,7 @@ int main(int argc, char *argv[]){
     // read poles.txt file
     file.open(poles_path);
     if (!file.is_open()) {
-        std::cerr << "[!] Cannot open poles file: " << poles_path << std::endl;
+        fprintf(stderr, "[!] Cannot open poles file: %s\n", poles_path.string().c_str());
         return EXIT_FAILURE;
     }
     file >> K_m >> L_m;
@@ -384,7 +374,7 @@ int main(int argc, char *argv[]){
     	alpha 	= new float[L_m * nMat]();
     	beta 	= new float[L_m * nMat]();
     } catch (const std::bad_alloc&){
-    	std::cerr << "\n[!] Allocation for remaining materials' coefficients, not enough memory\n";
+    	fprintf(stderr, "\n[!] Allocation for remaining materials' coefficients, not enough memory\n");
     	return -1;
     }
     
@@ -511,7 +501,7 @@ int main(int argc, char *argv[]){
     	v0 = new float[N](); // y component of particle velocity 
     	w0 = new float[N](); // z component of particle velocity
     } catch (const std::bad_alloc&){
-    	std::cerr << "\n[!] Allocation for initial pressures and velocities failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n";
+    	fprintf(stderr, "\n[!] Allocation for initial pressures and velocities failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n");
     	return -1;
     }
 
@@ -563,7 +553,7 @@ int main(int argc, char *argv[]){
     	v1 = new float[N](); // y component of particle velocity
     	w1 = new float[N](); // z component of particle velocity
     } catch (const std::bad_alloc&){
-    	std::cerr << "\n[!] Allocation for remaining host arrays failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n";
+    	fprintf(stderr, "\n[!] Allocation for remaining host arrays failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n");
     	return -1;
     }
 	
@@ -620,7 +610,7 @@ int main(int argc, char *argv[]){
     
     file.open(src_path);
 	if (!file.is_open()){
-    	std::cerr << "[!] Failed to open sources: " << src_path << "\n";
+    	fprintf(stderr, "[!] Failed to open sources: %s\n", src_path.string().c_str());
     	return -1;
 	}
 	while (std::getline(file, line)){
@@ -662,7 +652,7 @@ int main(int argc, char *argv[]){
     
     file.open(rec_path);
 	if (!file.is_open()){
-    	std::cerr << "[!] Failed to open receivers: " << rec_path << "\n";
+    	fprintf(stderr, "[!] Failed to open receivers: %s\n", rec_path.string().c_str());
     	return -1;
 	}
 	while (std::getline(file, line)) {
@@ -932,14 +922,16 @@ int main(int argc, char *argv[]){
     printf("\n[OK] Freed wave-based arrays\n");  
     
     // --------------------------------------------- ISM Section -----------------------------------------------
-    
+	
 	// ISM max reflection order: config.txt line 13 (conf_arr[12]); 3 if absent
 	int max_order = (conf_arr.size() > 12) ? (int)conf_arr[12] : 3;
 	if (max_order < 0) max_order = 0;
 	printf("\n[OK] ISM max_order = %d\n", max_order);
 	ISMResult Q = ism_solve(sc, src_arr, rec_arr, {}, Z, max_order, src_pressure, cfg); // gets main values for IRs
-	
-	scene_free(&sc); // free scene
+
+	scene_free(&sc); // free scene here: ism_solve is its last user
+
+	float alti = (conf_arr.size() > 13) ? conf_arr[13] : 0.0f; // altitude [m]; 0 if absent (older configs)
 	
 	// determine number of valid bands for ISM (easier array allocation later on)
 	int N_bands = 8; // number of bands for ISM, start with total
@@ -958,7 +950,7 @@ int main(int argc, char *argv[]){
 	
 	// attenuation coefficients for sound pressure according to ISO 9613-1
 	std::vector<float> m_air(8);
-	float p_a = p_atm(alt,Temp);
+	float p_a = p_atm(alti,Temp);
 	float hh = 1.1; // average concentration of water vapour
 	for (int i = 0; i < 8; i++){
 		m_air[i] = alpha_air(p_a, hh, Temp, octave_bands[i]);
@@ -981,7 +973,7 @@ int main(int argc, char *argv[]){
 				if (nn < 0 || nn >= (int)Nt) continue;
 				float xx = nn - tau;
 				p_ism[flat(nn,rr,Nt)] += g * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
-				p_ism[flat(nn,rr,Nt)] *= std::exp(-m_air[b] * dist); // attenuation of air at 500 Hz (test)
+				//p_ism[flat(nn,rr,Nt)] *= std::exp(-m_air[b] * dist); // attenuation of air at 500 Hz (test)
 			}
 		};
 		// for each receiver
@@ -1000,7 +992,10 @@ int main(int argc, char *argv[]){
         			int t_0 = (int)tau_0;
         			if (t_0 < Nt){
         				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0);
-            			deposit(tau_0, gS_0, r, d_0);
+        				// no fractional delay
+            			p_ism[flat(t_0, r, Nt)] += gS_0;
+            			// fractional delay
+            			//deposit(tau_0, gS_0, r, d_0);
             			
             			if (t_0 > t_cross) t_cross = t_0;
             			arrivals.push_back(t_0);
@@ -1019,8 +1014,8 @@ int main(int argc, char *argv[]){
 					float P = 1.0; // iterated product
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
-						float theta = iS.angle_rad[k];
-						//float theta = 0.0; // (test for normal incidence, shoebox comparison)
+						//float theta = iS.angle_rad[k];
+						float theta = 0.0; // (test for normal incidence, shoebox comparison)
 						float R = R_oblique(iS.alpha[k][b], theta);
 						P *= R;
 					}
@@ -1028,7 +1023,10 @@ int main(int argc, char *argv[]){
 					// parser's heuristics)
 					
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
-					deposit(tau, gS, r, d);
+					// no fractionl delay
+					p_ism[flat(t,r,Nt)] += gS;
+					// fractional delay
+					//deposit(tau, gS, r, d);
 				}
 			}
 			
