@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <cuda_runtime.h>
 #include "ism3D.h"
+#include "raytrace3D.h"
 #include "functions3D.cuh"
 
 unsigned long long available_ram_bytes() {
@@ -929,7 +930,11 @@ int main(int argc, char *argv[]){
 	printf("\n[OK] ISM max_order = %d\n", max_order);
 	ISMResult Q = ism_solve(sc, src_arr, rec_arr, {}, Z, max_order, src_pressure, cfg); // gets main values for IRs
 
-	scene_free(&sc); // free scene here: ism_solve is its last user
+	// Ray-traced late tail: build BVH scene ONCE (before the mesh is freed); the
+	// tracer continues the ISM past max_order into the reverberant tail.
+	RTScene rtS = rt_build(sc);
+
+	scene_free(&sc); // free scene here: ism_solve and rt_build are its last users
 
 	float alti = (conf_arr.size() > 13) ? conf_arr[13] : 0.0f; // altitude [m]; 0 if absent (older configs)
 	
@@ -976,22 +981,15 @@ int main(int argc, char *argv[]){
 				//p_ism[flat(nn,rr,Nt)] *= std::exp(-m_air[b] * dist); // attenuation of air at 500 Hz (test)
 			}
 		};
+		// t_cross[r] = splice sample where the ISM's energy is essentially delivered
+		// (computed below from p_ism), so the RT tail continues off the DENSE early
+		// reflections instead of after the last faint far image (which left a gap).
+		std::vector<int> t_cross((size_t)Q.Nr, 0);
+
 		// for each receiver
 		for (int r = 0; r < Q.Nr; r++){
-			int t_cross = 0.0; // crossover time index, for late tail reverberation (private to thread)
-			std::vector<int> arrivals; // sample index of every deposited arrival, for the crossover
-			float src_scale2 = 0.0f; // summed squared val_s: tail level scale (powers add)
-			// distance-binned mean reflection ENERGY of the validated paths -> r_eff.
-			// Energy average (not log average): the late field follows the energy
-			// decay, dominated by the low-loss walls; the log/path average is
-			// dominated by path counts through lossy walls and decays too fast.
-			const float MFP = 4.0f*V/A_tot;    // mean free path = natural bin width
-			float binP2[64] = {0.f}; int binN[64] = {0};
-			float binL[64] = {0.f}, binLL[64] = {0.f}; // ln|P| moments: within-bin spread -> tail peak texture
 			// sum contributions of sources (real and virtual)
 			for (int s = 0; s < Q.Ns; s++){
-				src_scale2 += Q.src_pressure[s] * Q.src_pressure[s];
-
 				// direct: guard the deposit only - do NOT skip the image loop
     			float d_0 = Q.direct_at(s, r); // 0.0f if blocked
     			if (d_0 > 0.0f){
@@ -1003,12 +1001,9 @@ int main(int argc, char *argv[]){
             			p_ism[flat(t_0, r, Nt)] += gS_0;
             			// fractional delay
             			//deposit(tau_0, gS_0, r, d_0);
-            			
-            			if (t_0 > t_cross) t_cross = t_0;
-            			arrivals.push_back(t_0);
         			}
     			}
-					
+
 				// sum contributions of image sources for a given real source
 				// for each image-source 'iS' in container Q.images_at()
 				for (const ISMImagePath& iS : Q.images_at(s, r)){
@@ -1016,8 +1011,6 @@ int main(int argc, char *argv[]){
 					float tau = fs * d / c;
 					int t = (int)tau;
 					if (t >= Nt) continue; // safety guard
-					if (t > t_cross) t_cross = t;
-					arrivals.push_back(t);
 					float P = 1.0; // iterated product
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
@@ -1029,16 +1022,6 @@ int main(int argc, char *argv[]){
 					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
 					// parser's heuristics)
 
-					// encode this path's reflection energy + spread for the tail
-					if (std::fabs(P) > 0.f){
-						const int bi = (int)(d/MFP);
-						if (bi >= 0 && bi < 64){
-							const float lp = std::log(std::fabs(P));
-							binP2[bi] += P*P; binN[bi] += 1;
-							binL[bi] += lp;  binLL[bi] += lp*lp;
-						}
-					}
-
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
 					// no fractionl delay
 					p_ism[flat(t,r,Nt)] += gS;
@@ -1046,50 +1029,64 @@ int main(int argc, char *argv[]){
 					//deposit(tau, gS, r, d);
 				}
 			}
-			
-			// Crossover where the computed arrival count falls 2 sigma (Poisson) below the
-			// theoretical count Ns*(4/3)*pi*(c*t)^3/V: the ISM is complete before that point
-			// and misses a significant echo density after it. Fallback: last arrival (t_cross
-			// as accumulated above). Later ISM arrivals still sit on top as specular echoes.
-			std::sort(arrivals.begin(), arrivals.end());
-			for (int i = 0; i < (int)arrivals.size(); i++){
-				float ct = c * (arrivals[i] + 1) / fs;
-				float theo = Q.Ns * 4.0f * (float)M_PI * ct*ct*ct / (3.0f * V);
-				if (theo - (i + 1) > 2.0f * std::sqrt(theo)){ t_cross = arrivals[i]; break; }
-			}
+		}
 
-			// FRA-RIR late tail; ln(mean P^2 per bin) = 2*kappa*d least-squares over
-			// occupied bins gives the energy decay per metre; r_eff = e^(kappa*MFP).
-			// Falls back to Eyring inside stat_tail when the fit is unusable.
-			float r_eff = -1.f;
-			{
-				int nb = 0; float sx = 0.f, sy = 0.f, sxx = 0.f, sxy = 0.f;
-				for (int bi = 0; bi < 64; ++bi){
-					if (binN[bi] < 4 || binP2[bi] <= 0.f) continue;   // sparse bin: skip
-					const float x = (bi + 0.5f)*MFP, y = std::log(binP2[bi]/binN[bi]);
-					++nb; sx += x; sy += y; sxx += x*x; sxy += x*y;
-				}
-				const float det = nb*sxx - sx*sx;
-				if (nb >= 3 && det > 0.f){
-					const float k2 = (nb*sxy - sx*sy)/det;            // = 2*kappa
-					if (k2 < 0.f) r_eff = std::exp(0.5f*k2*MFP);
-				}
+		// splice point per receiver: sample where cumulative ISM energy first
+		// reaches RT_SPLICE_FRAC of the total. Robust to a few faint far images,
+		// so the tail starts right after the dense early reflections (no gap).
+		const double RT_SPLICE_FRAC = 0.90;
+		for (int r = 0; r < Q.Nr; ++r){
+			double tot = 0.0;
+			for (int n = 0; n < (int)Nt; ++n){ const float p = p_ism[flat(n,r,Nt)]; tot += (double)p*p; }
+			double acc = 0.0; int tc = 0;
+			for (int n = 0; n < (int)Nt; ++n){
+				const float p = p_ism[flat(n,r,Nt)]; acc += (double)p*p;
+				if (acc >= RT_SPLICE_FRAC*tot){ tc = n; break; }
 			}
-			// pooled within-bin std of ln|P|: how spread the real path amplitudes
-			// are at a given distance -> lognormal deposit spread in stat_tail
-			float sig_lnP = 0.f;
-			{
-				float ss = 0.f; int dof = 0;
-				for (int bi = 0; bi < 64; ++bi){
-					if (binN[bi] < 4) continue;
-					ss  += binLL[bi] - binL[bi]*binL[bi]/binN[bi];
-					dof += binN[bi] - 1;
-				}
-				if (dof > 0 && ss > 0.f) sig_lnP = std::sqrt(ss/dof);
+			t_cross[r] = tc;
+		}
+
+		// ---- Ray-traced late tail for this band ----
+		// alpha per group for this band (Z is indexed by group_id; see ism3D.h note)
+		std::vector<float> alpha_b(Z.size());
+		for (size_t g = 0; g < Z.size(); ++g) alpha_b[g] = Z[g].alpha[b];
+		const int RT_RAYS = 8192, RT_ORDMAX = 200; // rays/receiver, deepest bounce
+		std::vector<float> energy;                 // raw MC energy echogram (arbitrary scale)
+		rt_trace_tail(rtS, alpha_b.data(), (int)alpha_b.size(),
+		              rec_arr, src_arr, src_pressure, 0.10f, 0.10f,
+		              RT_RAYS, max_order + 1, RT_ORDMAX,
+		              c, fs, Nt, t_cross, 1.0f, energy);
+		// Splice with ENERGY CONTINUITY (no arbitrary gain). Anchor the RT tail to
+		// a REPRESENTATIVE stretch of the ISM's late energy (a wide window, so a
+		// single weak far image at t_cross can't set the level), and measure the
+		// RT energy over ALL its content (not a narrow window that might be empty),
+		// so a valid tail is never discarded. Then add as a random-sign pressure tail.
+		const int W = std::max(1, (int)(0.030f * fs)); // 30 ms anchor window
+		for (int r = 0; r < Q.Nr; ++r){
+			const int tc = t_cross[r];
+			double E_ism = 0.0; int n_ism = 0;         // ISM pressure energy in [tc-W, tc]
+			for (int nn = std::max(0, tc - W); nn <= tc; ++nn){
+				const float p = p_ism[flat(nn, r, Nt)]; E_ism += (double)p*p; ++n_ism;
 			}
-			stat_tail(p_ism, Nt, t_cross, r, fs, c, V, A_tot, T60[b], 1234u + 8u*r + b, std::sqrt(src_scale2), r_eff, sig_lnP);
-			
-			// this receiver is done for this band -> write its slice to associated binary file
+			double E_rt = 0.0; int nz = 0;             // RT echogram energy in the SAME-width window
+			for (int nn = tc + 1; nn < std::min((int)Nt, tc + 1 + W); ++nn){
+				const float e = energy[flat(nn, r, Nt)]; E_rt += e; if (e > 0.f) ++nz;
+			}
+			std::fprintf(stderr, "[RT] band %d rec %d: ISM_E=%.3g (%d smp)  RT_E=%.3g (%d nz)  t_cross=%d/%d\n",
+			             b, r, E_ism, n_ism, E_rt, nz, tc, (int)Nt);
+			if (E_ism <= 0.0 || E_rt <= 0.0) continue; // nothing to match against
+			const float scale = (float)(E_ism / E_rt); // continuity: RT window energy -> ISM window energy
+			for (int nn = tc + 1; nn < Nt; ++nn){
+				const float e = energy[flat(nn, r, Nt)];
+				if (e <= 0.f) continue;
+				unsigned hsh = 2654435761u*(unsigned)nn ^ 40503u*(unsigned)r ^ (unsigned)b;
+				const float sgn = (hsh & 1u) ? 1.f : -1.f;   // deterministic zero-mean sign
+				p_ism[flat(nn, r, Nt)] += sgn * std::sqrt(scale * e);
+			}
+		}
+
+		// this band done -> write each receiver's slice to its binary file
+		for (int r = 0; r < Q.Nr; ++r){
         	std::string fname = out_file("RIR" + std::to_string(r) + "_"
                                     		+ std::to_string((int)octave_bands[b]) + ".bin");
         	FILE* f = std::fopen(fname.c_str(), "wb");
@@ -1099,12 +1096,9 @@ int main(int argc, char *argv[]){
         	} else {
            		std::fprintf(stderr, "\n[ISM] could not open %s for writing\n", fname.c_str());
         	}
-		}	
+		}
 	}
-	// Compute late reverberation tail (statisticaly), ref. Svensson (1998)
-	// Comment when comparing with analytic ISM for showbox-shaped rooms per frequency, with 6 distinct faces
-	
-    
+
     // ---------------------------------------------------------------------------------------------------------
     
     printf("\n[OK] Finished.\n\n"); 
