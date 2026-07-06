@@ -961,23 +961,22 @@ int main(int argc, char *argv[]){
 		m_air[i] = alpha_air(p_a, hh, Temp, octave_bands[i]);
 	}
 	
+	// ----- ray-traced late reverberant tail (continues the ISM past max_order) -----
 	// Flat absorption table for the BVH tracer: alpha_gb[gid*8 + band]. Z is indexed
 	// by material == group_id (names[gid+1]), exactly like the .fit loop above.
 	std::vector<float> alpha_gb((size_t)rtS.ngroups * 8, 0.0f);
-	for (int g = 0; g < rtS.ngroups && g < (int)Z.size(); ++g){
-		for (int b = 0; b < 8; ++b){
+	for (int g = 0; g < rtS.ngroups && g < (int)Z.size(); ++g)
+		for (int b = 0; b < 8; ++b)
 			alpha_gb[(size_t)g*8 + b] = Z[g].alpha[b];
-		}
-	}
 
 	// recv_radius sets the detection-sphere size; too small starves the tail, too big
 	// smears it. Nrays trades tail smoothness for time. Raise both if the tail is noisy.
-	int   rt_nrays       = 20000;
-	int   rt_max_order   = 200;      // energy floor kills most rays far sooner
-	float rt_recv_radius = 0.5f;     // [m]
-	std::vector<float> echo;         // [8 * Q.Nr * Nt] energy echograms
+	int   rt_nrays       = 100000;
+	int   rt_max_order   = 18;      // energy floor kills most rays far sooner
+	float rt_recv_radius = 0.2f;     // [m]
+	std::vector<float> p_rt;         // [8 * Q.Nr * Nt] per-band RT pressure impulse responses
 	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(),
-	              c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, echo);
+	              c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, p_rt);
 
 	// compute IRs
 	// for each band
@@ -1060,12 +1059,14 @@ int main(int argc, char *argv[]){
 				if (theo - (i + 1) > 2.0f * std::sqrt(theo)){ t_cross = arrivals[i]; break; }
 			}
 			
-			// ray-tracer (late reflections) enters below: deposit the diffuse tail as
-			// incoherent noise weighted by sqrt(energy), only after the ISM crossover.
+			// ray-tracer (late reflections) enters below: p_rt holds ISM-style RT
+			// pressure per bin; deposit as incoherent noise (random sign) after the
+			// ISM crossover. e is already a pressure, so sqrt(e*e) == |e|.
 			for (int t = t_cross + 1; t < (int)Nt; t++){
-				float e = echo[((size_t)b*Q.Nr + r)*Nt + t];
-				if (e <= 0.0f) continue;
-				p_ism[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * std::sqrt(e);
+				float p_e = p_rt[((size_t)b*Q.Nr + r)*Nt + t];
+				if (p_e == 0.0f) continue;
+				//p_ism[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * std::sqrt(p_e*p_e);
+				p_ism[flat(t, r, Nt)] += std::sqrt(p_e*p_e); // to validate with ISM showbox
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file

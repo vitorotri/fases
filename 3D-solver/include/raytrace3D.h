@@ -18,14 +18,29 @@ and the recursive_trace() bounce loop shape. Two differences from the light trac
      (O(log n) per bounce instead of O(n)).
 
 Rays leave the source on a Fibonacci-sphere pattern (near-uniform angular spread).
-This is the DIFFUSE LATE TAIL that continues the ISM past its max reflection order:
-it fills the energy echogram after the ISM crossover sample. Energy (not pressure)
-is traced -- 1/d^2 spreading falls out of ray divergence, so we never divide by d^2.
+This is the DIFFUSE LATE TAIL that continues the ISM past its max reflection order.
+
+Each ray that reaches a receiver deposits a PRESSURE, built exactly like an ISM
+image source so the two can be validated side by side:
+    p_ray[b] = ps * PROD_bounces sqrt(1 - alpha_b) / (4*pi*d_run)
+where d_run is the total path length the ray actually travelled to the receiver,
+sqrt(1-alpha_b) is the per-band normal-incidence pressure reflection coefficient
+(picked per hit group from alpha_gb), and ps is that source's pressure.
+
+p_rt[(b*Nr + r)*Nt + sample] holds the per-band pressure impulse response (NOT an
+energy echogram). The detection sphere is crossed by ~n_path = Nrays*R^2/(4 d^2)
+rays per specular path, so rt_trace_late divides that multiplicity out at the end
+(d = c*sample/fs is exact per bin). The result is Nrays-INDEPENDENT and matches the
+ISM image amplitude ps*PROD sqrt(1-alpha)/(4 pi d) in the overlap region -- Nrays
+then only controls tail smoothness/completeness.
 
 Call sequence in main3D.cu:
     RTScene rtS = rt_build(sc);              // build once, before scene_free
-    rt_trace_late(rtS, ..., echo);           // fill echo[8 * Nr * Nt] energies
-    // then, per (band b, receiver r): p += sign * sqrt(echo[(b*Nr+r)*Nt + t])
+    rt_trace_late(rtS, ..., p_rt);           // fill p_rt[8 * Nr * Nt] pressures
+    // VALIDATION (amplitudes vs ISM): compare p_rt cells directly, or deposit
+    //   p_ism += sqrt(e*e)          (magnitude, no random sign)
+    // SYNTHESIS (audible diffuse tail): deposit
+    //   p_ism += rt_sign(...) * sqrt(e*e)   (random phase; same magnitude)
 
 Absorption is passed in flat as alpha_gb[group_id*8 + band] so this header stays
 decoupled from the material/impedance code.
@@ -58,8 +73,8 @@ inline static void rt_compute_reflected(vec3& ref, const vec3& inc, const vec3& 
 }
 
 // cheap integer hash -> pseudo-random sign, so the diffuse tail is incoherent
-// noise (deterministic, reproducible). ponytail: good enough; swap for a real
-// Poisson process if the tail statistics ever need to be exact.
+// noise (deterministic, reproducible). Swap for a real Poisson process if the
+// tail statistics ever need to be exact.
 inline static float rt_sign(unsigned int s){
     s ^= s>>16; s *= 0x7feb352du; s ^= s>>15; s *= 0x846ca68bu; s ^= s>>16;
     return (s & 1u) ? 1.f : -1.f;
@@ -241,10 +256,12 @@ inline static float rt_point_seg_dist2(const vec3& q, const vec3& p0, const vec3
 
 // ============================================================
 // Late diffuse tail: shoot Fibonacci rays from each source, bounce specularly
-// (raytracer.c::recursive_trace shape), deposit energy into per-band per-receiver
-// echograms whenever a ray segment passes within recv_radius of a receiver.
+// (raytracer.c::recursive_trace shape), and whenever a ray segment passes within
+// recv_radius of a receiver deposit the ISM-style PRESSURE
+//     p_ray[b] = ps * PROD sqrt(1-alpha_b) / (4*pi*d_run)
+// into per-band per-receiver pressure impulse responses (NOT energy echograms).
 //
-// echo is sized RT_NBANDS * Nr * Nt and indexed echo[(b*Nr + r)*Nt + sample].
+// p_rt is sized RT_NBANDS * Nr * Nt and indexed p_rt[(b*Nr + r)*Nt + sample].
 // alpha_gb (may be null => rigid) is absorption per group per band, alpha_gb[gid*8+b].
 // Source/receiver positions are RAW (world) and get the same (p+shift)*scale as
 // the walls, so times line up with the ISM.
@@ -256,10 +273,10 @@ inline static void rt_trace_late(const RTScene& S,
                                  const float* alpha_gb,   // [ngroups*8] or nullptr
                                  float c, float fs, int Nt,
                                  int Nrays, int max_order, float recv_radius,
-                                 std::vector<float>& echo)
+                                 std::vector<float>& p_rt)
 {
     const int Ns=(int)(src_arr.size()/3), Nr=(int)(rec_arr.size()/3);
-    echo.assign((size_t)RT_NBANDS*(size_t)Nr*(size_t)Nt, 0.f);
+    p_rt.assign((size_t)RT_NBANDS*(size_t)Nr*(size_t)Nt, 0.f);
     if(Ns==0 || Nr==0 || Nrays<=0 || S.nodes.empty()) return;
 
     auto xform = [&](float x,float y,float z){
@@ -269,20 +286,20 @@ inline static void rt_trace_late(const RTScene& S,
     for(int r=0;r<Nr;++r) rec[(size_t)r]=xform(rec_arr[(size_t)(3*r)],rec_arr[(size_t)(3*r+1)],rec_arr[(size_t)(3*r+2)]);
 
     const float R2 = recv_radius*recv_radius;
-    const float t_end = (float)Nt/fs;      // stop rays past the echogram length
-    const float e_min = 1e-8f;             // energy floor: kill exhausted rays
+    const float t_end = (float)Nt/fs;      // stop rays past the impulse-response length
+    const float Rp_min = 1e-4f;            // pressure-reflection floor: kill dead rays
+    const float RT_4PI = 12.566370614359172f;
 
     for(int s=0;s<Ns;++s){
         const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]);
         const float ps = (s<(int)src_pressure.size()) ? src_pressure[(size_t)s] : 1.f;
-        const float E0 = (ps*ps)/(float)Nrays;   // power per ray
 
         #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic)
         #endif
         for(int ri=0; ri<Nrays; ++ri){
             ray3 r = rt_fib_ray(o0, ri, Nrays);
-            float E[RT_NBANDS]; for(int b=0;b<RT_NBANDS;++b) E[b]=E0;
+            float Rp[RT_NBANDS]; for(int b=0;b<RT_NBANDS;++b) Rp[b]=1.f; // PROD sqrt(1-alpha_b)
             float cum = 0.f;                 // path length so far [m]
 
             for(int bounce=0; bounce<=max_order; ++bounce){
@@ -294,20 +311,24 @@ inline static void rt_trace_late(const RTScene& S,
                 const vec3 d = v3(r.dx,r.dy,r.dz);
                 const vec3 p1 = add3(o, mul3(d, seg));
 
-                // receiver detection along this segment
+                // receiver detection along this segment: deposit ISM-style pressure
+                //     p_ray[b] = ps * PROD sqrt(1-alpha_b) / (4*pi*d_run)
                 for(int rr=0; rr<Nr; ++rr){
                     float s_ca;
                     if(rt_point_seg_dist2(rec[(size_t)rr], o, p1, s_ca) <= R2){
-                        const float tt = (cum + s_ca)/c;
-                        if(tt < t_end){
+                        const float d_run = cum + s_ca;      // total path travelled to receiver
+                        const float tt = d_run/c;
+                        if(tt < t_end && d_run > 1e-4f){
                             const int n0 = (int)(tt*fs);
                             if(n0>=0 && n0<Nt){
+                                const float spread = 1.f/(RT_4PI*d_run);
                                 for(int b=0;b<RT_NBANDS;++b){
-                                    float* cell = &echo[((size_t)b*Nr + rr)*Nt + n0];
+                                    float* cell = &p_rt[((size_t)b*Nr + rr)*Nt + n0];
+                                    const float p_ray = ps * Rp[b] * spread;
                                     #ifdef _OPENMP
                                     #pragma omp atomic
                                     #endif
-                                    *cell += E[b];
+                                    *cell += p_ray;
                                 }
                             }
                         }
@@ -318,16 +339,17 @@ inline static void rt_trace_late(const RTScene& S,
                 cum += seg;
                 if(cum/c >= t_end) break;
 
-                // absorb, then reflect (specular), raytracer.c bounce shape
+                // pressure reflection coefficient sqrt(1-alpha) per band (correct
+                // alpha for the hit group), then reflect (specular) -- raytracer.c shape
                 const int gid = S.group[(size_t)tri];
                 float alive=0.f;
                 for(int b=0;b<RT_NBANDS;++b){
-                    float al = (alpha_gb && gid>=0 && gid<S.ngroups) ? alpha_gb[gid*RT_NBANDS+b] : 0.f;
-                    al = std::max(0.f, std::min(0.99f, al));
-                    E[b] *= (1.f-al);
-                    alive = std::max(alive, E[b]);
+                    float al = (alpha_gb && gid>=0 && gid<S.ngroups) ? alpha_gb[(size_t)gid*RT_NBANDS+b] : 0.f;
+                    al = std::max(0.f, std::min(0.999f, al));
+                    Rp[b] *= std::sqrt(1.f - al);
+                    alive = std::max(alive, Rp[b]);
                 }
-                if(alive < e_min) break;
+                if(alive < Rp_min) break;
 
                 vec3 N = rt_tri_normal(S, tri);
                 vec3 ref; rt_compute_reflected(ref, d, N);
@@ -336,5 +358,23 @@ inline static void rt_trace_late(const RTScene& S,
                 r.dx=ref.x; r.dy=ref.y; r.dz=ref.z;
             }
         }
+    }
+
+    // Normalize out the detection-sphere ray multiplicity so p_rt holds the
+    // per-path (ISM-comparable) pressure, independent of Nrays. A specular path at
+    // distance d is found by ~n_path = Nrays*R^2/(4 d^2) rays; each deposited
+    // ps*PROD sqrt(1-alpha)/(4 pi d), so the bin holds n_path times the image
+    // amplitude. Since arrivals are binned at sample = (d/c)*fs, d = c*t/fs is exact
+    // for bin t -> the division is exact, not approximate. After this, p_rt lines up
+    // with the ISM in the overlap region and Nrays only controls tail smoothness.
+    const double Rr = (double)recv_radius*(double)recv_radius;
+    if(Rr > 0.0){
+        for(int b=0;b<RT_NBANDS;++b)
+         for(int rr=0;rr<Nr;++rr)
+          for(int t=1;t<Nt;++t){
+              const double d = (double)c*(double)t/(double)fs;         // exact path length for bin t
+              const double n_path = (double)Nrays*Rr/(4.0*d*d);        // rays representing one path
+              if(n_path > 0.0) p_rt[((size_t)b*Nr+rr)*Nt+t] /= (float)n_path;
+          }
     }
 }
