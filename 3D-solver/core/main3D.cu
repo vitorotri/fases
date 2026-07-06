@@ -24,9 +24,16 @@ unsigned long long available_ram_bytes() {
 
 int main(int argc, char *argv[]){
 	if (argc < 5) {
-        printf("Usage: %s <scene> <config> <src> <rec>\n", argv[0]);
+        printf("Usage: %s <scene> <config> <src> <rec> [poles] [--estimate]\n", argv[0]);
         return 1;
     }
+
+    // --estimate: parse the scene, compute V / T60 / f_Schroeder, write the two
+    // single-value binaries for the GUI Setup tab, and exit BEFORE any field
+    // allocation / FDTD / ISM. Fast, and needs no poles.txt (T60 uses only .mat alpha).
+    bool estimate_only = false;
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--estimate") == 0) estimate_only = true;
 
     // -------------------------------------------------------------------------
     // Project-aware paths. The executable may live in build/, but the CASE
@@ -296,7 +303,30 @@ int main(int argc, char *argv[]){
     
     size_t n_air = count_air_voxels(S, (size_t)Nx*Ny*Nz);
 	float V = n_air * h*h*h; // effective air volume of domain
-    
+
+	// --estimate fast path: everything T60 needs is ready here (V from the SDF,
+	// A/A_tot from mesh_group_areas, alpha from .mat). Write Vol.bin / f_Schroeder.bin
+	// into the config dir for the GUI and stop before the heavy solver stages.
+	if (estimate_only){
+		float c_est = std::sqrt(1.4f * 287.05f * (conf_arr[3] + 273.15f)); // speed of sound from temp
+		auto Z_est = ism_load_impedances_layered(imp_dir, names, mat_dir);
+		std::vector<float> T60_est(8, 0.5f);
+		estimate_T60s(T60_est, V, c_est, A_tot, A, Z_est);
+		float f_Sch = 2000.0f * std::sqrt(T60_est[3] / V); // T60 at 500 Hz
+
+		std::filesystem::path cdir = config_path.parent_path();
+		FILE* fVol = fopen((cdir / "Vol.bin").string().c_str(), "wb");
+		if (fVol){ fwrite(&V, sizeof(float), 1, fVol); fclose(fVol); }
+		FILE* fSch = fopen((cdir / "f_Schroeder.bin").string().c_str(), "wb");
+		if (fSch){ fwrite(&f_Sch, sizeof(float), 1, fSch); fclose(fSch); }
+		FILE* fT60 = fopen((cdir / "T60.bin").string().c_str(), "wb"); // 8 octave bands
+		if (fT60){ fwrite(T60_est.data(), sizeof(float), 8, fT60); fclose(fT60); }
+
+		printf("\n[OK] estimate: V = %.3f m^3, f_Schroeder = %.2f Hz\n", V, f_Sch);
+		free(S); free(oid); scene_free(&sc);
+		return 0;
+	}
+
     FILE *pre_header; // file for data output (sdf_plot.py TST)
 	pre_header = fopen(out_file("pre_header.txt").c_str(), "w");
 	if (pre_header != NULL){
@@ -487,6 +517,18 @@ int main(int argc, char *argv[]){
 	std::vector<float> T60(8, 0.5f);
 	estimate_T60s(T60, V, c, A_tot, A, Z);
 	printf("\n[OK] estimated T60 per band [s]:");
+	float f_Schroeder = 2000.0 * std::sqrt(T60[3] / V); // T60 at 500 Hz
+	printf("\n[OK]f_Schroeder = %f\n", f_Schroeder);
+
+	// Single-value binaries in the config dir for the GUI Setup tab: Vol.bin drives
+	// the recommended ray count, f_Schroeder.bin the recommended cutoff frequency.
+	{
+		std::filesystem::path cdir = config_path.parent_path();
+		FILE* fVol = fopen((cdir / "Vol.bin").string().c_str(), "wb");
+		if (fVol){ fwrite(&V, sizeof(float), 1, fVol); fclose(fVol); }
+		FILE* fSch = fopen((cdir / "f_Schroeder.bin").string().c_str(), "wb");
+		if (fSch){ fwrite(&f_Schroeder, sizeof(float), 1, fSch); fclose(fSch); }
+	}
 	for (int b = 0; b < 8; b++) printf(" %.3f", T60[b]);
 	printf("\n");
     
@@ -969,13 +1011,16 @@ int main(int argc, char *argv[]){
 		for (int b = 0; b < 8; ++b)
 			alpha_gb[(size_t)g*8 + b] = Z[g].alpha[b];
 
+	// ponytail: calibration knobs (physical ray-tracing tuning, not just code size).
 	// recv_radius sets the detection-sphere size; too small starves the tail, too big
 	// smears it. Nrays trades tail smoothness for time. Raise both if the tail is noisy.
-	int   rt_nrays       = 100000;
-	int   rt_max_order   = 18;      // energy floor kills most rays far sooner
-	float rt_recv_radius = 0.2f;     // [m]
+	// ray count: user value from config.txt line 15 (conf_arr[14]) if present, else
+	// a safe default. The GUI seeds that field from Vol.bin (Vorlander <k>).
+	int   rt_nrays       = (conf_arr.size() > 14) ? std::max(1000, (int)conf_arr[14]) : 20000;
+	int   rt_max_order   = 200;      // energy floor kills most rays far sooner
+	float rt_recv_radius = 0.15f;     // [m] receiver radius (keep it 0.15)
 	std::vector<float> p_rt;         // [8 * Q.Nr * Nt] per-band RT pressure impulse responses
-	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(),
+	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(),
 	              c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, p_rt);
 
 	// compute IRs
@@ -1066,7 +1111,7 @@ int main(int argc, char *argv[]){
 				float p_e = p_rt[((size_t)b*Q.Nr + r)*Nt + t];
 				if (p_e == 0.0f) continue;
 				//p_ism[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * std::sqrt(p_e*p_e);
-				p_ism[flat(t, r, Nt)] += std::sqrt(p_e*p_e); // to validate with ISM showbox
+				p_ism[flat(t, r, Nt)] += std::sqrt(p_e*p_e);
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
@@ -1079,14 +1124,14 @@ int main(int argc, char *argv[]){
         	} else {
            		std::fprintf(stderr, "\n[ISM] could not open %s for writing\n", fname.c_str());
         	}
-			
 		}
-
 	}
+	
+	printf("\n[OK] Ray-tracer and ISM finished\n");
 
     // ---------------------------------------------------------------------------------------------------------
     
-    printf("\n[OK] Finished.\n\n"); 
+    printf("\n[OK] Simulation end\n\n"); 
     
     return 0;
 }

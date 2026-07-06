@@ -271,6 +271,7 @@ inline static void rt_trace_late(const RTScene& S,
                                  const std::vector<float>& src_pressure,
                                  const std::vector<float>& rec_arr,
                                  const float* alpha_gb,   // [ngroups*8] or nullptr
+                                 const float* m_air,      // [8] PRESSURE air-attenuation coeff (Np/m, already halved); nullptr => none
                                  float c, float fs, int Nt,
                                  int Nrays, int max_order, float recv_radius,
                                  std::vector<float>& p_rt)
@@ -300,7 +301,7 @@ inline static void rt_trace_late(const RTScene& S,
         for(int ri=0; ri<Nrays; ++ri){
             ray3 r = rt_fib_ray(o0, ri, Nrays);
             float Rp[RT_NBANDS]; for(int b=0;b<RT_NBANDS;++b) Rp[b]=1.f; // PROD sqrt(1-alpha_b)
-            float cum = 0.f;                 // path length so far [m]
+            float d_travel = 0.f;            // path length travelled so far [m]
 
             for(int bounce=0; bounce<=max_order; ++bounce){
                 float th; int tri;
@@ -316,7 +317,7 @@ inline static void rt_trace_late(const RTScene& S,
                 for(int rr=0; rr<Nr; ++rr){
                     float s_ca;
                     if(rt_point_seg_dist2(rec[(size_t)rr], o, p1, s_ca) <= R2){
-                        const float d_run = cum + s_ca;      // total path travelled to receiver
+                        const float d_run = d_travel + s_ca; // total path to the receiver (incl. partial last hop)
                         const float tt = d_run/c;
                         if(tt < t_end && d_run > 1e-4f){
                             const int n0 = (int)(tt*fs);
@@ -324,7 +325,11 @@ inline static void rt_trace_late(const RTScene& S,
                                 const float spread = 1.f/(RT_4PI*d_run);
                                 for(int b=0;b<RT_NBANDS;++b){
                                     float* cell = &p_rt[((size_t)b*Nr + rr)*Nt + n0];
-                                    const float p_ray = ps * Rp[b] * spread;
+                                    // air absorption over the FULL path to the receiver (d_run,
+                                    // not d_travel): pressure decays exp(-m_air*d), m_air already
+                                    // the pressure (half-energy) coefficient.
+                                    const float air = m_air ? std::exp(-m_air[b]*d_run) : 1.f;
+                                    const float p_ray = ps * Rp[b] * spread * air;
                                     #ifdef _OPENMP
                                     #pragma omp atomic
                                     #endif
@@ -336,8 +341,8 @@ inline static void rt_trace_late(const RTScene& S,
                 }
 
                 if(!hit) break;              // escaped the geometry
-                cum += seg;
-                if(cum/c >= t_end) break;
+                d_travel += seg;
+                if(d_travel/c >= t_end) break;
 
                 // pressure reflection coefficient sqrt(1-alpha) per band (correct
                 // alpha for the hit group), then reflect (specular) -- raytracer.c shape

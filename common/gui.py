@@ -3316,15 +3316,26 @@ class MainWindow(QMainWindow):
             if sfx: s.setSuffix(f"  {sfx}")
             return s
 
+        # Estimate pass: runs the solver with --estimate (parse + V + T60, no FDTD)
+        # and fills the recommended Cutoff frequency / Number of rays below. Do this
+        # first, after setting grid spacing + temperature.
+        self._btn_estimate = QPushButton("📐︎  Estimate  (V, T60)")
+        self._btn_estimate.clicked.connect(self._estimate_room)
+        lay.addRow(self._btn_estimate)
+
         self._cfg = {}
+        # Temperature + Altitude first: they set the atmosphere (speed of sound),
+        # which the estimate derives h / f_cutoff / rays from. All unit-bearing
+        # fields stay bundled; the unitless CFL sits last. Display order only --
+        # config.txt is still written/read by fixed key/index below.
         for key, lbl, val, mn, mx, dec, sfx in [
+            ("T_C",     "Temperature",      20., -30.,   50., 1, "°C"),
+            # altitude is written as line 14 of config.txt (v[13])
+            ("altitude","Altitude",         408., -500., 9000., 1, "m"),
             ("h",       "Grid spacing",     0.05, 0.001, 2.0, 3, "m"),
             ("t_max",   "Simulation time",  0.5,  0.001, 60.0, 3, "s"),
             ("f_cutoff","Cutoff frequency", 250., 50., 10000., 1, "Hz"),
-            ("T_C",     "Temperature",      20., -30.,   50., 1, "°C"),
             ("CFL",     "CFL number",       0.40,  0.05,  0.50, 2, ""),
-            # shown above ADE poles, but written as line 14 of config.txt (v[13])
-            ("altitude","Altitude",         408., -500., 9000., 1, "m"),
         ]:
             sp = ds(val, mn, mx, dec, sfx); self._cfg[key] = sp
             lay.addRow(f"{lbl}:", sp)
@@ -3338,6 +3349,13 @@ class MainWindow(QMainWindow):
         self._ism_order = QSpinBox(); self._ism_order.setRange(0, 8)
         self._ism_order.setValue(3); self._ism_order.setMinimumWidth(130)
         lay.addRow("ISM max order:", self._ism_order)
+
+        # Number of rays for the ray-traced late tail (line 15 of config.txt; main3D
+        # reads v[14]). Seeded from Vol.bin after a solve (Vorlander <k>); user may
+        # override. Wide range for large rooms.
+        self._nrays = QSpinBox(); self._nrays.setRange(1000, 50_000_000)
+        self._nrays.setValue(20000); self._nrays.setMinimumWidth(130)
+        lay.addRow("Number of rays:", self._nrays)
 
         lay.addRow(QLabel("PML faces  (check = active):"))
         grid = QGridLayout(); self._pml = {}
@@ -3774,6 +3792,7 @@ class MainWindow(QMainWindow):
                 f.write(f"{pml[k]:.1f}  # {k}\n")
             f.write(f"{self._ism_order.value()}                               # ISM max reflection order\n")
             f.write(f"{self._cfg['altitude'].value():.6g}      # altitude [m]\n")
+            f.write(f"{self._nrays.value()}                               # number of rays (ray-traced tail)\n")
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -3799,6 +3818,8 @@ class MainWindow(QMainWindow):
             self._ism_order.setValue(int(vals[12]))  # ISM max reflection order
         if len(vals) > 13:
             self._cfg["altitude"].setValue(vals[13])  # altitude [m]
+        if len(vals) > 14:
+            self._nrays.setValue(int(vals[14]))  # number of rays (ray-traced tail)
 
     def _save_src(self):
         if not self._proj_root: return
@@ -3927,6 +3948,119 @@ class MainWindow(QMainWindow):
             self._log.append("\n[!] Stopped by user.")
         self._set_running(False)
         self._float_prog.hide()
+
+    def _load_recommended(self):
+        """Seed the Setup fields from the single-value binaries the --estimate pass
+        writes into config/ (Vol.bin, f_Schroeder.bin). The user can override any of
+        them afterwards.
+
+        Derivations
+        -----------
+        c        : speed of sound from temperature, c = sqrt(gamma * R_spec * T).
+        f_cutoff : the Schroeder frequency f_Schroeder = 2000 * sqrt(T60_500 / V).
+                   Above it the field is statistically diffuse, so the wave solver
+                   only needs to resolve UP TO f_Schroeder (ISM/RT cover higher bands).
+        h (grid) : wave-resolution rule. The shortest wavelength is lambda_min =
+                   c / f_cutoff; resolving it needs >= PPW cells per wavelength, so
+                   h = c / (PPW * f_cutoff). main3D aborts below 10 cells/lambda, so
+                   PPW = 12 keeps a margin. Coarser h => fewer voxels => faster.
+        t_max    : longest FINITE T60 across octave bands. t_max bounds the whole IR
+                   (FDTD + ISM + RT), so it must outlast the slowest-decaying band --
+                   the last one still ringing sets when the room is silent (60 dB down).
+                   estimate_T60s writes 1e9 for near-rigid bands, so those are skipped.
+                   (500 Hz, T60[3], is the conventional single-number RT alternative.)
+        Nrays    : Vorlander detection-density criterion. Mean ray hits on a detection
+                   sphere of radius R per sample bin: <k> = N * c * pi * R^2 / (V * fs);
+                   solve for N at a target <k>. Ref: M. Vorlander, "Auralization"
+                   (Springer, 2008); H. Kuttruff, "Room Acoustics".
+
+        ISM max order (NOT set here) would follow the mean-free-path relation:
+        mfp = 4V/S [Kuttruff]; mean time between reflections = mfp/c; so the order
+        reaching a transition time t is order ~ c*t/mfp = c*t*S/(4V). For t one may
+        use the mixing time t_mix ~ sqrt(V) [ms] -- Polack's rule of thumb
+        (J.-D. Polack, "Playing billiards in the concert hall: the mathematical
+        foundations of geometrical room acoustics," Applied Acoustics 38 (1993)
+        235-244; orig. these de doctorat, Univ. du Maine, 1988) -- or, more
+        self-consistently, the Poisson echo-density crossover t_cross that main3D
+        already computes for the ISM->RT handoff.
+        """
+        if not self._proj_root:
+            return
+        cdir = os.path.join(self._proj_root, "config")
+        c = math.sqrt(1.4 * 287.05 * (self._cfg["T_C"].value() + 273.15))  # speed of sound
+
+        # f_Schroeder -> recommended cutoff frequency AND grid spacing h
+        fs_path = os.path.join(cdir, "f_Schroeder.bin")
+        if os.path.isfile(fs_path):
+            try:
+                fS = float(np.fromfile(fs_path, dtype=np.float32, count=1)[0])
+                if fS > 0.0:
+                    self._cfg["f_cutoff"].setValue(fS)
+                    PPW = 12.0                        # cells per shortest wavelength (>10 floor)
+                    self._cfg["h"].setValue(c / (PPW * fS))
+            except Exception:
+                pass
+
+        # T60 (8 octave bands) -> recommended simulation time = longest finite band
+        t60_path = os.path.join(cdir, "T60.bin")
+        if os.path.isfile(t60_path):
+            try:
+                T60 = np.fromfile(t60_path, dtype=np.float32, count=8)
+                finite = [float(t) for t in T60 if 0.0 < t < 1.0e6]  # skip rigid-band 1e9 sentinel
+                if finite:
+                    self._cfg["t_max"].setValue(min(60.0, max(finite)))  # clamp to spin max
+            except Exception:
+                pass
+
+        # Vol -> recommended ray count (Vorlander <k>)
+        vol_path = os.path.join(cdir, "Vol.bin")
+        if os.path.isfile(vol_path):
+            try:
+                V = float(np.fromfile(vol_path, dtype=np.float32, count=1)[0])
+                if V > 0.0:
+                    fs = 44100.0                      # RT/ISM sample rate (main3D.cu)
+                    R  = 0.15                         # MUST match main3D.cu rt_recv_radius
+                    k  = 1.0                          # target detections per sample bin
+                    N  = k * V * fs / (c * math.pi * R * R)
+                    self._nrays.setValue(int(max(1000, min(N, 50_000_000))))
+                    self._sb.showMessage(
+                        f"Recommended: f_cut={self._cfg['f_cutoff'].value():.0f} Hz, "
+                        f"h={self._cfg['h'].value():.3g} m, t_max={self._cfg['t_max'].value():.3g} s, "
+                        f"rays={self._nrays.value()}  (V={V:.1f} m³)")
+            except Exception:
+                pass
+
+    def _estimate_room(self):
+        """Run the solver's --estimate pass (parse + V + T60, no FDTD) so the
+        recommended Cutoff frequency / Number of rays fill in BEFORE a real run.
+        Needs no poles.txt/fit -- T60 uses only the .mat absorption."""
+        if not self._proj_root:
+            QMessageBox.warning(self, "No project", "Open a project folder first."); return
+        if not self._obj_path:
+            QMessageBox.warning(self, "No scene", "Load an OBJ first."); return
+        # write config so h / temperature are current for the estimate
+        self._write_config(os.path.join(self._proj_root, "config", "config.txt"))
+        scene = self._obj_path
+        if scene.startswith(self._proj_root):
+            scene = os.path.relpath(scene, self._proj_root)
+        binary = self._bin_le.text()
+        bin_cmd = binary if os.path.isabs(binary) else f"./{binary}"
+        # src/rec/poles are never opened in --estimate mode, but the paths must be present
+        cmd = [bin_cmd, scene, "config/config.txt",
+               "input/src/src.txt", "input/rec/rec.txt", "config/poles.txt",
+               "--estimate"]
+        self._btn_estimate.setEnabled(False)
+        self._sb.showMessage("Estimating V, T60 …")
+        self._estimate_thread = SolverThread(cmd, self._proj_root)
+        self._estimate_thread.done.connect(self._on_estimate_done)
+        self._estimate_thread.start()
+
+    def _on_estimate_done(self, rc):
+        self._btn_estimate.setEnabled(True)
+        if rc == 0:
+            self._load_recommended()   # reads Vol.bin / f_Schroeder.bin, fills the fields
+        else:
+            self._sb.showMessage(f"Estimate failed (rc={rc}) — check the scene/materials")
 
     def _on_solver_done(self, rc):
         # Re-enable launching, fill/hide the progress bar, report status.
