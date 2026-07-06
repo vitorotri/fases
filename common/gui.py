@@ -35,7 +35,7 @@ from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor, QKeySequence,
                               QPixmap, QIcon, QPen, QShortcut)
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QSplitter,
+    QApplication, QMainWindow, QWidget, QSplitter, QDockWidget,
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox,
     QListWidget, QListWidgetItem, QTabWidget, QTabBar, QTextEdit,
@@ -404,6 +404,10 @@ class GLViewer(QOpenGLWidget):
         # scene
         self._verts  = np.zeros((0,3), np.float32)
         self._groups = []   # {name, tris, color, visible, is_bbox}
+        self._ray_paths = {}     # ray-tracer overlay: {ray_id: [(p0,p1,order), ...]} world coords
+        self._ray_src   = {}     # ray_id -> source index it was launched from
+        self._selected_ray = None
+        self._show_rays = True
         self._bbox_visible  = False
         self._selected_layer = None
         self._hover_world = None   # world coords under mouse for HUD
@@ -621,6 +625,7 @@ class GLViewer(QOpenGLWidget):
         self._glyph_queue = []            # collected by _draw_sources/_receivers
         self._draw_gizmo()   # replaces grid + world axes
         self._draw_mesh()
+        self._draw_rays()
         self._draw_sources()
         self._draw_receivers()
         if self._mode != self.MODE_NONE:
@@ -935,6 +940,72 @@ class GLViewer(QOpenGLWidget):
             wx = sx - fm.horizontalAdvance(ch) / 2.0
             wy = sy + (fm.ascent() - fm.descent()) / 2.0
             painter.drawText(int(round(wx)), int(round(wy)), ch)
+
+    RAY_COLOR    = (0.55, 0.45, 0.95)   # purplish blue (all rays)
+    RAY_ESCAPE   = (0.42, 0.38, 0.55)   # dimmer, for escaped (leaked) stubs
+    RAY_SELECTED = (0.10, 1.00, 0.70)   # cyan-green (the ray picked in the table)
+
+    def load_ray_paths(self, path):
+        """Load ray_paths.txt (segment/line: src_id ray_id x0 y0 z0 x1 y1 z1 order) from
+        the solver's --dump-rays pass. World coords, so it overlays the raw OBJ. Groups
+        segments by ray_id (unique across sources); records each ray's source index."""
+        rays = {}; srcs = {}
+        try:
+            with open(path) as f:
+                for ln in f:
+                    p = ln.split()
+                    if len(p) < 9:
+                        continue
+                    sid = int(float(p[0])); rid = int(float(p[1]))
+                    x0,y0,z0,x1,y1,z1 = (float(v) for v in p[2:8])
+                    rays.setdefault(rid, []).append(((x0,y0,z0), (x1,y1,z1), int(float(p[8]))))
+                    srcs[rid] = sid
+        except OSError:
+            return {}
+        self._ray_paths = rays
+        self._ray_src = srcs
+        self._selected_ray = None
+        self._show_rays = True
+        self.update()
+        return rays
+
+    def clear_ray_paths(self):
+        self._ray_paths = {}
+        self._ray_src = {}
+        self._selected_ray = None
+        self.update()
+
+    def set_selected_ray(self, rid):
+        self._selected_ray = rid
+        self.update()
+
+    def _draw_rays(self):
+        if not self._show_rays or not self._ray_paths:
+            return
+        glDisable(GL_LIGHTING)
+        # all non-selected rays: purplish blue (escaped stubs dimmer)
+        glLineWidth(1.4)
+        glBegin(GL_LINES)
+        for rid, segs in self._ray_paths.items():
+            if rid == self._selected_ray:
+                continue
+            for p0, p1, order in segs:
+                glColor4f(*(self.RAY_ESCAPE if order < 0 else self.RAY_COLOR),
+                          0.35 if order < 0 else 0.7)
+                glVertex3f(*p0); glVertex3f(*p1)
+        glEnd()
+        # selected ray: cyan-green, thicker, drawn on top (depth test off)
+        sel = self._ray_paths.get(self._selected_ray)
+        if sel:
+            glLineWidth(2.6)
+            glDisable(GL_DEPTH_TEST)
+            glColor4f(*self.RAY_SELECTED, 1.0)
+            glBegin(GL_LINES)
+            for p0, p1, order in sel:
+                glVertex3f(*p0); glVertex3f(*p1)
+            glEnd()
+            glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
 
     def _draw_sources(self):
         for i, pt in enumerate(self._sources):
@@ -3323,6 +3394,7 @@ class MainWindow(QMainWindow):
         self._btn_estimate.clicked.connect(self._estimate_room)
         lay.addRow(self._btn_estimate)
 
+
         self._cfg = {}
         # Temperature + Altitude first: they set the atmosphere (speed of sound),
         # which the estimate derives h / f_cutoff / rays from. All unit-bearing
@@ -3416,7 +3488,7 @@ class MainWindow(QMainWindow):
     # ── Run tab ──────────────────────────────────────────────
     def _build_run_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
-        lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
+        lay.setContentsMargins(8,18,8,8); lay.setSpacing(8)   # extra top margin off the tab bar
 
         # Binary path is kept (hidden field) so the launch command still works;
         # default to SOLVER_BINARY (edit at the top of the file) or last browsed.
@@ -3425,6 +3497,23 @@ class MainWindow(QMainWindow):
             _last_bin = SOLVER_BINARY
         self._bin_le = QLineEdit(_last_bin)
         self._bin_le.setVisible(False)        # path lives in SOLVER_BINARY now
+
+        # ── ray-trace debug overlay: count + order + Trace/Clear ──
+        dbg = QHBoxLayout(); dbg.setSpacing(8)
+        dbg.addWidget(QLabel("Debug rays:"))
+        self._dbg_rays = QSpinBox(); self._dbg_rays.setRange(1, 5000)
+        self._dbg_rays.setValue(64); self._dbg_rays.setMinimumWidth(70)
+        dbg.addWidget(self._dbg_rays)
+        dbg.addWidget(QLabel("Order:"))
+        self._dbg_order = QSpinBox(); self._dbg_order.setRange(1, 20)
+        self._dbg_order.setValue(5); self._dbg_order.setMinimumWidth(55)
+        dbg.addWidget(self._dbg_order)
+        self._btn_rays = QPushButton("Trace rays"); self._btn_rays.clicked.connect(self._dump_rays)
+        self._btn_clear_rays = QPushButton("Clear rays")
+        self._btn_clear_rays.clicked.connect(self._clear_rays)
+        dbg.addWidget(self._btn_rays, 1); dbg.addWidget(self._btn_clear_rays, 1)
+        lay.addLayout(dbg)
+        lay.addSpacing(12)   # breathing room between debug-ray row and Fit/Simulate
 
         # ── top row: Fit impedances (left)  |  Run/Stop (right) ──
         top = QHBoxLayout(); top.setSpacing(8)
@@ -3444,12 +3533,14 @@ class MainWindow(QMainWindow):
 
         # (progress bar floats over the 3D scene — see DraggableProgress)
 
-        # ── output log ──
+        # ── output log ── keep it in the lower ~half so the wall of solver messages
+        # (useful for debugging, but noisy) doesn't dominate the tab.
+        lay.addStretch(1)
         lay.addWidget(QLabel("Output:"))
         self._log = QTextEdit(); self._log.setReadOnly(True)
         self._log.setFont(QFont("Monospace", 10))
         self._log.setStyleSheet(
-            f"background:#0f1115;color:{PAL['text']};"
+            f"background:#000000;color:{PAL['text']};"
             f"border:1px solid {PAL['border']};")
         lay.addWidget(self._log, 1)
 
@@ -4080,6 +4171,89 @@ class MainWindow(QMainWindow):
             self._load_recommended()   # reads Vol.bin / f_Schroeder.bin, fills the fields
         else:
             self._sb.showMessage(f"Estimate failed (rc={rc}) — check the scene/materials")
+
+    def _dump_rays(self):
+        """Run the solver's --dump-rays pass (trace 'Debug rays' rays up to 'Order'
+        bounces, no FDTD) and overlay the paths on the 3D scene (purplish blue)."""
+        if not self._proj_root:
+            QMessageBox.warning(self, "No project", "Open a project folder first."); return
+        if not self._obj_path:
+            QMessageBox.warning(self, "No scene", "Load an OBJ first."); return
+        self._write_config(os.path.join(self._proj_root, "config", "config.txt"))
+        self._src_tbl.save_file(os.path.join(self._proj_root, "input", "src", "src.txt"))
+        scene = self._obj_path
+        if scene.startswith(self._proj_root):
+            scene = os.path.relpath(scene, self._proj_root)
+        binary = self._bin_le.text()
+        bin_cmd = binary if os.path.isabs(binary) else f"./{binary}"
+        cmd = [bin_cmd, scene, "config/config.txt",
+               "input/src/src.txt", "input/rec/rec.txt", "config/poles.txt",
+               "--dump-rays", str(self._dbg_rays.value()), str(self._dbg_order.value())]
+        self._btn_rays.setEnabled(False)
+        self._sb.showMessage("Tracing rays …")
+        self._rays_thread = SolverThread(cmd, self._proj_root)
+        self._rays_thread.done.connect(self._on_dump_rays_done)
+        self._rays_thread.start()
+
+    def _on_dump_rays_done(self, rc):
+        self._btn_rays.setEnabled(True)
+        if rc == 0:
+            paths = self._gl.load_ray_paths(
+                os.path.join(self._proj_root, "output", "ray_paths.txt"))
+            self._populate_ray_table()
+            nsrc = len(set(self._gl._ray_src.values()))
+            self._sb.showMessage(f"Traced {len(paths)} rays from {nsrc} source(s) — "
+                                 f"pick a row to highlight its path")
+        else:
+            self._sb.showMessage(f"Ray trace failed (rc={rc})")
+
+    # ── floating ray table ───────────────────────────────────
+    def _ensure_ray_table(self):
+        if getattr(self, "_ray_dock", None) is not None:
+            return
+        self._ray_tbl = QTableWidget(0, 5)
+        self._ray_tbl.setHorizontalHeaderLabels(["Src", "Ray", "Bounces", "Escaped", "Length (m)"])
+        self._ray_tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._ray_tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._ray_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._ray_tbl.itemSelectionChanged.connect(self._on_ray_row_selected)
+        self._ray_dock = QDockWidget("Rays", self)
+        self._ray_dock.setWidget(self._ray_tbl)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._ray_dock)
+        self._ray_dock.setFloating(True)
+        self._ray_dock.resize(320, 400)
+
+    def _populate_ray_table(self):
+        self._ensure_ray_table()
+        paths = self._gl._ray_paths; srcs = self._gl._ray_src
+        t = self._ray_tbl
+        t.blockSignals(True)
+        t.setRowCount(0)
+        for rid in sorted(paths):
+            segs = paths[rid]
+            bounces = sum(1 for _, _, o in segs if o >= 0)
+            escaped = any(o < 0 for _, _, o in segs)
+            length = sum(math.dist(p0, p1) for p0, p1, o in segs if o >= 0)
+            r = t.rowCount(); t.insertRow(r)
+            t.setItem(r, 0, QTableWidgetItem(str(srcs.get(rid, 0))))
+            t.setItem(r, 1, QTableWidgetItem(str(rid)))
+            t.setItem(r, 2, QTableWidgetItem(str(bounces)))
+            t.setItem(r, 3, QTableWidgetItem("yes" if escaped else ""))
+            t.setItem(r, 4, QTableWidgetItem(f"{length:.2f}"))
+        t.blockSignals(False)
+        t.clearSelection()
+        self._ray_dock.show(); self._ray_dock.raise_()
+
+    def _on_ray_row_selected(self):
+        rows = self._ray_tbl.selectionModel().selectedRows()
+        rid = int(self._ray_tbl.item(rows[0].row(), 1).text()) if rows else None
+        self._gl.set_selected_ray(rid)
+
+    def _clear_rays(self):
+        self._gl.clear_ray_paths()
+        if getattr(self, "_ray_dock", None) is not None:
+            self._ray_tbl.setRowCount(0)
+            self._ray_dock.hide()
 
     def _on_solver_done(self, rc):
         # Re-enable launching, fill/hide the progress bar, report status.
