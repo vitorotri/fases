@@ -32,8 +32,17 @@ int main(int argc, char *argv[]){
     // single-value binaries for the GUI Setup tab, and exit BEFORE any field
     // allocation / FDTD / ISM. Fast, and needs no poles.txt (T60 uses only .mat alpha).
     bool estimate_only = false;
-    for (int i = 1; i < argc; ++i)
-        if (std::strcmp(argv[i], "--estimate") == 0) estimate_only = true;
+    bool dump_rays = false;   // --dump-rays [N] [M]: write ray_paths.txt for the GUI overlay and exit
+    int  dump_nrays = 0;      // optional ray count after --dump-rays (0 => fall back)
+    int  dump_order = 0;      // optional max reflection order after the count (0 => default 5)
+    for (int i = 1; i < argc; ++i){
+        if (std::strcmp(argv[i], "--estimate")  == 0) estimate_only = true;
+        if (std::strcmp(argv[i], "--dump-rays") == 0){
+            dump_rays = true;
+            if (i+1 < argc) dump_nrays = std::atoi(argv[i+1]);   // 0 if the next token isn't a number
+            if (i+2 < argc) dump_order = std::atoi(argv[i+2]);
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Project-aware paths. The executable may live in build/, but the CASE
@@ -222,7 +231,31 @@ int main(int argc, char *argv[]){
    		printf("\n[OK] processing scene...\n");
 
 		if(!parse_obj3d(path, &sc, h)) return -1;
-		
+
+		// --dump-rays: pure-geometry trace. Build the BVH from the just-parsed mesh,
+		// shoot the debug rays, write ray_paths.txt for the GUI overlay, and exit --
+		// BEFORE the SDF/OID build, since the ray tracer never uses them.
+		if (dump_rays){
+			RTScene rtS = rt_build(sc);
+			std::vector<vec3> srcs;   // all source positions from src.txt (world coords)
+			{
+				std::ifstream sf(src_path); std::string ln;
+				while (std::getline(sf, ln)){
+					if (ln.empty() || ln[0] == '#') continue;
+					std::istringstream is(ln); float x,y,z;
+					if (is >> x >> y >> z) srcs.push_back(v3(x,y,z));
+				}
+			}
+			if (srcs.empty()) srcs.push_back(v3(0,0,0));
+			int Ndbg = (dump_nrays > 0) ? dump_nrays
+			         : ((conf_arr.size() > 14) ? std::max(1, (int)conf_arr[14]) : 200);
+			int Mdbg = (dump_order > 0) ? dump_order : 5;
+			rt_dump_paths(rtS, srcs, Ndbg, Mdbg, out_file("ray_paths.txt").c_str());
+			printf("\n[OK] dumped %d ray paths (max order %d) -> output/ray_paths.txt\n", Ndbg, Mdbg);
+			scene_free(&sc);
+			return 0;
+		}
+
 		A = mesh_group_areas(sc, &A_tot); // A[i] is aligned with Z[i].alpha[b], for band b (layered Z, no BoundingBox)
 		// created in the ISM section
 
@@ -981,7 +1014,6 @@ int main(int argc, char *argv[]){
 	scene_free(&sc); // free scene here: ism_solve and rt_build are its last users
 
 	
-	
 	// determine number of valid bands for ISM (easier array allocation later on)
 	int N_bands = 8; // number of bands for ISM, start with total
 	for (int i = 0; i < 8; i++){
@@ -1021,9 +1053,9 @@ int main(int argc, char *argv[]){
 	for (int b = 0; b < 8; b++){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
 		
-		// allocate memory for ISM IRs: for each rec, first index sample is time, second is receiver's index
-		// (flattened)
-		std::vector<float> p_ism(Nt * (size_t)Q.Nr);
+		// allocate memory for high frequency IRs: for each rec, first index sample is time, second is
+		// receiver's index (flattened)
+		std::vector<float> p_hf(Nt * (size_t)Q.Nr);
 		// lambda expression for fractional-delay deposit, ref. Reuben Thomas (Thesis), Fu & Li (2016)
 		auto deposit = [&](float tau, float g, int rr, float dist){
 			int tt = (int)tau;
@@ -1031,7 +1063,7 @@ int main(int argc, char *argv[]){
 				int nn = tt + n0;
 				if (nn < 0 || nn >= (int)Nt) continue;
 				float xx = nn - tau;
-				p_ism[flat(nn,rr,Nt)] += g * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
+				p_hf[flat(nn,rr,Nt)] += g * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
 			}
 		};
 
@@ -1050,7 +1082,7 @@ int main(int argc, char *argv[]){
         				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0);
         				gS_0 *= std::exp(-m_air[b]*d_0);
         				// no fractional delay
-            			//p_ism[flat(t_0, r, Nt)] += gS_0;
+            			//p_hf[flat(t_0, r, Nt)] += gS_0;
             			// fractional delay
             			deposit(tau_0, gS_0, r, d_0);
             			if (t_0 > t_cross) t_cross = t_0;
@@ -1070,8 +1102,8 @@ int main(int argc, char *argv[]){
 					float P = 1.0; // iterated product
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
-						//float theta = iS.angle_rad[k];
-						float theta = 0.0; // (test for normal incidence, shoebox comparison)
+						float theta = iS.angle_rad[k];
+						//float theta = 0.0; // (test for normal incidence, shoebox comparison)
 						float R = R_oblique(iS.alpha[k][b], theta);
 						P *= R;
 					}
@@ -1081,7 +1113,7 @@ int main(int argc, char *argv[]){
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
 					gS *= std::exp(-m_air[b]*d);
 					// no fractionl delay
-					//p_ism[flat(t,r,Nt)] += gS;
+					//p_hf[flat(t,r,Nt)] += gS;
 					// fractional delay
 					deposit(tau, gS, r, d);
 				}
@@ -1104,9 +1136,8 @@ int main(int argc, char *argv[]){
 			for (int t = t_cross + 1; t < (int)Nt; t++){
 				float p_e = p_rt[((size_t)b*Q.Nr + r)*Nt + t];
 				if (p_e == 0.0f) continue;
-				p_ism[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) *
-										std::sqrt(p_e*p_e);
-				//p_ism[flat(t, r, Nt)] += std::sqrt(p_e*p_e); // to validate against shoebox ISM
+				p_hf[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * p_e;
+				//p_hf[flat(t, r, Nt)] += std::sqrt(p_e*p_e); // to validate against shoebox ISM
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
@@ -1114,7 +1145,7 @@ int main(int argc, char *argv[]){
                                     		+ std::to_string((int)octave_bands[b]) + ".bin");
         	FILE* f = std::fopen(fname.c_str(), "wb");
         	if (f){
-           		std::fwrite(p_ism.data() + (size_t)r*Nt, sizeof(float), (size_t)Nt, f);
+           		std::fwrite(p_hf.data() + (size_t)r*Nt, sizeof(float), (size_t)Nt, f);
            		std::fclose(f);
         	} else {
            		std::fprintf(stderr, "\n[ISM] could not open %s for writing\n", fname.c_str());
