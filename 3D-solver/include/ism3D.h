@@ -51,7 +51,6 @@ Threading: host + optional OpenMP over receivers.
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
-#include <random>
 
 #ifdef _OPENMP
   #include <omp.h>
@@ -66,84 +65,6 @@ float R_oblique(float alpha, float theta){
 
 float sinc(float x){
 	return x == 0.0 ? 1.0 : std::sin(x)/x;
-}
-
-// FRA-RIR-style late tail, ref. Luo & Yu (2022), arXiv:2208.04101, adapted:
-//   d_i  ~ P(d) proportional to d^2 (paper eq. 3-4 = physical image-shell
-//          density, sampled by inverse CDF),
-//   count = (4*pi/3)*(dmax^3 - dmin^3)/V  (physical image density, so the
-//          level splices onto the deterministic ISM part at t_cross),
-//   g_i  = d_i/MFP + U(-2,2)*d_i^0.2, MFP = 4V/S the mean free path.
-//          (PHYSICAL reflection count; the paper's quadratic eq. 6 is
-//          calibrated only at its -60 dB endpoint and overshoots in between.)
-//   r_eff = per-bounce coefficient FITTED in main from the validated ISM
-//          paths (ln|prod R| vs distance), so the tail continues the decay
-//          the early reflections actually show. Fallback: Eyring
-//          r = sqrt(1-abar) via ln(1-abar) = -55.25*(V/S)/(c*T60).
-//   sign = random +/-: the paper's all-positive comb (eq. 8) relies on its
-//          80 Hz high-pass stage (Sec. II-A) to remove the DC; this per-band
-//          pipeline has no such stage. Force sgn = 1 for the |R| validation.
-// Deposit: sgn * src_scale * r_eff^g_i / (4*pi*d_i) -- our ISM convention
-// (the paper omits the 4*pi). Early reflections in [0, t_cross] are kept.
-void stat_tail(std::vector<float>& p_ism, int Nt, int t_cross, int r,
-               float fs, float c, float V, float S, float T60,
-               unsigned seed, float src_scale, float r_eff = -1.f, float sig_lnP = 0.f){
-	std::mt19937 rng(seed);
-	std::uniform_real_distribution<float> uni(0.0f, 1.0f);
-	std::uniform_real_distribution<float> pert(-2.0f, 2.0f); // eq. 6 perturbation: a=-2, b=2
-	std::normal_distribution<float> z(0.0f, 1.0f);
-	const float MFP = 4.0f*V/S;
-
-	float rr = r_eff;
-	if (!(rr > 0.0f && rr < 1.0f))                           // no fit available: Eyring
-		rr = std::exp(-27.625f*(V/S)/(c*T60));
-	const float dmin = c*(t_cross + 1)/fs;
-	const float d60  = MFP*3.0f/(-std::log10(rr));           // reflection loss reaches -60 dB
-	const float dmax = std::min(c*(Nt - 1)/fs, d60);
-	if (dmin >= dmax) return;
-
-	const float a3 = dmin*dmin*dmin, b3 = dmax*dmax*dmax;
-	long long I = (long long)(4.0f*(float)M_PI/3.0f*(b3 - a3)/V);
-	if (I > (1LL<<24)){                                      // ponytail: cap runaway counts
-		std::fprintf(stderr,"[ISM] stat_tail: %lld virtual sources capped to %lld\n",
-		             I, (1LL<<24));
-		I = 1LL<<24;
-	}
-	const float lrr = std::log(rr);
-	// energy compensation for the 2.5-sigma-clamped lognormal spread below:
-	// M = E[exp(2*sig*Zclamped)], comp = 0.5*ln(M) so E[exp(2*(sig*Z - comp))] = 1
-	float comp = 0.f;
-	if (sig_lnP > 0.f){
-		auto Phi = [](float x){ return 0.5f*std::erfc(-x*0.70710678f); };
-		const float M = std::exp(2.f*sig_lnP*sig_lnP)*Phi(2.5f - 2.f*sig_lnP)
-		              + std::exp(2.5f*2.f*sig_lnP)*(1.f - Phi(2.5f));
-		comp = 0.5f*std::log(M);
-	}
-	for (long long i = 0; i < I; ++i){
-		const float d = std::cbrt(a3 + uni(rng)*(b3 - a3));  // inverse CDF of P(d) ~ d^2
-		const int t = (int)(d/c*fs);
-		if (t <= t_cross || t >= Nt) continue;
-		// log-amplitude: mean decay (d/MFP bounces) + amplitude spread.
-		// The spread uses the MEASURED within-bin std of ln|prod R| when
-		// available (the tall peaks are the rare low-loss paths; a narrow
-		// spread makes the tail too flat), energy-compensated so the RMS
-		// envelope stays calibrated: E[exp(2*(sig*Z - sig^2))] = 1.
-		// Fallback: the paper's eq. 6 perturbation.
-		float lamp = (d/MFP)*lrr;
-		if (sig_lnP > 0.f){
-			// truncate the UPPER side at 2.5 sigma: with the huge draw counts
-			// late in the tail an unbounded normal eventually lands a 4-5 sigma
-			// deposit (max ~ sqrt(2 ln N)); early peaks (< 2.3 sigma) untouched
-			float Z = z(rng); if (Z > 2.5f) Z = 2.5f;
-			lamp += sig_lnP*Z - comp;
-		} else
-			lamp += pert(rng)*std::pow(d, 0.2f)*lrr;
-		// random sign: rectify AFTER summation when validating against an
-		// all-positive analytical RIR (an all-positive comb concentrates into
-		// a band above zero instead of scattering to 0 like the reference)
-		const float sgn = (uni(rng) < 0.5f) ? -1.f : 1.f;
-		p_ism[flat(t,r,Nt)] += sgn * src_scale * std::exp(lamp)/(4.0f*(float)M_PI*d);
-	}
 }
 
 static constexpr int ISM_NBANDS = 8;
@@ -796,6 +717,7 @@ void estimate_T60s(std::vector<float>& T60, float V, float c, float A_tot, const
 			alpha_m += A[i] * Z[i].alpha[b];
 		}
 		alpha_m /= A_tot;
+		if (alpha_m < 1e-6f){ T60[b] = 1e9f; continue; } // rigid room: no absorption, no decay
 		den = c * A_tot * std::log(1.0 - alpha_m);
 		T60[b] = -num / den;
 	}
