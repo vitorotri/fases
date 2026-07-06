@@ -303,26 +303,65 @@ int main(int argc, char *argv[]){
     
     size_t n_air = count_air_voxels(S, (size_t)Nx*Ny*Nz);
 	float V = n_air * h*h*h; // effective air volume of domain
+	
+	// ------------------------------------- atmospheric values ------------------------------------------------
+	
+	// should to to config later
+	
+	float R_spec = 287.05; // specific gas constant for air [J] [kg]^-1 [K]^-1
+	float gamma = 1.4; // specific heat ratio for air
+	float alti = (conf_arr.size() > 13) ? conf_arr[13] : 0.0f; // altitude [m]; 0 if absent (older configs)
+	
+	rho = 1.225; // average sea level density for air [kg/m3]. For dry air, proportional to p0/R_spec*T
+	Temp = conf_arr[3] + 273.15f; // temperature [K] = Celsius_temp + 273.15
+	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
+	// c = sqrt(K/rho) in case of liquids
+    
+     printf("\n[OK] Speed of sound c = %.2f m/s\n",c);
+    
+     // attenuation coefficients for sound pressure according to ISO 9613-1
+	std::vector<float> m_air(8);
+	float p_a = p_atm(alti,Temp);
+	float octave_bands[8] = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
+	float hh = 1.1; // average concentration of water vapour
+	for (int i = 0; i < 8; i++){
+		m_air[i] = alpha_air(p_a, hh, Temp, octave_bands[i]);
+	}
+    
+    // ---------------------------------- Estimated T60s and f_Schroeder ---------------------------------------
+    
+    // later for ISM parsing, must call here to estimate T60s and give user f_Schroeder, since it depends on c
+    // as well
+    auto Z = ism_load_impedances_layered(imp_dir, names, mat_dir); // names[0]="BoundingBox"; handles the +1
+    // compute estimated T60's
+	std::vector<float> T60(8, 0.5f);
+	estimate_T60s(T60, V, c, A_tot, A, Z, m_air);
+	// T60 at 500 Hz. Guard the rigid-room sentinel (estimate_T60s writes 1e9 for a
+	// near-zero-absorption band): a hard-walled 500 Hz band has no diffuse regime, so
+	// f_Schroeder runs to infinity -> emit 0.0f and let the GUI skip it (fS > 0 check).
+	float f_Schroeder = (T60[3] < 1e6f) ? 2000.0f * std::sqrt(T60[3] / V) : 0.0f;
 
-	// --estimate fast path: everything T60 needs is ready here (V from the SDF,
-	// A/A_tot from mesh_group_areas, alpha from .mat). Write Vol.bin / f_Schroeder.bin
-	// into the config dir for the GUI and stop before the heavy solver stages.
-	if (estimate_only){
-		float c_est = std::sqrt(1.4f * 287.05f * (conf_arr[3] + 273.15f)); // speed of sound from temp
-		auto Z_est = ism_load_impedances_layered(imp_dir, names, mat_dir);
-		std::vector<float> T60_est(8, 0.5f);
-		estimate_T60s(T60_est, V, c_est, A_tot, A, Z_est);
-		float f_Sch = 2000.0f * std::sqrt(T60_est[3] / V); // T60 at 500 Hz
-
+	// Single-value binaries in the config dir for the GUI Setup tab: Vol.bin drives
+	// the recommended ray count, f_Schroeder.bin the recommended cutoff frequency.
+	{
 		std::filesystem::path cdir = config_path.parent_path();
 		FILE* fVol = fopen((cdir / "Vol.bin").string().c_str(), "wb");
 		if (fVol){ fwrite(&V, sizeof(float), 1, fVol); fclose(fVol); }
 		FILE* fSch = fopen((cdir / "f_Schroeder.bin").string().c_str(), "wb");
-		if (fSch){ fwrite(&f_Sch, sizeof(float), 1, fSch); fclose(fSch); }
+		if (fSch){ fwrite(&f_Schroeder, sizeof(float), 1, fSch); fclose(fSch); }
 		FILE* fT60 = fopen((cdir / "T60.bin").string().c_str(), "wb"); // 8 octave bands
-		if (fT60){ fwrite(T60_est.data(), sizeof(float), 8, fT60); fclose(fT60); }
+		if (fT60){ fwrite(T60.data(), sizeof(float), 8, fT60); fclose(fT60); }
+		FILE* fA = fopen((cdir / "A_tot.bin").string().c_str(), "wb"); // total surface area [m^2]
+		if (fA){ fwrite(&A_tot, sizeof(float), 1, fA); fclose(fA); }
 
-		printf("\n[OK] estimate: V = %.3f m^3, f_Schroeder = %.2f Hz\n", V, f_Sch);
+	}
+	for (int b = 0; b < 8; b++) printf(" %.3f", T60[b]);
+	printf("\n");
+
+	// --estimate fast path: stop before the heavy solver stages.
+	
+	if (estimate_only){
+		printf("\n[OK] estimate: V = %.3f m^3, f_Schroeder = %.2f Hz\n", V, f_Schroeder);
 		free(S); free(oid); scene_free(&sc);
 		return 0;
 	}
@@ -494,45 +533,6 @@ int main(int argc, char *argv[]){
 	cudaMemset(phi_nu,   0, nB * K_m * sizeof(float));
 	cudaMemset(psi_1_nu, 0, nB * L_m * sizeof(float));
 	cudaMemset(psi_2_nu, 0, nB * L_m * sizeof(float));
-
-
-    // ------------------------------------- atmospheric values ------------------------------------------------
-	
-	// should to to config later
-	
-	float R_spec = 287.05; // specific gas constant for air [J] [kg]^-1 [K]^-1
-	float gamma = 1.4; // specific heat ratio for air
-	
-	rho = 1.225; // average sea level density for air [kg/m3]. For dry air, proportional to p0/R_spec*T
-	Temp = conf_arr[3] + 273.15f; // temperature [K] = Celsius_temp + 273.15
-	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
-	// c = sqrt(K/rho) in case of liquids
-    
-    // later for ISM parsing, must call here to estimate T60s and give user f_Schroeder, since it depends on c
-    // as well
-    ISMConfig cfg;
-	cfg.frame = ISMFrame::OBJECT_SPACE; // apply (p+shift)*scale to src/rec, identical to the walls
-    auto Z = ism_load_impedances_layered(imp_dir, names, mat_dir); // names[0]="BoundingBox"; handles the +1
-    // compute estimated T60's
-	std::vector<float> T60(8, 0.5f);
-	estimate_T60s(T60, V, c, A_tot, A, Z);
-	printf("\n[OK] estimated T60 per band [s]:");
-	float f_Schroeder = 2000.0 * std::sqrt(T60[3] / V); // T60 at 500 Hz
-	printf("\n[OK]f_Schroeder = %f\n", f_Schroeder);
-
-	// Single-value binaries in the config dir for the GUI Setup tab: Vol.bin drives
-	// the recommended ray count, f_Schroeder.bin the recommended cutoff frequency.
-	{
-		std::filesystem::path cdir = config_path.parent_path();
-		FILE* fVol = fopen((cdir / "Vol.bin").string().c_str(), "wb");
-		if (fVol){ fwrite(&V, sizeof(float), 1, fVol); fclose(fVol); }
-		FILE* fSch = fopen((cdir / "f_Schroeder.bin").string().c_str(), "wb");
-		if (fSch){ fwrite(&f_Schroeder, sizeof(float), 1, fSch); fclose(fSch); }
-	}
-	for (int b = 0; b < 8; b++) printf(" %.3f", T60[b]);
-	printf("\n");
-    
-    printf("\n	c = %.2f m/s\n",c);
     
     // ---------------------------------------------------------------------------------------------------------
 
@@ -967,6 +967,8 @@ int main(int argc, char *argv[]){
     // --------------------------------------------- ISM Section -----------------------------------------------
 	
 	// ISM max reflection order: config.txt line 13 (conf_arr[12]); 3 if absent
+	ISMConfig cfg;
+	cfg.frame = ISMFrame::OBJECT_SPACE; // apply (p+shift)*scale to src/rec, identical to the walls
 	int max_order = (conf_arr.size() > 12) ? (int)conf_arr[12] : 3;
 	if (max_order < 0) max_order = 0;
 	printf("\n[OK] ISM max_order = %d\n", max_order);
@@ -978,11 +980,10 @@ int main(int argc, char *argv[]){
 
 	scene_free(&sc); // free scene here: ism_solve and rt_build are its last users
 
-	float alti = (conf_arr.size() > 13) ? conf_arr[13] : 0.0f; // altitude [m]; 0 if absent (older configs)
+	
 	
 	// determine number of valid bands for ISM (easier array allocation later on)
 	int N_bands = 8; // number of bands for ISM, start with total
-	float octave_bands[8] = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
 	for (int i = 0; i < 8; i++){
 		if (f_cutoff <= octave_bands[i]){
 			N_bands -= i;
@@ -994,14 +995,6 @@ int main(int argc, char *argv[]){
 	dt = 1.0/fs; // new time-step size
 	Nt = (int)(t_max/dt); // new number of samples
 	int Nw = 1024; // Hann window size for fractional delay
-	
-	// attenuation coefficients for sound pressure according to ISO 9613-1
-	std::vector<float> m_air(8);
-	float p_a = p_atm(alti,Temp);
-	float hh = 1.1; // average concentration of water vapour
-	for (int i = 0; i < 8; i++){
-		m_air[i] = alpha_air(p_a, hh, Temp, octave_bands[i]);
-	}
 	
 	// ----- ray-traced late reverberant tail (continues the ISM past max_order) -----
 	// Flat absorption table for the BVH tracer: alpha_gb[gid*8 + band]. Z is indexed
@@ -1039,7 +1032,6 @@ int main(int argc, char *argv[]){
 				if (nn < 0 || nn >= (int)Nt) continue;
 				float xx = nn - tau;
 				p_ism[flat(nn,rr,Nt)] += g * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
-				//p_ism[flat(nn,rr,Nt)] *= std::exp(-m_air[b] * dist); // attenuation of air at 500 Hz (test)
 			}
 		};
 
@@ -1056,10 +1048,11 @@ int main(int argc, char *argv[]){
         			int t_0 = (int)tau_0;
         			if (t_0 < Nt){
         				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0);
+        				gS_0 *= std::exp(-m_air[b]*d_0);
         				// no fractional delay
-            			p_ism[flat(t_0, r, Nt)] += gS_0;
+            			//p_ism[flat(t_0, r, Nt)] += gS_0;
             			// fractional delay
-            			//deposit(tau_0, gS_0, r, d_0);
+            			deposit(tau_0, gS_0, r, d_0);
             			if (t_0 > t_cross) t_cross = t_0;
             			arrivals.push_back(t_0);
         			}
@@ -1086,10 +1079,11 @@ int main(int argc, char *argv[]){
 					// parser's heuristics)
 
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
+					gS *= std::exp(-m_air[b]*d);
 					// no fractionl delay
-					p_ism[flat(t,r,Nt)] += gS;
+					//p_ism[flat(t,r,Nt)] += gS;
 					// fractional delay
-					//deposit(tau, gS, r, d);
+					deposit(tau, gS, r, d);
 				}
 			}
 			
@@ -1110,8 +1104,9 @@ int main(int argc, char *argv[]){
 			for (int t = t_cross + 1; t < (int)Nt; t++){
 				float p_e = p_rt[((size_t)b*Q.Nr + r)*Nt + t];
 				if (p_e == 0.0f) continue;
-				//p_ism[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * std::sqrt(p_e*p_e);
-				p_ism[flat(t, r, Nt)] += std::sqrt(p_e*p_e);
+				p_ism[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) *
+										std::sqrt(p_e*p_e);
+				//p_ism[flat(t, r, Nt)] += std::sqrt(p_e*p_e); // to validate against shoebox ISM
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
