@@ -3319,7 +3319,7 @@ class MainWindow(QMainWindow):
         # Estimate pass: runs the solver with --estimate (parse + V + T60, no FDTD)
         # and fills the recommended Cutoff frequency / Number of rays below. Do this
         # first, after setting grid spacing + temperature.
-        self._btn_estimate = QPushButton("📐︎  Estimate  (V, T60)")
+        self._btn_estimate = QPushButton("≈\uFE0E  Estimate values")
         self._btn_estimate.clicked.connect(self._estimate_room)
         lay.addRow(self._btn_estimate)
 
@@ -3974,20 +3974,27 @@ class MainWindow(QMainWindow):
                    solve for N at a target <k>. Ref: M. Vorlander, "Auralization"
                    (Springer, 2008); H. Kuttruff, "Room Acoustics".
 
-        ISM max order (NOT set here) would follow the mean-free-path relation:
-        mfp = 4V/S [Kuttruff]; mean time between reflections = mfp/c; so the order
-        reaching a transition time t is order ~ c*t/mfp = c*t*S/(4V). For t one may
-        use the mixing time t_mix ~ sqrt(V) [ms] -- Polack's rule of thumb
-        (J.-D. Polack, "Playing billiards in the concert hall: the mathematical
-        foundations of geometrical room acoustics," Applied Acoustics 38 (1993)
-        235-244; orig. these de doctorat, Univ. du Maine, 1988) -- or, more
-        self-consistently, the Poisson echo-density crossover t_cross that main3D
-        already computes for the ISM->RT handoff.
+        ISM order: mean-free-path relation. mfp = 4V/S [Kuttruff]; mean time between
+                   reflections = mfp/c; so the order reaching a transition time t is
+                   order ~ c*t/mfp = c*t*S/(4V). t is the mixing time t_mix ~
+                   POLACK_MS*sqrt(V) [ms] -- Polack's rule (J.-D. Polack, "Using Matching
+                   Pursuit for estimating mixing time within Room Impulse Responses," 2009).
+                   Clamped to [1,8]; the ISM solver also clamps deep trees at runtime,
+                   so an over-estimate is safe.
         """
         if not self._proj_root:
             return
         cdir = os.path.join(self._proj_root, "config")
         c = math.sqrt(1.4 * 287.05 * (self._cfg["T_C"].value() + 273.15))  # speed of sound
+
+        # total surface area (for the ISM max-order estimate below); None if absent
+        A_tot = None
+        a_path = os.path.join(cdir, "A_tot.bin")
+        if os.path.isfile(a_path):
+            try:
+                A_tot = float(np.fromfile(a_path, dtype=np.float32, count=1)[0])
+            except Exception:
+                A_tot = None
 
         # f_Schroeder -> recommended cutoff frequency AND grid spacing h
         fs_path = os.path.join(cdir, "f_Schroeder.bin")
@@ -4023,10 +4030,22 @@ class MainWindow(QMainWindow):
                     k  = 1.0                          # target detections per sample bin
                     N  = k * V * fs / (c * math.pi * R * R)
                     self._nrays.setValue(int(max(1000, min(N, 50_000_000))))
+
+                    # ISM max order from the mean-free-path relation with Polack's
+                    # sqrt(V) mixing time: mfp = 4V/A_tot [Kuttruff], order to reach
+                    # t_mix is c*t_mix/mfp, t_mix = POLACK_MS*sqrt(V) [ms]. Clamp to the
+                    # spin range; the ISM solver also clamps deep trees at runtime.
+                    if A_tot and A_tot > 0.0:
+                        POLACK_MS = 1.0                    # t_mix[ms] = POLACK_MS*sqrt(V); tune to your ref
+                        mfp   = 4.0 * V / A_tot
+                        t_mix = POLACK_MS * math.sqrt(V) / 1000.0   # ms -> s
+                        order = int(max(1, min(8, round(c * t_mix / mfp))))
+                        self._ism_order.setValue(order)
+
                     self._sb.showMessage(
                         f"Recommended: f_cut={self._cfg['f_cutoff'].value():.0f} Hz, "
                         f"h={self._cfg['h'].value():.3g} m, t_max={self._cfg['t_max'].value():.3g} s, "
-                        f"rays={self._nrays.value()}  (V={V:.1f} m³)")
+                        f"rays={self._nrays.value()}, ISM order={self._ism_order.value()}  (V={V:.1f} m³)")
             except Exception:
                 pass
 
