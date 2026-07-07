@@ -8,14 +8,7 @@
 /*
 raytrace3D.h
 ------------
-Acoustical ray-tracer, adapted from raytracer.c (light path tracer). Same syntax:
-the `ray` struct (ox/oy/oz origin, dx/dy/dz unit direction), compute_reflected(),
-and the recursive_trace() bounce loop shape. Two differences from the light tracer:
-
-  1. Primitive is a PLANAR FACET (OBJ triangle), not a sphere. Intersection reuses
-     ray_triangle_intersect() from parsing3D.h -- no sphere quadratic.
-  2. A BVH over the triangle soup makes it survive highly-patched OBJ scenes
-     (O(log n) per bounce instead of O(n)).
+Acoustical ray-tracer.
 
 Rays leave the source on a Fibonacci-sphere pattern (near-uniform angular spread).
 This is the DIFFUSE LATE TAIL that continues the ISM past its max reflection order.
@@ -258,7 +251,7 @@ inline static float rt_point_seg_dist2(const vec3& q, const vec3& p0, const vec3
 
 // ============================================================
 // Late diffuse tail: shoot Fibonacci rays from each source, bounce specularly
-// (raytracer.c::recursive_trace shape), and whenever a ray segment passes within
+// so no recursion is needed, and whenever a ray segment passes within
 // recv_radius of a receiver ACCUMULATE ENERGY -- the square of the ISM-style per-ray
 // pressure  p_ray[b] = ps * PROD sqrt(1-alpha_b) * air / (4*pi*d_run).
 // Energy adds incoherently (random phase), which is the correct diffuse-field model;
