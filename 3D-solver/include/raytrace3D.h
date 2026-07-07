@@ -1,10 +1,6 @@
 #pragma once
 /*
  * Copyright (c) 2025 Vito Romanelli Tricanico
- *
- * SPDX-License-Identifier: BSD-2-Clause (see License)
- */
-
 /*
 raytrace3D.h
 ------------
