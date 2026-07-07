@@ -74,19 +74,6 @@ inline static void rt_compute_reflected(vec3& ref, const vec3& inc, const vec3& 
     if(l > 1e-20f) ref = mul3(ref, 1.f/l);
 }
 
-// Oblique-incidence pressure reflection coefficient for a locally-reacting surface,
-// from the normal-incidence absorption alpha -- same form as the ISM's R_oblique, but
-// taking cos_theta = |d . N| directly (no acos/cos round-trip). Normal incidence
-// (ct=1) -> sqrt(1-alpha); grazing (ct->0) -> -1 (total reflection). The sign (phase
-// flip near grazing) is discarded by the energy model; we use the magnitude.
-inline static float rt_R_oblique(float alpha, float cos_theta){
-    const float R = std::sqrt(std::max(0.f, 1.f - alpha));
-    if(R > 0.99999f) return R;                  // near-rigid safeguard (xi -> inf)
-    const float xi = (1.f + R) / (1.f - R);
-    const float x  = xi * cos_theta;
-    return (x - 1.f) / (x + 1.f);
-}
-
 // cheap integer hash -> pseudo-random sign, so the diffuse tail is incoherent
 // noise (deterministic, reproducible). Swap for a real Poisson process if the
 // tail statistics ever need to be exact.
@@ -295,8 +282,8 @@ inline static void rt_trace_late(const RTScene& S,
                                  const float* m_air,      // [8] PRESSURE air-attenuation coeff (Np/m, already halved); nullptr => none
                                  float c, float fs, int Nt,
                                  int Nrays, int max_order, float recv_radius,
-                                 std::vector<float>& p_rt)
-{
+                                 std::vector<float>& p_rt){
+                                 
     const int Ns=(int)(src_arr.size()/3), Nr=(int)(rec_arr.size()/3);
     p_rt.assign((size_t)RT_NBANDS*(size_t)Nr*(size_t)Nt, 0.f);
     if(Ns==0 || Nr==0 || Nrays<=0 || S.nodes.empty()) return;
@@ -387,7 +374,7 @@ inline static void rt_trace_late(const RTScene& S,
                 for(int b=0;b<RT_NBANDS;++b){
                     float al = (alpha_gb && gid>=0 && gid<S.ngroups) ? alpha_gb[(size_t)gid*RT_NBANDS+b] : 0.f;
                     al = std::max(0.f, std::min(0.999f, al));
-                    Rp[b] *= std::fabs(rt_R_oblique(al, ct));
+                    Rp[b] *= std::fabs(R_oblique(al, ct));
                     alive = std::max(alive, Rp[b]);
                 }
                 if(alive < Rp_min) break;

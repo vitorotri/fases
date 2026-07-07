@@ -1150,4 +1150,12 @@ inline static void scene_free(Scene3D* sc){
     sc->scale = 1.f;
 }
 
+// bolique incidence reflection coefficient for a locally reacting surface
+__host__ float R_oblique(float alpha, float cos_theta){
+	float R = sqrtf(1.0 - alpha);
+	if (R > 0.99999) return R; // near-rigid safeguard: xi -> inf
+	float xi = (1.0 + R) / (1.0 - R);
+	return (xi*cos_theta - 1.0) / (xi*cos_theta + 1.0);
+}
+
 #undef HD

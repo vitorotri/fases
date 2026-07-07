@@ -1104,7 +1104,7 @@ int main(int argc, char *argv[]){
 					for(int k = 0; k < iS.angle_rad.size(); k++){
 						float theta = iS.angle_rad[k];
 						//float theta = 0.0; // (test for normal incidence, shoebox comparison)
-						float R = R_oblique(iS.alpha[k][b], theta);
+						float R = R_oblique(iS.alpha[k][b], std::cos(theta));
 						P *= R;
 					}
 					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
