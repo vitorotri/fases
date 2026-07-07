@@ -288,19 +288,20 @@ inline static void rt_trace_late(const RTScene& S,
     const float Rp_min = 1e-4f;            // pressure-reflection floor: kill dead rays
     const float RT_4PI = 12.566370614359172f;
 
-    for(int s=0;s<Ns;++s){
+	// for each sources
+    for(int s = 0; s < Ns; s++){
         const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]);
         const float ps = (s<(int)src_pressure.size()) ? src_pressure[(size_t)s] : 1.f;
 
         #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic)
         #endif
-        for(int ri=0; ri<Nrays; ++ri){
-            ray3 r = rt_fib_ray(o0, ri, Nrays);
-            float Rp[RT_NBANDS]; for(int b=0;b<RT_NBANDS;++b) Rp[b]=1.f; // PROD sqrt(1-alpha_b)
-            float d_travel = 0.f;            // path length travelled so far [m]
+        for(int ri = 0; ri < Nrays; ri++){			// breadth: independent samples
+            ray3 r = rt_fib_ray(o0, ri, Nrays);		// depth: one linear path, in place
+            float Rp[RT_NBANDS]; for(int b = 0; b < RT_NBANDS; b++) Rp[b]=1.f; // PROD sqrt(1-alpha_b)
+            float d_travel = 0.f;            		// path length travelled so far [m]
 
-            for(int bounce=0; bounce<=max_order; ++bounce){
+            for(int bounce = 0; bounce <= max_order; bounce++){
                 float th; int tri;
                 const bool hit = rt_closest_hit(S, r, 1e-4f, th, tri);
                 // segment end: hit point, or a far point if the ray escapes
@@ -323,16 +324,16 @@ inline static void rt_trace_late(const RTScene& S,
                 //
                 // The per-ray (single-arrival) pressure is
                 //     p_ray[b] = ps * PROD sqrt(1-alpha_b) * air / (4 pi d_run).
-                for(int rr=0; rr<Nr; ++rr){
+                for(int rr = 0; rr < Nr; rr++){
                     float s_ca;
                     if(rt_point_seg_dist2(rec[(size_t)rr], o, p1, s_ca) <= R2){
                         const float d_run = d_travel + s_ca; // total path to the receiver (incl. partial last hop)
                         const float tt = d_run/c;
                         if(tt < t_end && d_run > 1e-4f){
                             const int n0 = (int)(tt*fs);
-                            if(n0>=0 && n0<Nt){
+                            if(n0 >= 0 && n0 < Nt){
                                 const float spread = 1.f/(RT_4PI*d_run);
-                                for(int b=0;b<RT_NBANDS;++b){
+                                for(int b = 0;b < RT_NBANDS; b++){
                                     float* cell = &p_rt[((size_t)b*Nr + rr)*Nt + n0];
                                     // air absorption over the FULL path to the receiver (d_run,
                                     // not d_travel); m_air is the pressure (half-energy) coeff.
@@ -360,7 +361,7 @@ inline static void rt_trace_late(const RTScene& S,
                 const vec3 N = rt_tri_normal(S, tri);
                 const float ct = std::fabs(dot3(d, N));   // cos of the incidence angle
                 float alive=0.f;
-                for(int b=0;b<RT_NBANDS;++b){
+                for(int b = 0;b < RT_NBANDS; b++){
                     float al = (alpha_gb && gid>=0 && gid<S.ngroups) ? alpha_gb[(size_t)gid*RT_NBANDS+b] : 0.f;
                     al = std::max(0.f, std::min(0.999f, al));
                     Rp[b] *= std::fabs(R_oblique(al, ct));
@@ -387,9 +388,9 @@ inline static void rt_trace_late(const RTScene& S,
     // random-phase level -- not K*a. Nrays only controls tail smoothness.
     const double Rr = (double)recv_radius*(double)recv_radius;
     if(Rr > 0.0){
-        for(int b=0;b<RT_NBANDS;++b)
-         for(int rr=0;rr<Nr;++rr)
-          for(int t=1;t<Nt;++t){
+        for(int b = 0;b < RT_NBANDS; b++)
+         for(int rr = 0; rr < Nr; rr++)
+          for(int t = 1; t < Nt; t++){
               const double d = (double)c*(double)t/(double)fs;         // exact path length for bin t
               const double n_path = (double)Nrays*Rr/(4.0*d*d);        // rays representing one path
               const size_t idx = ((size_t)b*Nr+rr)*Nt+t;
@@ -424,12 +425,12 @@ inline static void rt_dump_paths(const RTScene& S, const std::vector<vec3>& srcs
     const float stub = 0.25f * std::sqrt(norm2_3(sub3(bmx, bmn)));  // escaped-ray stub length
 
     int uid = 0;   // globally-unique ray id across all sources
-    for(size_t si=0; si<srcs.size(); ++si){
+    for(size_t si = 0; si < srcs.size(); si++){
         const vec3 o0 = to_solver(srcs[si]);
-        for(int ri=0; ri<Nrays; ++ri, ++uid){
+        for(int ri = 0; ri < Nrays; ri++, uid++){
             ray3 r = rt_fib_ray(o0, ri, Nrays);
             vec3 o = v3(r.ox, r.oy, r.oz);
-            for(int b=0; b<max_order; ++b){
+            for(int b = 0; b < max_order; b++){
                 const vec3 d = v3(r.dx, r.dy, r.dz);
                 float th; int tri;
                 const bool hit = rt_closest_hit(S, r, 1e-4f, th, tri);
