@@ -42,7 +42,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QDoubleSpinBox, QSpinBox, QAbstractSpinBox,
     QGroupBox, QScrollArea, QAbstractItemView, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QStatusBar, QSlider, QMenu, QProgressBar, QDialog
+    QStatusBar, QSlider, QMenu, QProgressBar, QDialog,
+    QStyledItemDelegate, QStyle
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
@@ -2003,6 +2004,23 @@ class MaterialRefPreview(QWidget):
         p.end()
 
 
+class _CellDelegate(QStyledItemDelegate):
+    """Per-column tweaks: `no_select` paints the cell as if never selected (so a
+    row-selection highlight skips it); `center` centre-aligns the text."""
+    def __init__(self, parent=None, no_select=False, center=False):
+        super().__init__(parent)
+        self._no_select = no_select
+        self._center = center
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if self._center:
+            option.displayAlignment = Qt.AlignmentFlag.AlignCenter
+    def paint(self, painter, option, index):
+        if self._no_select:
+            option.state &= ~QStyle.StateFlag.State_Selected
+        super().paint(painter, option, index)
+
+
 class MaterialPanel(QWidget):
     """
     Single panel for ALL material layers:
@@ -2020,6 +2038,7 @@ class MaterialPanel(QWidget):
         super().__init__(parent)
         self._mat_dir = None       # input/mat directory
         self._fit_dir = None       # input/fit directory
+        self._sctr_dir = None      # input/sctr directory (single scattering coeff per material)
         self._proj_root = None
         from PySide6.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
@@ -2033,30 +2052,41 @@ class MaterialPanel(QWidget):
         lay.addWidget(self._curve)
 
         # ── table ──
-        cols = ["Layer"] + [str(b) for b in OCTAVE_BANDS]
+        cols = ["Layer"] + [str(b) for b in OCTAVE_BANDS] + ["Scatter"]
         self._tbl = QTableWidget(0, len(cols))
         self._tbl.setHorizontalHeaderLabels(cols)
         for c, b in enumerate(OCTAVE_BANDS, start=1):   # unit on hover
             it = self._tbl.horizontalHeaderItem(c)
             if it is not None:
                 it.setToolTip(f"{b} Hz")
+        _sit = self._tbl.horizontalHeaderItem(len(OCTAVE_BANDS) + 1)   # trailing Scatter column
+        if _sit is not None:
+            _sit.setToolTip("single scattering coefficient (0..1) — expanded per octave band by convention in the solver")
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         hh = self._tbl.horizontalHeader()
-        # The Scene-tab panel is a fixed 480 px (~458 px usable), so eight
-        # "8000 Hz" labels cannot all fit and would force a horizontal scrollbar.
-        # We show the band centre frequency as the number only (unit is in the
-        # column-group label above and on each header's hover tooltip); every
-        # number then renders in full with NO scrollbar. The Layer column is
-        # fixed and narrow — long names elide to "…" with the full name on hover
-        # — so the frequency columns share all the remaining width evenly.
+        # The left panel is widened to 540 px to fit the extra Scatter column. The
+        # band centre frequency shows as the number only (unit in the header tooltip),
+        # so eight numbers render in full. Layer is fixed+narrow (names elide with the
+        # full name on hover); the 8 band columns stretch to share the middle; and the
+        # Scatter column is fixed wide enough to read the word + value. No scrollbar as
+        # long as usable width >= 90 + 8*44 + Scatter (~500 px).
         self._tbl.setTextElideMode(Qt.TextElideMode.ElideRight)
         hh.setMinimumSectionSize(44)        # fits the widest band number ("8000")
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        for c in range(1, len(cols)):
+        for c in range(1, len(OCTAVE_BANDS) + 1):   # band columns stretch to share the width
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+        sctr_c = len(OCTAVE_BANDS) + 1              # Scatter: fixed, just wide enough
+        hh.setSectionResizeMode(sctr_c, QHeaderView.ResizeMode.Fixed)
+        hh.resizeSection(sctr_c, 50)
         hh.resizeSection(0, 90)
+        # Layer + Scatter skip the row-selection highlight; the alpha and Scatter
+        # numbers are centred (Layer name stays left-aligned).
+        self._tbl.setItemDelegateForColumn(0, _CellDelegate(self._tbl, no_select=True))
+        for c in range(1, len(OCTAVE_BANDS) + 1):
+            self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True))
+        self._tbl.setItemDelegateForColumn(sctr_c, _CellDelegate(self._tbl, no_select=True, center=True))
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
@@ -2077,11 +2107,9 @@ class MaterialPanel(QWidget):
         self._tbl.setMinimumHeight(140)   # table fills remaining space
         lay.addWidget(self._tbl, 1)
 
-        # ── buttons ──
-        row = QHBoxLayout()
+        # ── save-all button (placed on the hard/soft row below) ──
         self._save_btn = QPushButton("🖫\uFE0E  Save all .mat")
         self._save_btn.clicked.connect(self.save_all)
-        row.addWidget(self._save_btn)
         # The fitting buttons moved to the Run tab ("Fit impedances"); the button
         # objects are kept (hidden, not added to any layout) because run_fit_all /
         # run_fit_selected / _on_fit_all_done enable/disable them as busy flags.
@@ -2089,14 +2117,9 @@ class MaterialPanel(QWidget):
         self._fit_btn.clicked.connect(self.run_fit_selected)
         self._fit_all_btn = QPushButton("⚙  Fit all");  self._fit_all_btn.setVisible(False)
         self._fit_all_btn.clicked.connect(self.run_fit_all)
-        lay.addLayout(row)
 
-        # ── hard/soft toggle for the SELECTED layer (kept off the table so the
-        #    column layout stays untouched). 9th value of the .mat: 0/1. ──
+        # ── hard/soft toggle for the selected layer + Save all .mat, one row ──
         hs = QHBoxLayout()
-        hs_lbl = QLabel("Selected material:")
-        hs_lbl.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
-        hs.addWidget(hs_lbl)
         self._soft_btn = ToggleSwitch()          # small on/off slider switch
         self._soft_btn.toggled.connect(self._on_soft_toggled)
         hs.addWidget(self._soft_btn)
@@ -2104,6 +2127,7 @@ class MaterialPanel(QWidget):
         self._soft_lbl.setStyleSheet(f"color:{PAL['text']};font-size:11px;")
         hs.addWidget(self._soft_lbl)
         hs.addStretch(1)
+        hs.addWidget(self._save_btn)             # Save all .mat, right of the toggle
         lay.addLayout(hs)
 
         self._status = QLabel("")
@@ -2324,6 +2348,7 @@ class MaterialPanel(QWidget):
         if proj_root:
             self._mat_dir = os.path.join(proj_root, "input", "mat")
             self._fit_dir = os.path.join(proj_root, "input", "fit")
+            self._sctr_dir = os.path.join(proj_root, "input", "sctr")
 
     def populate(self, layer_names):
         """Fill table rows from layer names, loading existing .mat values."""
@@ -2340,6 +2365,8 @@ class MaterialPanel(QWidget):
             self._tbl.setItem(r, 0, name_item)
             for c, v in enumerate(vals):
                 self._tbl.setItem(r, c+1, QTableWidgetItem(f"{v:.2f}"))
+            self._tbl.setItem(r, len(OCTAVE_BANDS)+1,
+                              QTableWidgetItem(f"{self._load_sctr_value(name):.2f}"))  # Scatter col
             self._set_row_soft(r, soft)   # after the cells exist
         self._tbl.blockSignals(False)
         self._clear_plot()
@@ -2403,6 +2430,41 @@ class MaterialPanel(QWidget):
                     pass
         soft = self._read_all_soft().get(name, False)
         return vals, soft
+
+    # ── scattering (single coeff per material, sibling to .mat) ──
+    # Kept in its OWN input/sctr/<name>.sctr file (one value) so the .mat files stay
+    # exactly 8 alphas and ism_load_impedances keeps working untouched. The solver
+    # expands this single number to a per-octave-band curve by convention.
+    def _load_sctr_value(self, name):
+        d = self._sctr_dir
+        if d:
+            p = os.path.join(d, name + ".sctr")
+            if os.path.isfile(p):
+                try:
+                    with open(p) as f:
+                        for line in f:
+                            line = line.split("#")[0].strip()
+                            if line:
+                                return min(1.0, max(0.0, float(line.split()[0])))
+                except Exception:
+                    pass
+        return 0.01   # default scattering when none saved yet
+
+    def _sctr_value(self, r):
+        item = self._tbl.item(r, len(OCTAVE_BANDS) + 1)
+        try:
+            return min(1.0, max(0.0, float(item.text()))) if item else 0.01
+        except ValueError:
+            return 0.01
+
+    def _write_sctr(self, name, r):
+        d = self._sctr_dir
+        if not d:
+            return
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name + ".sctr"), "w") as f:
+            f.write("# single scattering coefficient (0..1); expanded per octave band in the solver\n")
+            f.write(f"{self._sctr_value(r):.4f}\n")
 
     # ── selection → plot ──
     def _current_row(self):
@@ -2524,6 +2586,7 @@ class MaterialPanel(QWidget):
         with open(p, "w") as f:
             f.write(f"# alpha per octave band: {OCTAVE_BANDS}\n")
             f.write("  ".join(f"{v:.4f}" for v in vals) + "\n")
+        self._write_sctr(name, r)   # single scattering coeff -> input/sctr/<name>.sctr
         self._write_all_soft()      # hard/soft registry lives in ALL.mat
         self._status.setText(f"Saved → {name}.mat")
 
@@ -2546,6 +2609,7 @@ class MaterialPanel(QWidget):
             with open(p, "w") as f:
                 f.write(f"# alpha per octave band: {OCTAVE_BANDS}\n")
                 f.write("  ".join(f"{v:.4f}" for v in vals) + "\n")
+            self._write_sctr(name, r)   # single scattering coeff -> input/sctr/<name>.sctr
             n += 1
         self._write_all_soft()      # one central hard/soft registry
         self._status.setText(f"Saved {n} material file(s) → {self._mat_dir}")
@@ -2712,6 +2776,8 @@ class PointTable(QWidget):
         for c in range(1, len(cols)):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
         self._tbl.setColumnWidth(0, 90)
+        for c in range(self._coff, len(cols)):   # centre the numeric columns (Name stays left)
+            self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True))
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # Cells are edited ONLY by a deliberate double-click (or clicking an
         # already-selected cell). Keyboard triggers are excluded so stray
@@ -3123,7 +3189,7 @@ class MainWindow(QMainWindow):
         self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
         # Fixed-width panel: not user-resizable (no splitter handle to drag) and
         # its width never changes on maximize, so the tabs always fill it exactly.
-        self._tabs.setFixedWidth(480)
+        self._tabs.setFixedWidth(540)   # widened to fit the Material tab's Scatter column
         # Layout order: panel (fixed) on the left, GL viewport (stretches) right.
         root_lay.addWidget(self._tabs)                 # left, fixed width
         root_lay.addWidget(gl_wrap, stretch=1)         # right, takes the rest
@@ -3392,7 +3458,10 @@ class MainWindow(QMainWindow):
         # first, after setting grid spacing + temperature.
         self._btn_estimate = QPushButton("≈\uFE0E  Estimate values")
         self._btn_estimate.clicked.connect(self._estimate_room)
-        lay.addRow(self._btn_estimate)
+        _eb = QHBoxLayout()                       # keep the button its natural width,
+        _eb.addWidget(self._btn_estimate)         # left-aligned (text + padding), not
+        _eb.addStretch(1)                         # stretched across the whole row
+        lay.addRow(_eb)
 
 
         self._cfg = {}
@@ -3438,9 +3507,11 @@ class MainWindow(QMainWindow):
             self._pml[k] = chk; grid.addWidget(chk, idx//3, idx%3)
         lay.addRow(grid)
 
-        for lbl, fn in [("🖫\uFE0E  Save config.txt", self._save_config),
-                        ("🗁\uFE0E  Load config.txt", self._load_config)]:
-            b = QPushButton(lbl); b.clicked.connect(fn); lay.addRow(b)
+        cfg_btns = QHBoxLayout()
+        b_load = QPushButton("🗁\uFE0E  Load config.txt"); b_load.clicked.connect(self._load_config)
+        b_save = QPushButton("🖫\uFE0E  Save config.txt"); b_save.clicked.connect(self._save_config)
+        cfg_btns.addWidget(b_load); cfg_btns.addWidget(b_save)   # Load left, Save right
+        lay.addRow(cfg_btns)
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setWidget(inner)
@@ -3469,7 +3540,7 @@ class MainWindow(QMainWindow):
 
     def _build_rec_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8)
-        info = QLabel("Press E (or the toolbar button) to enter placement mode.\n"
+        info = QLabel("Press R (or the toolbar button) to enter placement mode.\n"
                       "Drag LMB to position; hold X/Y/Z to lock an axis; release to place. Esc to finish.")
         info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         info.setWordWrap(True); lay.addWidget(info)
@@ -3536,7 +3607,7 @@ class MainWindow(QMainWindow):
         # ── output log ── keep it in the lower ~half so the wall of solver messages
         # (useful for debugging, but noisy) doesn't dominate the tab.
         lay.addStretch(1)
-        lay.addWidget(QLabel("Output:"))
+        lay.addWidget(QLabel("Output log:"))
         self._log = QTextEdit(); self._log.setReadOnly(True)
         self._log.setFont(QFont("Monospace", 10))
         self._log.setStyleSheet(
@@ -4211,8 +4282,8 @@ class MainWindow(QMainWindow):
     def _ensure_ray_table(self):
         if getattr(self, "_ray_dock", None) is not None:
             return
-        self._ray_tbl = QTableWidget(0, 5)
-        self._ray_tbl.setHorizontalHeaderLabels(["Src", "Ray", "Bounces", "Escaped", "Length (m)"])
+        self._ray_tbl = QTableWidget(0, 3)
+        self._ray_tbl.setHorizontalHeaderLabels(["Src", "Ray", "Length (m)"])
         self._ray_tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._ray_tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._ray_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -4231,15 +4302,11 @@ class MainWindow(QMainWindow):
         t.setRowCount(0)
         for rid in sorted(paths):
             segs = paths[rid]
-            bounces = sum(1 for _, _, o in segs if o >= 0)
-            escaped = any(o < 0 for _, _, o in segs)
             length = sum(math.dist(p0, p1) for p0, p1, o in segs if o >= 0)
             r = t.rowCount(); t.insertRow(r)
             t.setItem(r, 0, QTableWidgetItem(str(srcs.get(rid, 0))))
             t.setItem(r, 1, QTableWidgetItem(str(rid)))
-            t.setItem(r, 2, QTableWidgetItem(str(bounces)))
-            t.setItem(r, 3, QTableWidgetItem("yes" if escaped else ""))
-            t.setItem(r, 4, QTableWidgetItem(f"{length:.2f}"))
+            t.setItem(r, 2, QTableWidgetItem(f"{length:.2f}"))
         t.blockSignals(False)
         t.clearSelection()
         self._ray_dock.show(); self._ray_dock.raise_()
