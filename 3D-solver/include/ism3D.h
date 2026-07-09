@@ -617,6 +617,7 @@ struct ISMImagePath {
     std::vector<std::array<float, ISM_NBANDS>> Z_re;       // impedance (real) per surface, per band, 2c
     std::vector<std::array<float, ISM_NBANDS>> Z_im;       // impedance (imag) per surface, per band, 2c
     std::vector<std::array<float, ISM_NBANDS>> alpha;      // absorption per surface, per band (Allen-Berkley)
+    std::vector<int> group;                                // hit group_id per crossed surface (for scattering lookup)
     float amp = 1.f;                                       // curvature amplitude factor (1 unless curved)
 };
 
@@ -680,12 +681,14 @@ inline static ISMResult ism_solve(
                 ip.Z_re.reserve(p.reflections.size());
                 ip.Z_im.reserve(p.reflections.size());
                 ip.alpha.reserve(p.reflections.size());
+                ip.group.reserve(p.reflections.size());
                 for(const ISMReflection& rf : p.reflections){
                     ip.cos_inc.push_back(rf.cos_theta);
                     ip.angle_rad.push_back(rf.theta);
                     ip.Z_re.push_back(rf.Z_re);
                     ip.Z_im.push_back(rf.Z_im);
                     ip.alpha.push_back(rf.alpha);
+                    ip.group.push_back(rf.group_id);
                 }
                 R.images[key].push_back(std::move(ip));
             }

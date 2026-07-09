@@ -792,7 +792,7 @@ int main(int argc, char *argv[]){
 	}
 	
 	size_t anim_step = (int)(0.025*Nt);
-	if (anim_step == 0) anim_step = 1; // ponytail: Nt < 40 would make n % anim_step divide by zero
+	if (anim_step == 0) anim_step = 1; // Nt < 40 would make n % anim_step divide by zero (fix this)
 	size_t frames = Nt/anim_step; // make denominator smaller for more frames
 	printf("\n[OK] anim_step = %d\n\n",anim_step);
 	size_t anim_s = frames*N*sizeof(float); // animation size in bytess
@@ -1014,8 +1014,8 @@ int main(int argc, char *argv[]){
 	scene_free(&sc); // free scene here: ism_solve and rt_build are its last users
 
 	
-	// determine number of valid bands for ISM (easier array allocation later on)
-	int N_bands = 8; // number of bands for ISM, start with total
+	// determine number of valid bands for ISM / Ray-Tracing (easier array allocation later on)
+	int N_bands = 8; // number of bands for ISM / Ray-Tracing, start with total
 	for (int i = 0; i < 8; i++){
 		if (f_cutoff <= octave_bands[i]){
 			N_bands -= i;
@@ -1032,11 +1032,12 @@ int main(int argc, char *argv[]){
 	// Flat absorption table for the BVH tracer: alpha_gb[gid*8 + band]. Z is indexed
 	// by material == group_id (names[gid+1]), exactly like the .fit loop above.
 	std::vector<float> alpha_gb((size_t)rtS.ngroups * 8, 0.0f);
-	for (int g = 0; g < rtS.ngroups && g < (int)Z.size(); ++g)
-		for (int b = 0; b < 8; ++b)
+	for (int g = 0; g < rtS.ngroups && g < (int)Z.size(); g++){
+		for (int b = 0; b < 8; ++b){
 			alpha_gb[(size_t)g*8 + b] = Z[g].alpha[b];
+		}
+	}
 
-	// ponytail: calibration knobs (physical ray-tracing tuning, not just code size).
 	// recv_radius sets the detection-sphere size; too small starves the tail, too big
 	// smears it. Nrays trades tail smoothness for time. Raise both if the tail is noisy.
 	// ray count: user value from config.txt line 15 (conf_arr[14]) if present, else
@@ -1044,9 +1045,33 @@ int main(int argc, char *argv[]){
 	int   rt_nrays       = (conf_arr.size() > 14) ? std::max(1000, (int)conf_arr[14]) : 20000;
 	int   rt_max_order   = 200;      // energy floor kills most rays far sooner
 	float rt_recv_radius = 0.15f;     // [m] receiver radius (keep it 0.15)
-	std::vector<float> p_rt;         // [8 * Q.Nr * Nt] per-band RT pressure impulse responses
-	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(),
-	              c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, p_rt);
+	// per-group scattering: read the single value from input/sctr/<name>.sctr and expand
+	// to 8 octave bands (rt_scatter_bands). names[g+1] is material g (names[0]=BoundingBox).
+	std::filesystem::path sctr_dir = project_root / "input" / "sctr";
+	std::vector<float> sctr_gb((size_t)rtS.ngroups * 8, 0.0f);
+	for (int g = 0; g < rtS.ngroups; g++){
+		std::string mname = (g + 1 < (int)names.size()) ? names[g + 1] : std::string();
+		float gval = 0.01f;   // default scattering if no .sctr file
+		if (!mname.empty()){
+			std::ifstream sf((sctr_dir / (mname + ".sctr")).string());
+			std::string ln;
+			while (std::getline(sf, ln)){
+				size_t hp = ln.find('#'); if (hp != std::string::npos) ln.erase(hp);
+				std::istringstream is(ln); float v;
+				if (is >> v){
+					gval = v;
+					break;
+				}
+			}
+		}
+		float s8[8]; rt_scatter_bands(gval, s8);
+		for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = s8[b];
+	}
+
+	// RT late field: two ENERGY buffers (specular / diffuse), rooted per bin at deposit.
+	std::vector<float> e_spec, e_diff;
+	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(),
+	              c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, e_spec, e_diff);
 
 	// compute IRs
 	// for each band
@@ -1105,6 +1130,11 @@ int main(int argc, char *argv[]){
 						float theta = iS.angle_rad[k];
 						//float theta = 0.0; // (test for normal incidence, shoebox comparison)
 						float R = R_oblique(iS.alpha[k][b], std::cos(theta));
+						// scattered fraction leaves the specular path: keep sqrt(1-s) of the
+						// pressure (energy x (1-s)), matching the RT (1-s) split.
+						int gk = iS.group[k];
+						if (gk >= 0 && gk < rtS.ngroups)
+							R *= std::sqrt(std::max(0.0f, 1.0f - sctr_gb[(size_t)gk*8 + b]));
 						P *= R;
 					}
 					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
@@ -1127,17 +1157,21 @@ int main(int argc, char *argv[]){
 			for (int i = 0; i < (int)arrivals.size(); i++){
 				float ct = c * (arrivals[i] + 1) / fs;
 				float theo = Q.Ns * 4.0f * (float)M_PI * ct*ct*ct / (3.0f * V);
-				if (theo - (i + 1) > 2.0f * std::sqrt(theo)){ t_cross = arrivals[i]; break; }
+				if (theo - (i + 1) > 2.0f * std::sqrt(theo)){
+					t_cross = arrivals[i];
+					break;
+				}
 			}
 			
-			// ray-tracer (late reflections) enters below: p_rt holds ISM-style RT
-			// pressure per bin; deposit as incoherent noise (random sign) after the
-			// ISM crossover. e is already a pressure, so sqrt(e*e) == |e|.
-			for (int t = t_cross + 1; t < (int)Nt; t++){
-				float p_e = p_rt[((size_t)b*Q.Nr + r)*Nt + t];
-				if (p_e == 0.0f) continue;
-				p_hf[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * p_e;
-				//p_hf[flat(t, r, Nt)] += std::sqrt(p_e*p_e); // to validate against shoebox ISM
+			// ray-tracer late field. e_diff (scattered) enters at ALL times -- it is energy
+			// the specular ISM lacks; e_spec (specular) only AFTER the ISM crossover, to
+			// avoid duplicating the ISM early reflections. Sum the energies per bin, root
+			// -> pressure, deposit as incoherent noise (random phase / sign).
+			for (int t = 1; t < (int)Nt; t++){
+				double e = e_diff[((size_t)b*Q.Nr + r)*Nt + t];
+				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
+				if (e <= 0.0) continue;
+				p_hf[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * (float)std::sqrt(e);
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file

@@ -71,6 +71,43 @@ inline static float rt_sign(unsigned int s){
     return (s & 1u) ? 1.f : -1.f;
 }
 
+// Expand a single global scattering coefficient g in [0,1] into 8 octave-band values
+// (63..8000 Hz) by linear interpolation of an ODEON-style reference table. Every column
+// is monotonic in g and every row rises with frequency, so the interpolation reproduces
+// the reference exactly at the anchors and stays monotonic between them. g is a roughness
+// index (a selector), not "s at some frequency".
+inline static void rt_scatter_bands(float g, float s_out[RT_NBANDS]){
+    static const int NA = 10;
+    static const float ga[NA] = {0.01f,0.02f,0.05f,0.10f,0.20f,0.30f,0.50f,0.80f,0.90f,1.00f};
+    static const float tab[NA][RT_NBANDS] = {
+        {0.010f,0.010f,0.010f,0.015f,0.020f,0.035f,0.040f,0.040f},
+        {0.010f,0.010f,0.010f,0.015f,0.035f,0.080f,0.090f,0.100f},
+        {0.010f,0.010f,0.010f,0.025f,0.080f,0.200f,0.250f,0.300f},
+        {0.010f,0.010f,0.020f,0.050f,0.150f,0.260f,0.310f,0.350f},
+        {0.010f,0.010f,0.030f,0.110f,0.290f,0.370f,0.420f,0.460f},
+        {0.010f,0.020f,0.040f,0.190f,0.420f,0.490f,0.530f,0.570f},
+        {0.010f,0.030f,0.100f,0.380f,0.620f,0.740f,0.770f,0.800f},
+        {0.020f,0.050f,0.240f,0.710f,0.860f,0.880f,0.890f,0.900f},
+        {0.040f,0.110f,0.680f,0.860f,0.920f,0.930f,0.940f,0.950f},
+        {0.100f,0.370f,0.900f,1.000f,1.000f,1.000f,1.000f,1.000f},
+    };
+    if(g <= ga[0]){
+    	for(int b = 0; b < RT_NBANDS; b++){
+    		s_out[b] = tab[0][b];
+    		return;
+    	}
+    }
+    if(g >= ga[NA-1]){
+    	for(int b = 0; b < RT_NBANDS; b++){
+    		s_out[b] = tab[NA-1][b];
+    		return;
+    	}
+    }
+    int i = 0; while(i < NA-1 && g > ga[i+1]) ++i; // find i such that ga[i] <= g <= ga[i+1], used below
+    const float t = (g-ga[i])/(ga[i+1]-ga[i]); //  interpolation weight
+    for(int b = 0; b < RT_NBANDS; ++b) s_out[b] = tab[i][b] + t*(tab[i+1][b]-tab[i][b]); // blend the 2 rows
+}
+
 // Fibonacci-sphere direction i of N (near-uniform on the unit sphere), origin o.
 inline static ray3 rt_fib_ray(const vec3& o, int i, int N){
     const float ga = 2.399963229728653f;                 // golden angle, pi*(3-sqrt5)
@@ -258,24 +295,31 @@ inline static float rt_point_seg_dist2(const vec3& q, const vec3& p0, const vec3
 // per-sample random sign (rt_sign) for the audible tail. This is the standard
 // energy-echogram -> noise synthesis (Vorlander/Kuttruff/Moorer).
 //
-// p_rt is sized RT_NBANDS * Nr * Nt and indexed p_rt[(b*Nr + r)*Nt + sample].
-// alpha_gb (may be null => rigid) is absorption per group per band, alpha_gb[gid*8+b].
-// Source/receiver positions are RAW (world) and get the same (p+shift)*scale as
-// the walls, so times line up with the ISM.
+// Outputs TWO energy buffers (NOT sqrt'd), each sized RT_NBANDS*Nr*Nt, indexed
+// [(b*Nr + r)*Nt + sample]:  e_spec = specular (image-source) energy, e_diff = diffuse
+// (scattered) energy. main combines and roots them to pressure, gating the specular at
+// the ISM crossover:  t<=t_cross -> p += sign*sqrt(e_diff);  t>t_cross -> p +=
+// sign*sqrt(e_spec + e_diff).  alpha_gb / sctr_gb are per group per band (gid*8+b), null
+// => rigid / no scattering. Source/receiver positions are RAW (world), transformed like
+// the walls so times line up with the ISM.
 // ============================================================
 inline static void rt_trace_late(const RTScene& S,
                                  const std::vector<float>& src_arr,
                                  const std::vector<float>& src_pressure,
                                  const std::vector<float>& rec_arr,
-                                 const float* alpha_gb,   // [ngroups*8] or nullptr
-                                 const float* m_air,      // [8] PRESSURE air-attenuation coeff (Np/m, already halved); nullptr => none
+                                 const float* alpha_gb,   // [ngroups*8] absorption per group per band, or nullptr
+                                 const float* m_air,      // [8] PRESSURE air-attenuation coeff (Np/m, halved); nullptr => none
+                                 const float* sctr_gb,    // [ngroups*8] scattering per group per band, or nullptr => none
                                  float c, float fs, int Nt,
                                  int Nrays, int max_order, float recv_radius,
-                                 std::vector<float>& p_rt){
-                                 
+                                 std::vector<float>& e_spec,   // OUT: specular energy (NOT sqrt'd)
+                                 std::vector<float>& e_diff){  // OUT: diffuse  energy (NOT sqrt'd)
+
     const int Ns=(int)(src_arr.size()/3), Nr=(int)(rec_arr.size()/3);
-    p_rt.assign((size_t)RT_NBANDS*(size_t)Nr*(size_t)Nt, 0.f);
-    if(Ns==0 || Nr==0 || Nrays<=0 || S.nodes.empty()) return;
+    const size_t NBUF=(size_t)RT_NBANDS*(size_t)Nr*(size_t)Nt;
+    e_spec.assign(NBUF, 0.f);
+    e_diff.assign(NBUF, 0.f);
+    if(Ns==0 || Nr==0 || Nrays<=0 || S.nodes.empty() || recv_radius<=0.f) return;
 
     auto xform = [&](float x,float y,float z){
         return v3((x+S.shift.x)*S.scale, (y+S.shift.y)*S.scale, (z+S.shift.z)*S.scale);
@@ -285,20 +329,31 @@ inline static void rt_trace_late(const RTScene& S,
 
     const float R2 = recv_radius*recv_radius;
     const float t_end = (float)Nt/fs;      // stop rays past the impulse-response length
-    const float Rp_min = 1e-4f;            // pressure-reflection floor: kill dead rays
-    const float RT_4PI = 12.566370614359172f;
+    const float Rp_min = 1e-4f;            // reflection floor: kill dead rays
+    const float RT_PI = 3.14159265358979f, RT_INVPI = 0.318309886183791f;
 
-	// for each sources
+    // PARTICLE / ENERGY estimator anchored to ps (ISM amplitude convention). Each ray is a
+    // power chunk w_ray = ps^2/(4 pi Nrays). SPECULAR: one path found by n_path =
+    // Nrays*r_d^2/(4 d^2) sphere crossings deposits a distance-independent energy per
+    // crossing, so crossings sum to the ISM energy (ps Rp air/(4 pi d))^2. DIFFUSE RAIN
+    // (Schroeder 2011): a bounce scatters s[b] of the reflected power toward each visible
+    // receiver as a Lambert secondary source, detected with the sphere's opening angle:
+    //   e_s = w_ray * s * Rrefl^2 * air^2 * 2 cos(theta) (1 - cos(gamma/2)),
+    // sin(gamma/2)=r_d/d_rec. Same w_ray currency as the specular deposit -> the s/(1-s)
+    // split is honoured at the receiver. Specular continuation carries (1 - s[b]).
+	// for each source
     for(int s = 0; s < Ns; s++){
         const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]);
         const float ps = (s<(int)src_pressure.size()) ? src_pressure[(size_t)s] : 1.f;
+        const float Kbase = ps*ps/(4.f*RT_PI*(float)Nrays);   // w_ray = ps^2/(4 pi Nrays)
+        const float Kspec = Kbase*RT_INVPI/R2;                // per specular crossing => ps^2/(4 pi^2 Nrays r_d^2)
 
         #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic)
         #endif
         for(int ri = 0; ri < Nrays; ri++){			// breadth: independent samples
             ray3 r = rt_fib_ray(o0, ri, Nrays);		// depth: one linear path, in place
-            float Rp[RT_NBANDS]; for(int b = 0; b < RT_NBANDS; b++) Rp[b]=1.f; // PROD sqrt(1-alpha_b)
+            float Rp[RT_NBANDS]; for(int b = 0; b < RT_NBANDS; b++) Rp[b]=1.f; // amplitude reflection product
             float d_travel = 0.f;            		// path length travelled so far [m]
 
             for(int bounce = 0; bounce <= max_order; bounce++){
@@ -310,39 +365,24 @@ inline static void rt_trace_late(const RTScene& S,
                 const vec3 d = v3(r.dx,r.dy,r.dz);
                 const vec3 p1 = add3(o, mul3(d, seg));
 
-                // receiver detection: accumulate ENERGY, not pressure.
-                //
-                // Why: in a dense tail K reflections land in one sample. Summed
-                // coherently (all sqrt(1-alpha) are positive -> same sign) they give
-                // ~K*a; but a real diffuse field adds them with RANDOM phase, which is a
-                // random walk ~sqrt(K)*a. Echo density grows ~t^2, so K rises over time
-                // and a coherent pressure sum would inflate the tail more and more,
-                // making it louder than the early reflections. Energies add incoherently
-                // by construction (a^2 adds regardless of phase), so depositing the
-                // square and taking sqrt at the end gives the correct sqrt(K)*a. The
-                // per-sample random sign applied at playback (rt_sign) supplies the phase.
-                //
-                // The per-ray (single-arrival) pressure is
-                //     p_ray[b] = ps * PROD sqrt(1-alpha_b) * air / (4 pi d_run).
+                // ---- SPECULAR detection on segment [o,p1] -> e_spec (distance-independent
+                // energy per detection-sphere crossing).
                 for(int rr = 0; rr < Nr; rr++){
                     float s_ca;
                     if(rt_point_seg_dist2(rec[(size_t)rr], o, p1, s_ca) <= R2){
-                        const float d_run = d_travel + s_ca; // total path to the receiver (incl. partial last hop)
+                        const float d_run = d_travel + s_ca; // total path to the receiver
                         const float tt = d_run/c;
                         if(tt < t_end && d_run > 1e-4f){
                             const int n0 = (int)(tt*fs);
                             if(n0 >= 0 && n0 < Nt){
-                                const float spread = 1.f/(RT_4PI*d_run);
                                 for(int b = 0;b < RT_NBANDS; b++){
-                                    float* cell = &p_rt[((size_t)b*Nr + rr)*Nt + n0];
-                                    // air absorption over the FULL path to the receiver (d_run,
-                                    // not d_travel); m_air is the pressure (half-energy) coeff.
-                                    const float air = m_air ? std::exp(-m_air[b]*d_run) : 1.f;
-                                    const float p_ray = ps * Rp[b] * spread * air;   // pressure of one arrival
+                                    const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f; // air^2 (energy)
+                                    const float e = Kspec * Rp[b]*Rp[b] * air2;
+                                    float* cell = &e_spec[((size_t)b*Nr + rr)*Nt + n0];
                                     #ifdef _OPENMP
                                     #pragma omp atomic
                                     #endif
-                                    *cell += p_ray * p_ray;                          // -> energy
+                                    *cell += e;
                                 }
                             }
                         }
@@ -353,51 +393,75 @@ inline static void rt_trace_late(const RTScene& S,
                 d_travel += seg;
                 if(d_travel/c >= t_end) break;
 
-                // angle-dependent reflection coefficient R_oblique(alpha, theta) per
-                // band, like the ISM. cos(theta) = |d . N| at this bounce; normal
-                // incidence -> sqrt(1-alpha), grazing -> 1 (total reflection). We keep
-                // the magnitude (energy model; phase is randomised at playback).
+                // ---- reflection coefficient R_oblique(alpha, cos_theta) per band. Rrefl is
+                // the amplitude AFTER the wall, BEFORE the scatter split.
                 const int gid = S.group[(size_t)tri];
                 const vec3 N = rt_tri_normal(S, tri);
                 const float ct = std::fabs(dot3(d, N));   // cos of the incidence angle
-                float alive=0.f;
+                float Rrefl[RT_NBANDS];
                 for(int b = 0;b < RT_NBANDS; b++){
                     float al = (alpha_gb && gid>=0 && gid<S.ngroups) ? alpha_gb[(size_t)gid*RT_NBANDS+b] : 0.f;
                     al = std::max(0.f, std::min(0.999f, al));
-                    Rp[b] *= std::fabs(R_oblique(al, ct));
+                    Rrefl[b] = Rp[b] * std::fabs(R_oblique(al, ct));
+                }
+
+                // ---- DIFFUSE RAIN -> e_diff: scatter s[b] of the reflected power off B=p1
+                // toward each visible receiver (Schroeder detection-sphere capture).
+                if(sctr_gb && gid>=0 && gid<S.ngroups){
+                    const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;  // face the incoming side
+                    for(int rr = 0; rr < Nr; rr++){
+                        const vec3 br = sub3(rec[(size_t)rr], p1);
+                        const float d2 = norm2_3(br);
+                        if(d2 < 1e-6f) continue;
+                        const float drec = std::sqrt(d2);
+                        const vec3 u = mul3(br, 1.f/drec);
+                        const float cosr = dot3(No, u);                    // cos(theta), Lambert weight
+                        if(cosr <= 0.f) continue;                          // receiver behind the surface
+                        ray3 sr; sr.ox=p1.x+No.x*1e-4f; sr.oy=p1.y+No.y*1e-4f; sr.oz=p1.z+No.z*1e-4f;
+                        sr.dx=u.x; sr.dy=u.y; sr.dz=u.z;
+                        float sh_t; int sh_tri;
+                        if(rt_closest_hit(S, sr, 1e-4f, sh_t, sh_tri) && sh_t < drec-1e-3f) continue; // occluded
+                        const float d_run = d_travel + drec;               // source -> B -> receiver
+                        if(d_run/c >= t_end) continue;
+                        const int n0 = (int)((d_run/c)*fs);
+                        if(n0 < 0 || n0 >= Nt) continue;
+                        // detection-sphere solid-angle capture: 2 cos(theta) (1 - cos(gamma/2))
+                        const float srd = std::min(1.f, recv_radius/drec); // sin(gamma/2)
+                        const float coshalf = std::sqrt(std::max(0.f, 1.f - srd*srd));
+                        const float cap = 2.f * cosr * (1.f - coshalf);
+                        for(int b = 0;b < RT_NBANDS; b++){
+                            const float sb = std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b]));
+                            if(sb <= 0.f) continue;
+                            const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f;
+                            const float e = Kbase * sb * Rrefl[b]*Rrefl[b] * air2 * cap;
+                            float* cell = &e_diff[((size_t)b*Nr + rr)*Nt + n0];
+                            #ifdef _OPENMP
+                            #pragma omp atomic
+                            #endif
+                            *cell += e;
+                        }
+                    }
+                }
+
+                // ---- specular continuation carries (1 - s[b]) of the reflected power
+                float alive=0.f;
+                for(int b = 0; b < RT_NBANDS; b++){
+                    const float sb = (sctr_gb && gid>=0 && gid<S.ngroups)
+                                   ? std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b])) : 0.f;
+                    Rp[b] = Rrefl[b] * std::sqrt(1.f - sb);
                     alive = std::max(alive, Rp[b]);
                 }
-                if(alive < Rp_min) break;
+                if(alive < Rp_min) break; // energy too low, stop bouncing ray
 
+				// change origin and direction of specular ray
                 vec3 ref; rt_compute_reflected(ref, d, N);
-                const vec3 hitp = add3(o, mul3(d, th));
-                r.ox=hitp.x + ref.x*1e-4f; r.oy=hitp.y + ref.y*1e-4f; r.oz=hitp.z + ref.z*1e-4f;
+                r.ox=p1.x + ref.x*1e-4f; r.oy=p1.y + ref.y*1e-4f; r.oz=p1.z + ref.z*1e-4f;
                 r.dx=ref.x; r.dy=ref.y; r.dz=ref.z;
             }
         }
     }
-
-    // Finalize: divide the accumulated ENERGY by the detection-sphere ray multiplicity,
-    // then take the root to get a PRESSURE amplitude. A specular path at distance d is
-    // found by ~n_path = Nrays*R^2/(4 d^2) rays; each deposited (image_amplitude)^2, so
-    // the bin holds n_path * SUM_paths a^2. Dividing by n_path gives SUM_paths a^2 (the
-    // incoherent energy), and sqrt gives the RMS pressure sqrt(SUM a^2). Arrivals are
-    // binned at sample = (d/c)*fs, so d = c*t/fs is exact for bin t -> exact division.
-    // Result: a single arrival (sparse/early, one path) yields exactly the ISM image
-    // amplitude a; K overlapping arrivals (dense tail) yield sqrt(K)*a, the correct
-    // random-phase level -- not K*a. Nrays only controls tail smoothness.
-    const double Rr = (double)recv_radius*(double)recv_radius;
-    if(Rr > 0.0){
-        for(int b = 0;b < RT_NBANDS; b++)
-         for(int rr = 0; rr < Nr; rr++)
-          for(int t = 1; t < Nt; t++){
-              const double d = (double)c*(double)t/(double)fs;         // exact path length for bin t
-              const double n_path = (double)Nrays*Rr/(4.0*d*d);        // rays representing one path
-              const size_t idx = ((size_t)b*Nr+rr)*Nt+t;
-              const double E = (n_path > 0.0) ? (double)p_rt[idx]/n_path : 0.0;
-              p_rt[idx] = (float)std::sqrt(E > 0.0 ? E : 0.0);          // energy -> pressure
-          }
-    }
+    // e_spec / e_diff hold physical ENERGY (not rooted). main sums the required channels
+    // per bin and takes sqrt -> pressure (see the header note above).
 }
 
 // ============================================================
