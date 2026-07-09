@@ -71,6 +71,28 @@ inline static float rt_sign(unsigned int s){
     return (s & 1u) ? 1.f : -1.f;
 }
 
+// hash -> uniform float in [0,1). Same mixer as rt_sign; used for the stochastic
+// specular/diffuse direction draw (below).
+inline static float rt_u01(unsigned int s){
+    s ^= s>>16; s *= 0x7feb352du; s ^= s>>15; s *= 0x846ca68bu; s ^= s>>16;
+    return (float)(s >> 8) * (1.f/16777216.f);   // 24-bit mantissa
+}
+
+// cosine-weighted (Lambert) direction about surface normal N. u1,u2 in [0,1).
+// This is how a diffusely-scattered ray CONTINUES to propagate -- carrying its
+// full reflected energy in a new random direction, so multiple scattering (and
+// the reverberant tail) survives instead of being dropped after one deposit.
+inline static vec3 rt_lambert_dir(const vec3& N, float u1, float u2){
+    const float r = std::sqrt(u1), phi = 6.283185307f*u2;
+    const float x = r*std::cos(phi), y = r*std::sin(phi), z = std::sqrt(std::max(0.f,1.f-u1));
+    vec3 a = (std::fabs(N.z) < 0.999f) ? v3(0,0,1) : v3(1,0,0);
+    vec3 t = cross3(a, N); float tl = std::sqrt(norm2_3(t)); t = (tl>1e-8f)? mul3(t,1.f/tl):v3(1,0,0);
+    vec3 bt = cross3(N, t);
+    vec3 dir = v3(x*t.x+y*bt.x+z*N.x, x*t.y+y*bt.y+z*N.y, x*t.z+y*bt.z+z*N.z);
+    float dl = std::sqrt(norm2_3(dir));
+    return (dl>1e-8f)? mul3(dir,1.f/dl) : N;
+}
+
 // Expand a single global scattering coefficient g in [0,1] into 8 octave-band values
 // (63..8000 Hz) by linear interpolation of an ODEON-style reference table. Every column
 // is monotonic in g and every row rises with frequency, so the interpolation reproduces
@@ -300,6 +322,7 @@ inline static void rt_trace_late(const RTScene& S,
                                  const float* alpha_gb,   // [ngroups*8] absorption per group per band, or nullptr
                                  const float* m_air,      // [8] PRESSURE air-attenuation coeff (Np/m, halved); nullptr => none
                                  const float* sctr_gb,    // [ngroups*8] scattering per group per band, or nullptr => none
+                                 const float* sctr_g,     // [ngroups] GLOBAL scattering per group (the draw), or nullptr => none
                                  float c, float fs, int Nt,
                                  int Nrays, int max_order, float recv_radius,
                                  std::vector<float>& e_spec,   // OUT: specular energy (NOT sqrt'd)
@@ -325,14 +348,18 @@ inline static void rt_trace_late(const RTScene& S,
     // PARTICLE / ENERGY estimator anchored to ps (ISM amplitude convention). Each ray is a
     // power chunk w_ray = ps^2/(4 pi Nrays). SPECULAR: one path found by n_path =
     // Nrays*r_d^2/(4 d^2) sphere crossings deposits a distance-independent energy per
-    // crossing, so crossings sum to the ISM energy (ps Rp air/(4 pi d))^2. DIFFUSE RAIN:
-    // a bounce scatters s[b] of the reflected power toward each visible receiver as a
-    // Lambert secondary source, deposited as the POINT-receiver intensity
+    // crossing, so crossings sum to the ISM energy (ps Rp air/(4 pi d))^2. NEXT-EVENT
+    // ESTIMATION (diffuse): a bounce scatters s[b] of the reflected power toward each visible
+    // receiver as a Lambert secondary source, deposited as the POINT-receiver intensity
     //   e_s = w_ray * s * Rrefl^2 * air^2 * cos(theta) / (pi d_rec^2).
     // This is R-INDEPENDENT, matching the specular's ISM-anchored point convention (a
     // detection-sphere solid-angle capture ~R^2 would be the energy-histogram convention
     // and inconsistent here). Same w_ray currency as the specular deposit -> the s/(1-s)
-    // split is honoured at the receiver. Specular continuation carries (1 - s[b]).
+    // split is honoured at the receiver. PROPAGATION: the ray carries the FULL reflected
+    // power (no (1-s) drain) and scattering only redirects it (stochastic draw with the
+    // global s, prob s -> Lambert), so multiple scattering survives and T60 stays
+    // absorption-governed for any s. The specular (1-s)^k attenuation emerges from the
+    // fraction of rays that never took a diffuse bounce -- see the detection guard below.
 	// for each source
     for(int s = 0; s < Ns; s++){
         const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]);
@@ -347,6 +374,7 @@ inline static void rt_trace_late(const RTScene& S,
             ray3 r = rt_fib_ray(o0, ri, Nrays);		// depth: one linear path, in place
             float Rp[RT_NBANDS]; for(int b = 0; b < RT_NBANDS; b++) Rp[b]=1.f; // amplitude reflection product
             float d_travel = 0.f;            		// path length travelled so far [m]
+            bool  scattered = false;         		// has this ray taken a diffuse bounce yet?
 
             for(int bounce = 0; bounce <= max_order; bounce++){
                 float th; int tri;
@@ -358,8 +386,13 @@ inline static void rt_trace_late(const RTScene& S,
                 const vec3 p1 = add3(o, mul3(d, seg));
 
                 // ---- SPECULAR detection on segment [o,p1] -> e_spec (distance-independent
-                // energy per detection-sphere crossing).
-                for(int rr = 0; rr < Nr; rr++){
+                // energy per detection-sphere crossing). ONLY while the ray is still a pure
+                // specular (image-source) path: once it has taken a diffuse bounce its energy
+                // reaches the receiver via the next-event estimation below, so detecting it here too
+                // would double-count. The specular (1-s)^k attenuation is NOT applied to the
+                // energy -- it emerges from the fraction of rays that survive as specular,
+                // since each diffuse draw (prob s) removes a ray from this population.
+                for(int rr = 0; !scattered && rr < Nr; rr++){
                     float s_ca;
                     if(rt_point_seg_dist2(rec[(size_t)rr], o, p1, s_ca) <= R2){
                         const float d_run = d_travel + s_ca; // total path to the receiver
@@ -397,8 +430,11 @@ inline static void rt_trace_late(const RTScene& S,
                     Rrefl[b] = Rp[b] * std::fabs(R_oblique(al, ct));
                 }
 
-                // ---- DIFFUSE RAIN -> e_diff: scatter s[b] of the reflected power off B=p1
-                // toward each visible receiver (Lambert point-receiver intensity).
+                // ---- NEXT-EVENT ESTIMATION -> e_diff: deterministically connect the bounce
+                // point B=p1 to each visible receiver and deposit the scattered contribution
+                // s[b] of the reflected power as a Lambert secondary source (point-receiver
+                // intensity). This is the low-variance diffuse DETECTOR; the ray's own energy
+                // is untouched and keeps propagating via the stochastic draw below.
                 if(sctr_gb && gid>=0 && gid<S.ngroups){
                     const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;  // face the incoming side
                     for(int rr = 0; rr < Nr; rr++){
@@ -427,7 +463,7 @@ inline static void rt_trace_late(const RTScene& S,
                             const float sb = std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b]));
                             if(sb <= 0.f) continue;
                             const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f;
-                            const float e = Kbase * sb * Rrefl[b]*Rrefl[b] * air2 * geo;
+                            const float e = Kbase * sb * Rrefl[b]*Rrefl[b] * air2 * geo; // s(1-a)
                             float* cell = &e_diff[((size_t)b*Nr + rr)*Nt + n0];
                             #ifdef _OPENMP
                             #pragma omp atomic
@@ -437,18 +473,32 @@ inline static void rt_trace_late(const RTScene& S,
                     }
                 }
 
-                // ---- specular continuation carries (1 - s[b]) of the reflected power
+                // ---- ENERGY CONSERVATION: the ray carries the FULL reflected power (1-alpha)
+                // forward -- NO (1-s) drain. Scattering changes only the DIRECTION, not the
+                // energy, so scattered energy keeps bouncing (multiple scattering) and the tail
+                // decays at the absorption-governed rate regardless of s. (The old (1-s) drain
+                // dropped ~s of the energy every bounce, collapsing T60 as s grew.)
                 float alive=0.f;
-                for(int b = 0;b < RT_NBANDS; b++){
-                    const float sb = (sctr_gb && gid>=0 && gid<S.ngroups)
-                                   ? std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b])) : 0.f;
-                    Rp[b] = Rrefl[b] * std::sqrt(1.f - sb);
-                    alive = std::max(alive, Rp[b]);
-                }
+                for(int b = 0;b < RT_NBANDS; b++){ Rp[b] = Rrefl[b]; alive = std::max(alive, Rp[b]); }
                 if(alive < Rp_min) break;
 
-				// change origin and direction of specular ray
-                vec3 ref; rt_compute_reflected(ref, d, N);
+                // ---- STOCHASTIC direction: draw once with the GLOBAL s (one scalar per surface,
+                // so no per-band trajectory conflict). Prob s -> diffuse (Lambert) reflection,
+                // else specular. Over many rays a fraction s scatter and (1-s) stay specular,
+                // reproducing the correct s/(1-s) split in aggregate while every ray keeps its
+                // full energy. The per-band s[b] above weights only the diffuse-rain deposit.
+                const unsigned int seed = ((unsigned)((s*Nrays+ri))*2654435761u) ^ ((unsigned)bounce*40503u);
+                const float sg = (sctr_g && gid>=0 && gid<S.ngroups)
+                               ? std::max(0.f, std::min(1.f, sctr_g[(size_t)gid])) : 0.f;
+                vec3 ref;
+                // The concept below can be found in Hanna Autio's thesis and in Brandão et al (2019, Aachen)
+                if(sg > 0.f && rt_u01(seed) < sg){
+                    const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;   // outward-facing normal
+                    ref = rt_lambert_dir(No, rt_u01(seed^0x9e3779b9u), rt_u01(seed^0x85ebca6bu));
+                    scattered = true;                                        // no more specular sphere deposits
+                } else {
+                    rt_compute_reflected(ref, d, N);
+                }
                 r.ox=p1.x + ref.x*1e-4f; r.oy=p1.y + ref.y*1e-4f; r.oz=p1.z + ref.z*1e-4f;
                 r.dx=ref.x; r.dy=ref.y; r.dz=ref.z;
             }

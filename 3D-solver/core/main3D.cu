@@ -1049,6 +1049,7 @@ int main(int argc, char *argv[]){
 	// to 8 octave bands (rt_scatter_bands). names[g+1] is material g (names[0]=BoundingBox).
 	std::filesystem::path sctr_dir = project_root / "input" / "sctr";
 	std::vector<float> sctr_gb((size_t)rtS.ngroups * 8, 0.0f);
+	std::vector<float> sctr_g((size_t)rtS.ngroups, 0.01f);   // GLOBAL s per group (the stochastic draw)
 	for (int g = 0; g < rtS.ngroups; g++){
 		std::string mname = (g + 1 < (int)names.size()) ? names[g + 1] : std::string();
 		float gval = 0.01f;   // default scattering if no .sctr file
@@ -1064,13 +1065,14 @@ int main(int argc, char *argv[]){
 				}
 			}
 		}
+		sctr_g[(size_t)g] = gval;
 		float s8[8]; rt_scatter_bands(gval, s8);
 		for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = s8[b];
 	}
 
 	// RT late field: two ENERGY buffers (specular / diffuse), rooted per bin at deposit.
 	std::vector<float> e_spec, e_diff;
-	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(),
+	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(), sctr_g.data(),
 	              c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, e_spec, e_diff);
 
 	// compute IRs
@@ -1110,6 +1112,7 @@ int main(int argc, char *argv[]){
             			//p_hf[flat(t_0, r, Nt)] += gS_0;
             			// fractional delay
             			deposit(tau_0, gS_0, r, d_0);
+            			
             			if (t_0 > t_cross) t_cross = t_0;
             			arrivals.push_back(t_0);
         			}
@@ -1172,6 +1175,7 @@ int main(int argc, char *argv[]){
 				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;
 				p_hf[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * (float)std::sqrt(e);
+				//p_hf[flat(t, r, Nt)] += (float)std::sqrt(e); // amplitude validation
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
