@@ -91,21 +91,11 @@ inline static void rt_scatter_bands(float g, float s_out[RT_NBANDS]){
         {0.040f,0.110f,0.680f,0.860f,0.920f,0.930f,0.940f,0.950f},
         {0.100f,0.370f,0.900f,1.000f,1.000f,1.000f,1.000f,1.000f},
     };
-    if(g <= ga[0]){
-    	for(int b = 0; b < RT_NBANDS; b++){
-    		s_out[b] = tab[0][b];
-    		return;
-    	}
-    }
-    if(g >= ga[NA-1]){
-    	for(int b = 0; b < RT_NBANDS; b++){
-    		s_out[b] = tab[NA-1][b];
-    		return;
-    	}
-    }
-    int i = 0; while(i < NA-1 && g > ga[i+1]) ++i; // find i such that ga[i] <= g <= ga[i+1], used below
-    const float t = (g-ga[i])/(ga[i+1]-ga[i]); //  interpolation weight
-    for(int b = 0; b < RT_NBANDS; ++b) s_out[b] = tab[i][b] + t*(tab[i+1][b]-tab[i][b]); // blend the 2 rows
+    if(g <= ga[0]){    for(int b=0;b<RT_NBANDS;++b) s_out[b]=tab[0][b];    return; }
+    if(g >= ga[NA-1]){ for(int b=0;b<RT_NBANDS;++b) s_out[b]=tab[NA-1][b]; return; }
+    int i=0; while(i<NA-1 && g>ga[i+1]) ++i;              // ga[i] <= g <= ga[i+1]
+    const float t = (g-ga[i])/(ga[i+1]-ga[i]);
+    for(int b=0;b<RT_NBANDS;++b) s_out[b] = tab[i][b] + t*(tab[i+1][b]-tab[i][b]);
 }
 
 // Fibonacci-sphere direction i of N (near-uniform on the unit sphere), origin o.
@@ -330,23 +320,25 @@ inline static void rt_trace_late(const RTScene& S,
     const float R2 = recv_radius*recv_radius;
     const float t_end = (float)Nt/fs;      // stop rays past the impulse-response length
     const float Rp_min = 1e-4f;            // reflection floor: kill dead rays
-    const float RT_PI = 3.14159265358979f, RT_INVPI = 0.318309886183791f;
+    const float RT_INVPI = 0.318309886183791f;
 
     // PARTICLE / ENERGY estimator anchored to ps (ISM amplitude convention). Each ray is a
     // power chunk w_ray = ps^2/(4 pi Nrays). SPECULAR: one path found by n_path =
     // Nrays*r_d^2/(4 d^2) sphere crossings deposits a distance-independent energy per
-    // crossing, so crossings sum to the ISM energy (ps Rp air/(4 pi d))^2. DIFFUSE RAIN
-    // (Schroeder 2011): a bounce scatters s[b] of the reflected power toward each visible
-    // receiver as a Lambert secondary source, detected with the sphere's opening angle:
-    //   e_s = w_ray * s * Rrefl^2 * air^2 * 2 cos(theta) (1 - cos(gamma/2)),
-    // sin(gamma/2)=r_d/d_rec. Same w_ray currency as the specular deposit -> the s/(1-s)
+    // crossing, so crossings sum to the ISM energy (ps Rp air/(4 pi d))^2. DIFFUSE RAIN:
+    // a bounce scatters s[b] of the reflected power toward each visible receiver as a
+    // Lambert secondary source, deposited as the POINT-receiver intensity
+    //   e_s = w_ray * s * Rrefl^2 * air^2 * cos(theta) / (pi d_rec^2).
+    // This is R-INDEPENDENT, matching the specular's ISM-anchored point convention (a
+    // detection-sphere solid-angle capture ~R^2 would be the energy-histogram convention
+    // and inconsistent here). Same w_ray currency as the specular deposit -> the s/(1-s)
     // split is honoured at the receiver. Specular continuation carries (1 - s[b]).
 	// for each source
     for(int s = 0; s < Ns; s++){
         const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]);
         const float ps = (s<(int)src_pressure.size()) ? src_pressure[(size_t)s] : 1.f;
-        const float Kbase = ps*ps/(4.f*RT_PI*(float)Nrays);   // w_ray = ps^2/(4 pi Nrays)
-        const float Kspec = Kbase*RT_INVPI/R2;                // per specular crossing => ps^2/(4 pi^2 Nrays r_d^2)
+        const float Kbase = ps*ps/(4.f*M_PI*(float)Nrays);   // w_ray = ps^2/(4 pi Nrays)
+        const float Kspec = Kbase*RT_INVPI/R2;               // per specular crossing => ps^2/(4 pi^2 Nrays r_d^2)
 
         #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic)
@@ -406,7 +398,7 @@ inline static void rt_trace_late(const RTScene& S,
                 }
 
                 // ---- DIFFUSE RAIN -> e_diff: scatter s[b] of the reflected power off B=p1
-                // toward each visible receiver (Schroeder detection-sphere capture).
+                // toward each visible receiver (Lambert point-receiver intensity).
                 if(sctr_gb && gid>=0 && gid<S.ngroups){
                     const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;  // face the incoming side
                     for(int rr = 0; rr < Nr; rr++){
@@ -425,15 +417,17 @@ inline static void rt_trace_late(const RTScene& S,
                         if(d_run/c >= t_end) continue;
                         const int n0 = (int)((d_run/c)*fs);
                         if(n0 < 0 || n0 >= Nt) continue;
-                        // detection-sphere solid-angle capture: 2 cos(theta) (1 - cos(gamma/2))
-                        const float srd = std::min(1.f, recv_radius/drec); // sin(gamma/2)
-                        const float coshalf = std::sqrt(std::max(0.f, 1.f - srd*srd));
-                        const float cap = 2.f * cosr * (1.f - coshalf);
+                        // Lambert point-receiver INTENSITY: cos(theta)/(pi d_rec^2). This is
+                        // Recv_radius-INDEPENDENT, matching the specular's ISM-anchored point convention
+                        // (the specular bakes 1/r_d^2 into Kspec, so it too is Recv_radius-independent).
+                        // A detection-sphere solid-angle capture (~R^2) would be the energy-
+                        // histogram convention and is INCONSISTENT with the specular here.
+                        const float geo = cosr * RT_INVPI / d2;   // cos(theta)/(pi d_rec^2)
                         for(int b = 0;b < RT_NBANDS; b++){
                             const float sb = std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b]));
                             if(sb <= 0.f) continue;
                             const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f;
-                            const float e = Kbase * sb * Rrefl[b]*Rrefl[b] * air2 * cap;
+                            const float e = Kbase * sb * Rrefl[b]*Rrefl[b] * air2 * geo;
                             float* cell = &e_diff[((size_t)b*Nr + rr)*Nt + n0];
                             #ifdef _OPENMP
                             #pragma omp atomic
@@ -445,13 +439,13 @@ inline static void rt_trace_late(const RTScene& S,
 
                 // ---- specular continuation carries (1 - s[b]) of the reflected power
                 float alive=0.f;
-                for(int b = 0; b < RT_NBANDS; b++){
+                for(int b = 0;b < RT_NBANDS; b++){
                     const float sb = (sctr_gb && gid>=0 && gid<S.ngroups)
                                    ? std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b])) : 0.f;
                     Rp[b] = Rrefl[b] * std::sqrt(1.f - sb);
                     alive = std::max(alive, Rp[b]);
                 }
-                if(alive < Rp_min) break; // energy too low, stop bouncing ray
+                if(alive < Rp_min) break;
 
 				// change origin and direction of specular ray
                 vec3 ref; rt_compute_reflected(ref, d, N);
