@@ -430,7 +430,7 @@ inline static void rt_trace_late(const RTScene& S,
                     Rrefl[b] = Rp[b] * std::fabs(R_oblique(al, ct));
                 }
 
-                // ---- NEXT-EVENT ESTIMATION -> e_diff: deterministically connect the bounce
+                // ---- DIFFUSE ESTIMATION -> e_diff: deterministically connect the bounce
                 // point B=p1 to each visible receiver and deposit the scattered contribution
                 // s[b] of the reflected power as a Lambert secondary source (point-receiver
                 // intensity). This is the low-variance diffuse DETECTOR; the ray's own energy
@@ -492,6 +492,7 @@ inline static void rt_trace_late(const RTScene& S,
                                ? std::max(0.f, std::min(1.f, sctr_g[(size_t)gid])) : 0.f;
                 vec3 ref;
                 // The concept below can be found in Hanna Autio's thesis and in Brandão et al (2019, Aachen)
+                // called on-off scattering (Autio, Vardaxis, Hagberg) (2021)
                 if(sg > 0.f && rt_u01(seed) < sg){
                     const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;   // outward-facing normal
                     ref = rt_lambert_dir(No, rt_u01(seed^0x9e3779b9u), rt_u01(seed^0x85ebca6bu));
