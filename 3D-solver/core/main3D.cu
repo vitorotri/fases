@@ -432,7 +432,7 @@ int main(int argc, char *argv[]){
         }
     }
 
-    printf("\n[OK] Nx = %d  Ny = %d  Nz = %d\n", Nx, Ny, Nz);
+    printf("\\nn[OK] Nx = %d  Ny = %d  Nz = %d\n", Nx, Ny, Nz);
     printf("\n[Ok] Lx = %f  Ly = %f  Lz = %f\n", Lx, Ly, Lz);
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
