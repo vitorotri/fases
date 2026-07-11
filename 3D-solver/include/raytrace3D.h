@@ -328,44 +328,82 @@ inline static void rt_trace_late(const RTScene& S,
                                  std::vector<float>& e_spec,   // OUT: specular energy (NOT sqrt'd)
                                  std::vector<float>& e_diff){  // OUT: diffuse  energy (NOT sqrt'd)
 
-    const int Ns=(int)(src_arr.size()/3), Nr=(int)(rec_arr.size()/3);
-    const size_t NBUF=(size_t)RT_NBANDS*(size_t)Nr*(size_t)Nt;
-    e_spec.assign(NBUF, 0.f);
-    e_diff.assign(NBUF, 0.f);
+    const int Ns=(int)(src_arr.size()/3), Nr=(int)(rec_arr.size()/3); // #sources, #receivers (arrays are xyz triplets)
+    const size_t NBUF=(size_t)RT_NBANDS*(size_t)Nr*(size_t)Nt;        // size of each output buffer: band * receiver * time
+    e_spec.assign(NBUF, 0.f);   // OUT: specular energy echogram, index [(b*Nr + r)*Nt + sample]
+    e_diff.assign(NBUF, 0.f);   // OUT: diffuse  energy echogram, same layout
     if(Ns==0 || Nr==0 || Nrays<=0 || S.nodes.empty() || recv_radius<=0.f) return;
 
+    // receiver positions transformed once into solver space (same transform the mesh got).
     auto xform = [&](float x,float y,float z){
         return v3((x+S.shift.x)*S.scale, (y+S.shift.y)*S.scale, (z+S.shift.z)*S.scale);
     };
     std::vector<vec3> rec(Nr);
     for(int r=0;r<Nr;++r) rec[(size_t)r]=xform(rec_arr[(size_t)(3*r)],rec_arr[(size_t)(3*r+1)],rec_arr[(size_t)(3*r+2)]);
 
-    const float R2 = recv_radius*recv_radius;
-    const float t_end = (float)Nt/fs;      // stop rays past the impulse-response length
-    const float Rp_min = 1e-4f;            // reflection floor: kill dead rays
-    const float RT_INVPI = 0.318309886183791f;
+    const float R2     = recv_radius*recv_radius;      // detection-sphere radius^2 (SPECULAR reception only; see below)
+    const float t_end  = (float)Nt/fs;                 // IR length [s]; rays/paths past this are dropped
+    const float Rp_min = 1e-4f;                        // amplitude floor: once every band is below this, the ray is dead
+    const float RT_INVPI = 0.318309886183791f;          // 1/pi, precomputed
 
-    // PARTICLE / ENERGY estimator anchored to ps (ISM amplitude convention). Each ray is a
-    // power chunk w_ray = ps^2/(4 pi Nrays). SPECULAR: one path found by n_path =
-    // Nrays*r_d^2/(4 d^2) sphere crossings deposits a distance-independent energy per
-    // crossing, so crossings sum to the ISM energy (ps Rp air/(4 pi d))^2. NEXT-EVENT
-    // ESTIMATION (diffuse): a bounce scatters s[b] of the reflected power toward each visible
-    // receiver as a Lambert secondary source, deposited as the POINT-receiver intensity
-    //   e_s = w_ray * s * Rrefl^2 * air^2 * cos(theta) / (pi d_rec^2).
-    // This is R-INDEPENDENT, matching the specular's ISM-anchored point convention (a
-    // detection-sphere solid-angle capture ~R^2 would be the energy-histogram convention
-    // and inconsistent here). Same w_ray currency as the specular deposit -> the s/(1-s)
-    // split is honoured at the receiver. PROPAGATION: the ray carries the FULL reflected
-    // power (no (1-s) drain) and scattering only redirects it (stochastic draw with the
-    // global s, prob s -> Lambert), so multiple scattering survives and T60 stays
-    // absorption-governed for any s. The specular (1-s)^k attenuation emerges from the
-    // fraction of rays that never took a diffuse bounce -- see the detection guard below.
+    // =====================================================================================
+    // ENERGY BOOKKEEPING -- both deposit constants derived from first principles below.
+    // We work in |p|^2 ("energy"); ISM amplitude convention is p = ps/(4 pi d) at distance d.
+    //
+    // SOLID ANGLE. Directions are measured as area on the unit sphere (steradians, sr). The
+    // whole sphere = 4 pi sr (all directions); a hemisphere = 2 pi sr. A free monopole source
+    // radiates into every direction, i.e. the full 4 pi. A small area A seen from distance d
+    // subtends the solid angle Omega = A / d^2 (its area projected onto the unit sphere).
+    //
+    // SOURCE POWER (|p|^2 flux through any sphere, distance-independent):
+    //     W = integral over sphere of |p|^2 dA = (ps/(4 pi d))^2 * 4 pi d^2 = ps^2/(4 pi).
+    // We launch Nrays uniformly over the full 4 pi, so the angular ray density is Nrays/(4 pi)
+    // rays per sr, and each ray carries an equal share of the power
+    //     w_ray = W / Nrays = ps^2 / (4 pi Nrays).                       <-- Kdiff below
+    //
+    // ------ SPECULAR (detection sphere) : Kspec = w_ray / (pi R^2) ------
+    // A specular ray has ONE outgoing direction and can never pass exactly through a POINT
+    // receiver, so we give the receiver a finite sphere of radius R = recv_radius and count
+    // crossings. IMAGE SOURCE: unfolding a specular path (mirror the source across each wall)
+    // makes it a straight ray from an image point. Specular reflection is solid-angle
+    // preserving (it maps a bundle dOmega to an equal reflected bundle dOmega -- etendue
+    // conservation), so the image radiates with the SAME uniform density Nrays/(4 pi) sr^-1 as
+    // the real source. The detection sphere presents a disk of area pi R^2, subtending solid
+    // angle pi R^2 / d^2 at path-distance d, so the number of rays of THIS path that cross it:		
+    //     n_path = density * solid_angle =
+    //     n_path = (Nrays/(4 pi)) * (pi R^2 / d^2) = Nrays * R^2 / (4 d^2).
+    // We WANT the n_path crossings to sum to the ISM image energy (ps Rp air /(4 pi d))^2.
+    // Solve for the per-crossing energy e_spec:
+    //     e_spec = (ps Rp air/(4 pi d))^2 / n_path
+    //            = [ps^2 Rp^2 air^2 /(16 pi^2 d^2)] * [4 d^2 /(Nrays R^2)]
+    //            = ps^2 Rp^2 air^2 / (4 pi^2 Nrays R^2)
+    //            = w_ray/(pi R^2) * Rp^2 air^2  ==  Kspec * Rp^2 * air^2.
+    // The d^2 cancels (per-crossing energy is distance-independent) and R^2 in n_path cancels
+    // the 1/R^2 in Kspec, so the summed result is R-independent (R is a solver knob).
+    //
+    // ------ DIFFUSE (next-event estimation) : uses Kdiff = w_ray directly ------
+    // LAMBERT SOURCE. A diffusely reflecting patch is a Lambertian (ideally diffuse) secondary
+    // source: it re-radiates into the HEMISPHERE in front of it with radiant intensity that
+    // falls off as cos(theta) from the surface normal (equally bright from every viewing angle).
+    // If it re-radiates a total power Phi, its radiant intensity (power per sr) is
+    //     I(theta) = Phi * cos(theta) / pi.
+    // The 1/pi is the normalisation over the cosine-weighted HEMISPHERE:
+    //     integral over hemisphere of (cos(theta)/pi) dOmega = 1   =>   integral of I dOmega = Phi.
+    // (Note pi, not 2 pi: the cosine weighting of the 2 pi hemisphere integrates to pi.)
+    // Here the patch B re-radiates the scattered fraction s of its reflected energy, so
+    //     Phi = s * w_ray * Rrefl^2 * air^2.
+    // The receiver is a POINT at distance d_rec in direction theta from B's normal, so the
+    // energy per unit area arriving there is I(theta)/d_rec^2 (inverse-square spreading):
+    //     e_diff = w_ray * s * Rrefl^2 * air^2 * cos(theta)/(pi d_rec^2)  ==  Kdiff * s * Rrefl^2 * air^2 * geo.
+    // Note the two pi-family constants differ by role: SOURCE uses 4 pi (free monopole, full
+    // sphere); a SCATTER patch uses 1/pi (cosine-weighted hemisphere).
+    // =====================================================================================
 	// for each source
     for(int s = 0; s < Ns; s++){
-        const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]);
-        const float ps = (s<(int)src_pressure.size()) ? src_pressure[(size_t)s] : 1.f;
-        const float Kbase = ps*ps/(4.f*M_PI*(float)Nrays);   // w_ray = ps^2/(4 pi Nrays)
-        const float Kspec = Kbase*RT_INVPI/R2;               // per specular crossing => ps^2/(4 pi^2 Nrays r_d^2)
+        const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]); // source in solver space
+        const float ps = (s<(int)src_pressure.size()) ? src_pressure[(size_t)s] : 1.f;                    // this source's pressure
+        const float Kdiff = ps*ps/(4.f*M_PI*(float)Nrays);   // w_ray = ps^2/(4 pi Nrays): energy carried by one ray
+        const float Kspec = Kdiff*RT_INVPI/R2;               // w_ray/(pi R^2): energy per specular detection-sphere crossing
 
         #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic)
@@ -402,6 +440,8 @@ inline static void rt_trace_late(const RTScene& S,
                             if(n0 >= 0 && n0 < Nt){
                                 for(int b = 0;b < RT_NBANDS; b++){
                                     const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f; // air^2 (energy)
+                                    // per-crossing energy (see derivation block above): sums over n_path
+                                    // crossings to the ISM image energy (ps Rp air/(4 pi d))^2; d cancels, R-independent
                                     const float e = Kspec * Rp[b]*Rp[b] * air2;
                                     float* cell = &e_spec[((size_t)b*Nr + rr)*Nt + n0];
                                     #ifdef _OPENMP
@@ -439,11 +479,11 @@ inline static void rt_trace_late(const RTScene& S,
                     const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;  // face the incoming side
                     for(int rr = 0; rr < Nr; rr++){
                         const vec3 br = sub3(rec[(size_t)rr], p1);
-                        const float d2 = norm2_3(br);
+                        const float d2 = norm2_3(br);                      // d_rec^2 = (B -> receiver)^2, the REAL distance
                         if(d2 < 1e-6f) continue;
-                        const float drec = std::sqrt(d2);
-                        const vec3 u = mul3(br, 1.f/drec);
-                        const float cosr = dot3(No, u);                    // cos(theta), Lambert weight
+                        const float drec = std::sqrt(d2);                  // d_rec
+                        const vec3 u = mul3(br, 1.f/drec);                 // unit B -> receiver
+                        const float cosr = dot3(No, u);                    // cos(theta) off the surface normal (Lambert weight)
                         if(cosr <= 0.f) continue;                          // receiver behind the surface
                         ray3 sr; sr.ox=p1.x+No.x*1e-4f; sr.oy=p1.y+No.y*1e-4f; sr.oz=p1.z+No.z*1e-4f;
                         sr.dx=u.x; sr.dy=u.y; sr.dz=u.z;
@@ -453,17 +493,20 @@ inline static void rt_trace_late(const RTScene& S,
                         if(d_run/c >= t_end) continue;
                         const int n0 = (int)((d_run/c)*fs);
                         if(n0 < 0 || n0 >= Nt) continue;
-                        // Lambert point-receiver INTENSITY: cos(theta)/(pi d_rec^2). This is
-                        // Recv_radius-INDEPENDENT, matching the specular's ISM-anchored point convention
-                        // (the specular bakes 1/r_d^2 into Kspec, so it too is Recv_radius-independent).
-                        // A detection-sphere solid-angle capture (~R^2) would be the energy-
-                        // histogram convention and is INCONSISTENT with the specular here.
+                        // Lambert point-receiver INTENSITY factor (see the derivation block above):
+                        //   geo = cos(theta) / (pi * d_rec^2)
+                        //   * cos(theta)/pi  = Lambert radiant intensity per unit source power,
+                        //   * 1/d_rec^2      = inverse-square spreading to the receiver POINT (real distance).
+                        // Note d_rec (physical B->receiver distance) -- NOT R (the detection-sphere radius).
+                        // The detector radius R must not appear here or the diffuse level would scale with a
+                        // solver knob; d_rec MUST appear because a farther receiver physically gets less.
                         const float geo = cosr * RT_INVPI / d2;   // cos(theta)/(pi d_rec^2)
                         for(int b = 0;b < RT_NBANDS; b++){
                             const float sb = std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b]));
                             if(sb <= 0.f) continue;
                             const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f;
-                            const float e = Kbase * sb * Rrefl[b]*Rrefl[b] * air2 * geo; // s(1-a)
+                            // e_diff = w_ray * s[b] * Rrefl^2 * air^2 * geo   (Kdiff == w_ray)
+                            const float e = Kdiff * sb * Rrefl[b]*Rrefl[b] * air2 * geo;
                             float* cell = &e_diff[((size_t)b*Nr + rr)*Nt + n0];
                             #ifdef _OPENMP
                             #pragma omp atomic
@@ -474,10 +517,9 @@ inline static void rt_trace_late(const RTScene& S,
                 }
 
                 // ---- ENERGY CONSERVATION: the ray carries the FULL reflected power (1-alpha)
-                // forward -- NO (1-s) drain. Scattering changes only the DIRECTION, not the
-                // energy, so scattered energy keeps bouncing (multiple scattering) and the tail
-                // decays at the absorption-governed rate regardless of s. (The old (1-s) drain
-                // dropped ~s of the energy every bounce, collapsing T60 as s grew.)
+                // forward. Scattering changes only the DIRECTION, not the energy, so scattered
+                // energy keeps bouncing (multiple scattering) and the tail decays at the
+                // absorption-governed rate for any s.
                 float alive=0.f;
                 for(int b = 0;b < RT_NBANDS; b++){ Rp[b] = Rrefl[b]; alive = std::max(alive, Rp[b]); }
                 if(alive < Rp_min) break;
@@ -500,6 +542,7 @@ inline static void rt_trace_late(const RTScene& S,
                 } else {
                     rt_compute_reflected(ref, d, N);
                 }
+                // change ray's direction
                 r.ox=p1.x + ref.x*1e-4f; r.oy=p1.y + ref.y*1e-4f; r.oz=p1.z + ref.z*1e-4f;
                 r.dx=ref.x; r.dy=ref.y; r.dz=ref.z;
             }

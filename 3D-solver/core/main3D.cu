@@ -1171,7 +1171,7 @@ int main(int argc, char *argv[]){
 			// avoid duplicating the ISM early reflections. Sum the energies per bin, root
 			// -> pressure, deposit as incoherent noise (random phase / sign).
 			for (int t = 1; t < (int)Nt; t++){
-				double e = e_diff[((size_t)b*Q.Nr + r)*Nt + t];
+				float e = e_diff[((size_t)b*Q.Nr + r)*Nt + t];
 				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;
 				p_hf[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * (float)std::sqrt(e);
