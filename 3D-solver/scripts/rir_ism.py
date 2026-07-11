@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 ROOM_DIM  = [3.4, 4.0, 3.0]  		# [Lx, Ly, Lz] metres
 FS        = 44100.0           		# Hz  — must match the binary reference
 C         = 343.23					# m/s
-MAX_ORDER = 3                 		# total ISM reflection order
+MAX_ORDER = 15                 		# total ISM reflection order
 
 # Energy absorption coefficients per surface  (α ∈ [0,1], R = sqrt(1−α))
 # Convention matches pyroomacoustics ShoeBox:
@@ -14,12 +14,12 @@ MAX_ORDER = 3                 		# total ISM reflection order
 #   south / north   →  y = 0   / y = Ly
 #   floor / ceiling →  z = 0   / z = Lz
 ALPHA = {
-    "west":    0.51,
-    "east":    0.90,
-    "south":   0.31,
-    "north":   0.10,
-    "floor":   0.10,
-    "ceiling": 0.04,
+    "west":    0.10,
+    "east":    0.30,
+    "south":   0.15,
+    "north":   0.70,
+    "floor":   0.50,
+    "ceiling": 0.22,
 }
 
 SOURCES = [
@@ -41,6 +41,20 @@ BINARY_DTYPE = np.float32
 Lx, Ly, Lz = ROOM_DIM
 R = {k: np.sqrt(max(0.0, 1.0 - v)) for k, v in ALPHA.items()}
 
+NW = 1024  # Hann window size for fractional delay — must match Nw in main3D.cu
+
+
+def deposit_fractional(rir, tau, amp):
+    """Hann-windowed sinc deposit, identical to deposit() in main3D.cu.
+
+    C:  rir[nn] += amp * 0.5*(1 + cos(2*pi*xx/Nw)) * sin(pi*xx)/(pi*xx),  xx = nn - tau
+    np.sinc(x) = sin(pi*x)/(pi*x), so np.sinc(xx) is the same sinc term.
+    """
+    t = int(tau)
+    nn = np.arange(max(0, t - NW//2), min(len(rir), t + NW//2 + 1))
+    xx = nn - tau
+    rir[nn] += amp * 0.5 * (1.0 + np.cos(2.0*np.pi*xx/NW)) * np.sinc(xx)
+
 
 # ── ISM ───────────────────────────────────────────────────────────────────────
 
@@ -57,7 +71,7 @@ def ism_rir(src_pos, src_pressure, rec_pos):
     xr, yr, zr = rec_pos
     lim = MAX_ORDER + 1
 
-    t_list, a_list = [], []
+    tau_list, a_list = [], []
 
     for l in range(-lim, lim + 1):
         for m in range(-lim, lim + 1):
@@ -85,21 +99,27 @@ def ism_rir(src_pos, src_pressure, rec_pos):
                                  * R["floor"]  ** abs(n-r) * R["ceiling"] ** abs(n))
                             amp *= src_pressure / (4.0 * np.pi * d)
 
-                            t_list.append(int(d / C * FS))
+                            tau_list.append(d / C * FS)
                             a_list.append(amp)
 
-    N = max(t_list) + 1
-    rir = np.zeros(N, dtype=np.float64)
-    for t, a in zip(t_list, a_list):
-        rir[t] += a
-    return rir
+    N = int(max(tau_list)) + 1
+    e = np.zeros(N, dtype=np.float64)   # ENERGY per bin
+
+    # INCOHERENT (geometrical-acoustics) summation: overlapping image arrivals add in
+    # ENERGY, not pressure -- phase is discarded. This is the GA assumption and matches
+    # the ray-tracer, so the two agree even in symmetric rooms where arrivals coincide.
+    # (Coherent pressure summation would be  rir[int(tau)] += a .)
+    for tau, a in zip(tau_list, a_list):
+        e[int(tau)] += a * a
+
+    return np.sqrt(e)                   # -> pressure magnitude per bin
 
 
 # ── Assert image source count ─────────────────────────────────────────────────
 # Virtual room order |I|+|J|+|K| ≤ N  ↔  |l−p|+|l|+|m−q|+|m|+|n−r|+|n| ≤ N
 # Analytic cumulative counts (generating fn [(1+z)/(1-z)]^3):
 #   N=0:1  N=1:7  N=2:25  N=3:63  N=4:129  N=5:231
-_EXPECTED = {0: 1, 1: 7, 2: 25, 3: 63, 4: 129, 5: 231}
+_EXPECTED = {n: (2*n + 1)*(2*n*n + 2*n + 3)//3 for n in range(MAX_ORDER + 1)}
 _count = sum(
     1
     for l in range(-(MAX_ORDER+1), MAX_ORDER+2)
@@ -130,7 +150,7 @@ for i, src in enumerate(SOURCES):
         ref   = np.fromfile(BINARY_FILES[i], dtype=BINARY_DTYPE)
         t_ref = np.arange(len(ref)) / FS * 1e3
         ax.plot(t_ref, ref, label="Reference (binary)", linestyle="--",
-                linewidth=0.8, alpha=0.75)
+                linewidth=0.8, alpha=0.75, c='r')
         t_peak_ref = int(np.argmax(np.abs(ref)))
         print(f"[src {i+1}] reference peak sample={t_peak_ref}  ({t_peak_ref/FS*1e3:.4f} ms)  amp={ref[t_peak_ref]:.6f}")
         print(f"[src {i+1}] Python    direct  amp ={rir[t_direct_py]:.6f}")
@@ -149,5 +169,5 @@ plt.suptitle(
     fontsize=11,
 )
 plt.tight_layout()
-plt.savefig("rir_comparison.png", dpi=150)
+#plt.savefig("rir_comparison.png", dpi=150)
 plt.show()
