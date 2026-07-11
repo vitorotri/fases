@@ -359,7 +359,7 @@ int main(int argc, char *argv[]){
 	float hh = 1.1; // average concentration of water vapour
 	for (int i = 0; i < 8; i++){
 		m_air[i] = alpha_air(p_a, hh, Temp, octave_bands[i]);
-		printf("[OK] m_air = %f \n", m_air[i]);
+		printf("[OK] m_air_%d = %f \n", i, m_air[i]);
 	}
     
     // ---------------------------------- Estimated T60s and f_Schroeder ---------------------------------------
@@ -389,7 +389,8 @@ int main(int argc, char *argv[]){
 		if (fA){ fwrite(&A_tot, sizeof(float), 1, fA); fclose(fA); }
 
 	}
-	for (int b = 0; b < 8; b++) printf(" [OK] estimated T60s	%.3f\n", T60[b]);
+	printf("\n[OK] estimated T60s\n\n");
+	for (int b = 0; b < 8; b++) printf("%.3f", T60[b]);
 
 	// --estimate fast path: stop before the heavy solver stages.
 	
