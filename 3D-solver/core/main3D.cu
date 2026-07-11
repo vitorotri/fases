@@ -389,7 +389,7 @@ int main(int argc, char *argv[]){
 		if (fA){ fwrite(&A_tot, sizeof(float), 1, fA); fclose(fA); }
 
 	}
-	for (int b = 0; b < 8; b++) printf(" [OK] estimated T60s	%.3\nf", T60[b]);
+	for (int b = 0; b < 8; b++) printf(" [OK] estimated T60s	%.3f\n", T60[b]);
 
 	// --estimate fast path: stop before the heavy solver stages.
 	
