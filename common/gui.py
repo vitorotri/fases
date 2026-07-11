@@ -2895,6 +2895,12 @@ class PointTable(QWidget):
             except (TypeError, ValueError): pass
         return pts
 
+    def get_names(self):
+        """Name (col 0) of every row, in table order. Row index matches the
+        source/receiver id the solver assigns (both come from this table)."""
+        return [(self._tbl.item(r, 0).text() if self._tbl.item(r, 0) else str(r + 1))
+                for r in range(self._tbl.rowCount())]
+
     def set_points(self, pts, emit_changed=True):
         """Replace all rows from numeric tuples (x, y, z[, p0]). Names reset to
         the row number. Used by Ctrl+Z point undo."""
@@ -4297,14 +4303,17 @@ class MainWindow(QMainWindow):
     def _populate_ray_table(self):
         self._ensure_ray_table()
         paths = self._gl._ray_paths; srcs = self._gl._ray_src
+        names = self._src_tbl.get_names()          # source id -> user name
         t = self._ray_tbl
         t.blockSignals(True)
         t.setRowCount(0)
         for rid in sorted(paths):
             segs = paths[rid]
             length = sum(math.dist(p0, p1) for p0, p1, o in segs if o >= 0)
+            sid = srcs.get(rid, 0)
+            sname = names[sid] if 0 <= sid < len(names) else str(sid)
             r = t.rowCount(); t.insertRow(r)
-            t.setItem(r, 0, QTableWidgetItem(str(srcs.get(rid, 0))))
+            t.setItem(r, 0, QTableWidgetItem(sname))
             t.setItem(r, 1, QTableWidgetItem(str(rid)))
             t.setItem(r, 2, QTableWidgetItem(f"{length:.2f}"))
         t.blockSignals(False)
