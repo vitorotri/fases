@@ -443,6 +443,7 @@ inline static void rt_trace_late(const RTScene& S,
                                     // per-crossing energy (see derivation block above): sums over n_path
                                     // crossings to the ISM image energy (ps Rp air/(4 pi d))^2; d cancels, R-independent
                                     const float e = Kspec * Rp[b]*Rp[b] * air2;
+                                    //const float e = Kspec * Rp[b]*Rp[b]; // amplitude validation
                                     float* cell = &e_spec[((size_t)b*Nr + rr)*Nt + n0];
                                     #ifdef _OPENMP
                                     #pragma omp atomic
@@ -468,6 +469,7 @@ inline static void rt_trace_late(const RTScene& S,
                     float al = (alpha_gb && gid>=0 && gid<S.ngroups) ? alpha_gb[(size_t)gid*RT_NBANDS+b] : 0.f;
                     al = std::max(0.f, std::min(0.999f, al));
                     Rrefl[b] = Rp[b] * std::fabs(R_oblique(al, ct));
+                    //Rrefl[b] = Rp[b] * std::fabs(R_oblique(al, 1.0)); // amplitude validation
                 }
 
                 // ---- DIFFUSE ESTIMATION -> e_diff: deterministically connect the bounce
@@ -507,6 +509,7 @@ inline static void rt_trace_late(const RTScene& S,
                             const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f;
                             // e_diff = w_ray * s[b] * Rrefl^2 * air^2 * geo   (Kdiff == w_ray)
                             const float e = Kdiff * sb * Rrefl[b]*Rrefl[b] * air2 * geo;
+                            //const float e = Kdiff * sb * Rrefl[b]*Rrefl[b] * geo; // amplitude validation
                             float* cell = &e_diff[((size_t)b*Nr + rr)*Nt + n0];
                             #ifdef _OPENMP
                             #pragma omp atomic
@@ -533,6 +536,7 @@ inline static void rt_trace_late(const RTScene& S,
                 const float sg = (sctr_g && gid>=0 && gid<S.ngroups)
                                ? std::max(0.f, std::min(1.f, sctr_g[(size_t)gid])) : 0.f;
                 vec3 ref;
+                
                 // The concept below can be found in Hanna Autio's thesis and in Brandão et al (2019, Aachen)
                 // called on-off scattering (Autio, Vardaxis, Hagberg) (2021)
                 if(sg > 0.f && rt_u01(seed) < sg){
@@ -542,6 +546,8 @@ inline static void rt_trace_late(const RTScene& S,
                 } else {
                     rt_compute_reflected(ref, d, N);
                 }
+                
+                //rt_compute_reflected(ref, d, N); // amplitude validation
                 // change ray's direction
                 r.ox=p1.x + ref.x*1e-4f; r.oy=p1.y + ref.y*1e-4f; r.oz=p1.z + ref.z*1e-4f;
                 r.dx=ref.x; r.dy=ref.y; r.dz=ref.z;

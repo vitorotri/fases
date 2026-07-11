@@ -1027,7 +1027,7 @@ int main(int argc, char *argv[]){
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
 	Nt = (int)(t_max/dt); // new number of samples
-	int Nw = 1024; // Hann window size for fractional delay
+	int Nw = 1024; // Hann window size for the fractional-delay deposit (sub-sample arrival timing)
 	
 	// ----- ray-traced late reverberant tail (continues the ISM past max_order) -----
 	// Flat absorption table for the BVH tracer: alpha_gb[gid*8 + band]. Z is indexed
@@ -1044,8 +1044,8 @@ int main(int argc, char *argv[]){
 	// ray count: user value from config.txt line 15 (conf_arr[14]) if present, else
 	// a safe default. The GUI seeds that field from Vol.bin (Vorlander <k>).
 	int   rt_nrays       = (conf_arr.size() > 14) ? std::max(1000, (int)conf_arr[14]) : 20000;
-	int   rt_max_order   = 200;      // energy floor kills most rays far sooner
-	float rt_recv_radius = 0.15f;     // [m] receiver radius (keep it 0.15)
+	int   rt_max_order   = 200;	// energy floor kills most rays far sooner
+	float rt_recv_radius = 0.15f; // [m] receiver radius (keep it around 0.10 m to match ray-tracer)
 	// per-group scattering: read the single value from input/sctr/<name>.sctr and expand
 	// to 8 octave bands (rt_scatter_bands). names[g+1] is material g (names[0]=BoundingBox).
 	std::filesystem::path sctr_dir = project_root / "input" / "sctr";
@@ -1067,8 +1067,15 @@ int main(int argc, char *argv[]){
 			}
 		}
 		sctr_g[(size_t)g] = gval;
-		float s8[8]; rt_scatter_bands(gval, s8);
-		for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = s8[b];
+		// rt_scatter_bands floors every band at ~0.01 (its first row), so gval<=0 would still
+		// inject ~1% diffuse through the next-event deposit while the stochastic draw (sctr_g)
+		// is off. Force a TRUE zero here so "no scattering" is actually none (validation).
+		if (gval <= 0.f){
+			for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = 0.f;
+		} else {
+			float s8[8]; rt_scatter_bands(gval, s8);
+			for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = s8[b];
+		}
 	}
 
 	// RT late field: two ENERGY buffers (specular / diffuse), rooted per bin at deposit.
@@ -1084,7 +1091,12 @@ int main(int argc, char *argv[]){
 		// allocate memory for high frequency IRs: for each rec, first index sample is time, second is
 		// receiver's index (flattened)
 		std::vector<float> p_hf(Nt * (size_t)Q.Nr);
-		// lambda expression for fractional-delay deposit, ref. Reuben Thomas (Thesis), Fu & Li (2016)
+		// Fractional-delay deposit (windowed sinc), ref. Reuben Thomas (Thesis), Fu & Li (2016).
+		// Places an arrival at its exact SUB-SAMPLE time -- this is a TIMING tool, independent
+		// of coherence (coherence is set by the sign of g). Incoherent audible IR: deposit each
+		// arrival's magnitude with a random sign, deposit(tau, rt_sign(...)*mag, ...). During the
+		// energy-echogram validation below it is bypassed (arrivals hard-binned as energy), hence
+		// uncomment the deposit() lines to switch the ISM to the timed path.
 		auto deposit = [&](float tau, float g, int rr, float dist){
 			int tt = (int)tau;
 			for (int n0 = -(int)(0.5*Nw); n0 <= (int)(0.5*Nw); n0++){
@@ -1099,6 +1111,7 @@ int main(int argc, char *argv[]){
 		for (int r = 0; r < Q.Nr; r++){
 			int t_cross = 0.0; // crossover time index, for late tail reverberation
 			std::vector<int> arrivals; // sample index of every deposited arrival, for the crossover
+			//std::vector<float> e_ism(Nt, 0.0); // INCOHERENT ISM energy per bin (GA: sum energy, not pressure)
 			// sum contributions of sources (real and virtual)
 			for (int s = 0; s < Q.Ns; s++){
 				// direct: guard the deposit only - do NOT skip the image loop
@@ -1109,11 +1122,12 @@ int main(int argc, char *argv[]){
         			if (t_0 < Nt){
         				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0);
         				gS_0 *= std::exp(-m_air[b]*d_0);
+        				// INCOHERENT (GA) energy deposit at the integer sample (validation path).
         				// no fractional delay
-            			//p_hf[flat(t_0, r, Nt)] += gS_0;
+            			//e_ism[t_0] += (float)gS_0 * gS_0;
             			// fractional delay
-            			deposit(tau_0, gS_0, r, d_0);
-            			
+            			deposit(tau_0,  rt_sign((unsigned)(t_0*2654435761u+r*40503u+b*97u))*gS_0, r, d_0);
+
             			if (t_0 > t_cross) t_cross = t_0;
             			arrivals.push_back(t_0);
         			}
@@ -1132,7 +1146,7 @@ int main(int argc, char *argv[]){
 					// for each surface k crossed by the image source
 					for(int k = 0; k < iS.angle_rad.size(); k++){
 						float theta = iS.angle_rad[k];
-						//float theta = 0.0; // (test for normal incidence, shoebox comparison)
+						//float theta = 0.0; // amplitude validation
 						float R = R_oblique(iS.alpha[k][b], std::cos(theta));
 						// scattered fraction leaves the specular path: keep sqrt(1-s) of the
 						// pressure (energy x (1-s)), matching the RT (1-s) split.
@@ -1146,10 +1160,11 @@ int main(int argc, char *argv[]){
 
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
 					gS *= std::exp(-m_air[b]*d);
-					// no fractionl delay
-					//p_hf[flat(t,r,Nt)] += gS;
+					// INCOHERENT (GA) energy deposit at the integer sample (validation path).
+					// no fractional delay
+					//e_ism[t] += (float)gS * gS;
 					// fractional delay
-					deposit(tau, gS, r, d);
+					deposit(tau, rt_sign((unsigned)(t*2654435761u+r*40503u+b*97u))*gS, r, d);
 				}
 			}
 			
@@ -1171,7 +1186,13 @@ int main(int argc, char *argv[]){
 			// the specular ISM lacks; e_spec (specular) only AFTER the ISM crossover, to
 			// avoid duplicating the ISM early reflections. Sum the energies per bin, root
 			// -> pressure, deposit as incoherent noise (random phase / sign).
+			// INCOHERENT (geometrical-acoustics) combine: ISM + RT scattered + RT specular
+			// energies ADD per bin, then sqrt -> pressure magnitude. Phase is discarded, so
+			// coinciding arrivals add in energy (sqrt(sum a^2)), matching the ray-tracer and
+			// the incoherent rir_ism.py. Random sign for the audible IR (comment for
+			// amplitude validation).
 			for (int t = 1; t < (int)Nt; t++){
+				//float e = e_ism[t] + e_diff[((size_t)b*Q.Nr + r)*Nt + t]; // amplitude valiation
 				float e = e_diff[((size_t)b*Q.Nr + r)*Nt + t];
 				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;

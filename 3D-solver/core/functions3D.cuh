@@ -1180,6 +1180,22 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 	}
 }
 
+// Heuristics absorption of air for lower frequencies.
+// Since the absorption of air is proportional to a*f^2,
+// then the energy-weighted mean coefficient is
+// 
+// 		<m> = a * <f^2> =
+// 		a * (1/f_cutoff) * int_0^{f_cutoff} f^2 df = 
+// 		a * f_cutoff^2 / sqrt(3) ~ 0.58 * f_cutoff
+// 	
+// Must be appllied to p and u, otherwise the
+// Riemann invariant W = p + rho c u is  not conserved.
+// To apply to each component of u, just multiply
+// them by the same factor as p (vector multiplication
+// by a scalar).
+__global__ void kernel_air(float *p, float *u, float *v, float *w, float f_cutoff){
+}
+
 // --------------------------------------- VOX file loading --------------------------------------------
 
 int load_vox(const char *path, float **S_out, int *Nx_out, int *Ny_out, float *Lx, float *Ly, float h){
