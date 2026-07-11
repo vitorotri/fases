@@ -27,7 +27,7 @@ __host__ float alpha_air(float p_a, float h, float T, float f){
 	B = std::pow(T/T_0,-5.0/2.0);
 	C = 0.01275*std::exp(-2239.1/T)*(1.0/(frO(p_a,h) + (f*f/frO(p_a,h))));
 	D = 0.10680*std::exp(-3352.0/T)*(1.0/(frN(p_a,h,T) + (f*f/frN(p_a,h,T))));
-	return 0.115*1e-3*8.686*f*f*(A + B*(C+D));
+	return 0.115*8.686*f*f*(A + B*(C+D));
 }
 
 // Barometric formula
