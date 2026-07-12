@@ -1045,7 +1045,7 @@ int main(int argc, char *argv[]){
 	// a safe default. The GUI seeds that field from Vol.bin (Vorlander <k>).
 	int   rt_nrays       = (conf_arr.size() > 14) ? std::max(1000, (int)conf_arr[14]) : 20000;
 	int   rt_max_order   = 200;	// energy floor kills most rays far sooner
-	float rt_recv_radius = 0.15f; // [m] receiver radius (keep it around 0.10 m to match ray-tracer)
+	float rt_recv_radius = 0.12f; // [m] receiver radius (keep it around 0.10 m to match ray-tracer)
 	// per-group scattering: read the single value from input/sctr/<name>.sctr and expand
 	// to 8 octave bands (rt_scatter_bands). names[g+1] is material g (names[0]=BoundingBox).
 	std::filesystem::path sctr_dir = project_root / "input" / "sctr";
@@ -1080,8 +1080,8 @@ int main(int argc, char *argv[]){
 
 	// RT late field: two ENERGY buffers (specular / diffuse), rooted per bin at deposit.
 	std::vector<float> e_spec, e_diff;
-	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(), sctr_g.data(),
-	              c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, e_spec, e_diff);
+	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(),
+			  sctr_g.data(), c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, e_spec, e_diff);
 
 	// compute IRs
 	// for each band
@@ -1126,7 +1126,7 @@ int main(int argc, char *argv[]){
         				// no fractional delay
             			//e_ism[t_0] += (float)gS_0 * gS_0;
             			// fractional delay
-            			deposit(tau_0,  rt_sign((unsigned)(t_0*2654435761u+r*40503u+b*97u))*gS_0, r, d_0);
+            			deposit(tau_0, rt_sign((unsigned)(t_0*2654435761u+r*40503u+b*97u))*gS_0, r, d_0);
 
             			if (t_0 > t_cross) t_cross = t_0;
             			arrivals.push_back(t_0);
