@@ -23,6 +23,10 @@ unsigned long long available_ram_bytes() {
 }
 
 int main(int argc, char *argv[]){
+    // Line-buffer stdout so every printf() line reaches the GUI log live (and is not lost in
+    // the block buffer if the solver aborts). stderr is unbuffered already. Piped stdout would
+    // otherwise be block-buffered and only flush in bursts / at exit.
+    setvbuf(stdout, NULL, _IOLBF, 0);
 	if (argc < 5) {
         printf("Usage: %s <scene> <config> <src> <rec> [poles] [--estimate]\n", argv[0]);
         return 1;
@@ -396,6 +400,22 @@ int main(int argc, char *argv[]){
 	
 	if (estimate_only){
 		printf("\n[OK] estimate: V = %.3f m^3, f_Schroeder = %.2f Hz\n", V, f_Schroeder);
+		// Pre-flight MEMORY estimate for the GUI: same accounting as the fail-fast block
+		// below (~36 B/voxel host, ~52 B/voxel device; thresholds 0.7 host / 0.9 device).
+		// Emitted as one parseable line so the GUI can warn/refuse BEFORE a real run.
+		{
+			size_t Nvox = (size_t)Nx * (size_t)Ny * (size_t)Nz;
+			unsigned long long avail = available_ram_bytes();
+			size_t gpu_free = 0, gpu_total = 0;
+			cudaMemGetInfo(&gpu_free, &gpu_total);
+			double need_host = 36.0 * (double)Nvox, need_dev = 52.0 * (double)Nvox;
+			double over = 0.0;
+			if (avail > 0     && need_host > 0.7 * (double)avail)    over = std::max(over, need_host / (0.7 * (double)avail));
+			if (gpu_total > 0 && need_dev  > 0.9 * (double)gpu_free) over = std::max(over, need_dev  / (0.9 * (double)gpu_free));
+			printf("[MEM] voxels=%zu need_host_gb=%.3f need_dev_gb=%.3f free_host_gb=%.3f free_dev_gb=%.3f over=%.4f min_h=%.4g\n",
+			       Nvox, need_host/1e9, need_dev/1e9, (double)avail/1e9, (double)gpu_free/1e9,
+			       over, over > 0.0 ? h*cbrt(over) : h);
+		}
 		free(S); free(oid); scene_free(&sc);
 		return 0;
 	}
@@ -600,8 +620,8 @@ int main(int argc, char *argv[]){
 	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
 	float lambda = c/f_cutoff;
 	if (lambda / h < 10.0f){
-		printf("[!] Resolution too low, aborting...\n\n");
-		return -1;
+		printf("[!] Resolution too low...\n\n");
+		//return -1;
 	}
 	
 	size_t Nt = (size_t) (t_max/dt) + 1; // number of iterations
@@ -896,7 +916,7 @@ int main(int argc, char *argv[]){
 		std::swap(psi_1_old, psi_1);
 		std::swap(psi_2_old, psi_2);
 			
-		print_progress(n, Nt, 50); // gui.py loads progress by querrying the output of this function!
+		print_progress_nobar(n, Nt); // gui.py loads progress by querrying the output of this function!
 		
 		// Copy result back to host for creating animation
 		cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
