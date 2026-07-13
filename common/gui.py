@@ -2954,10 +2954,16 @@ class SolverThread(QThread):
         self._proc = None
 
     def run(self):
-        import re
+        import re, shutil
         pct_re = re.compile(r"(\d+)\s*%")
+        # C stdout is block-buffered when piped (not a TTY), so printf() lines arrive in
+        # bursts and are LOST if the solver aborts. Force line-buffering via stdbuf so every
+        # line reaches the log live and survives a crash. (stderr is already unbuffered.)
+        cmd = self._cmd
+        if shutil.which("stdbuf"):
+            cmd = ["stdbuf", "-oL", "-eL"] + list(cmd)
         try:
-            self._proc = subprocess.Popen(self._cmd, cwd=self._cwd,
+            self._proc = subprocess.Popen(cmd, cwd=self._cwd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace", bufsize=1)
             for line in self._proc.stdout:
@@ -3459,7 +3465,7 @@ class MainWindow(QMainWindow):
             if sfx: s.setSuffix(f"  {sfx}")
             return s
 
-        # Estimate pass: runs the solver with --estimate (parse + V + T60, no FDTD)
+        # Estimate pass: runs the solver with --estimate (parse + V + T60, no FVM)
         # and fills the recommended Cutoff frequency / Number of rays below. Do this
         # first, after setting grid spacing + temperature.
         self._btn_estimate = QPushButton("≈\uFE0E  Estimate values")
@@ -4040,6 +4046,111 @@ class MainWindow(QMainWindow):
         self._cmd_preview.setText(
             f"{bin_disp}  {scene}  config/config.txt  input/src/src.txt  input/rec/rec.txt  config/poles.txt")
 
+    def _field_binding_h(self, voxels, h):
+        """Coarsest-constraint grid spacing that fits the FIELD allocation (36 B/vox host,
+        52 B/vox device) -- the BINDING gate, larger than the SDF grid. Returns the suggested
+        h (or None if it already fits / free memory is unreadable). Mirrors main3D.cu's budget,
+        so one suggestion clears both the SDF and field gates instead of iterating."""
+        try:
+            free_host = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        except Exception:
+            free_host = 0
+        free_dev = 0
+        try:
+            r = subprocess.run(["nvidia-smi", "--query-gpu=memory.free",
+                                "--format=csv,noheader,nounits"],
+                               capture_output=True, text=True, timeout=10)
+            free_dev = float(r.stdout.split()[0]) * 1024 * 1024      # MiB -> bytes
+        except Exception:
+            free_dev = 0
+        over = 0.0
+        if free_host > 0: over = max(over, (36.0 * voxels) / (0.7 * free_host))
+        if free_dev  > 0: over = max(over, (52.0 * voxels) / (0.9 * free_dev))
+        return h * over ** (1.0/3.0) if over > 1.0 else None
+
+    def _memory_preflight(self):
+        """Run --estimate and detect a memory blocker for the CURRENT h. Catches BOTH gates:
+        the early SDF/grid 'does not fit' abort (fires before [MEM], on stderr) and the parsed
+        [MEM] field-allocation budget. Returns a ready-to-show message string, or None if memory
+        is fine / the check couldn't run (binary missing, etc.) -> caller fails open."""
+        binary = self._bin_le.text()
+        bin_cmd = binary if os.path.isabs(binary) else os.path.join(self._proj_root, binary)
+        scene = self._obj_path
+        if scene.startswith(self._proj_root):
+            scene = os.path.relpath(scene, self._proj_root)
+        cmd = [bin_cmd, scene, "config/config.txt",
+               "input/src/src.txt", "input/rec/rec.txt", "--estimate"]
+        try:
+            r = subprocess.run(cmd, cwd=self._proj_root, capture_output=True,
+                               text=True, timeout=180)
+        except Exception:
+            return None
+        out = (r.stdout or "") + "\n" + (r.stderr or "")
+        # (a) early SDF / grid 'does not fit' abort. Its own suggested h only clears the SDF
+        # grid; re-derive the BINDING field-allocation h from its voxel count so a single change
+        # clears both gates (no iterating up in steps).
+        for ln in out.splitlines():
+            if ("does not fit" in ln) or ("Increase h" in ln and "voxels" in ln):
+                import re
+                mv = re.search(r"([0-9.eE+]+)\s*voxels", ln)
+                mh = re.search(r"h\s*=\s*([0-9.eE+\-]+)", ln)
+                hb = self._field_binding_h(float(mv.group(1)), float(mh.group(1))) if (mv and mh) else None
+                if hb:
+                    return ("Grid too fine for available memory: increase h to >= {:.4g} m "
+                            "(covers the SDF grid AND the field allocation in one step).".format(hb))
+                return ln.split("]", 1)[-1].strip()
+        # (b) structured field-allocation budget from the [MEM] line (needs the rebuilt binary)
+        for ln in out.splitlines():
+            if ln.startswith("[MEM]"):
+                d = {}
+                for tok in ln.split()[1:]:
+                    if "=" in tok:
+                        k, v = tok.split("=", 1)
+                        try: d[k] = float(v)
+                        except ValueError: pass
+                if d.get("over", 0.0) > 1.0:
+                    return ("Not enough memory: needs ~{:.2f} GB host / ~{:.2f} GB device, but only "
+                            "~{:.2f} / ~{:.2f} GB free. Increase h to >= {:.4g} m.".format(
+                                d.get("need_host_gb",0), d.get("need_dev_gb",0),
+                                d.get("free_host_gb",0), d.get("free_dev_gb",0), d.get("min_h",0)))
+                return None
+        return None
+
+    def _preflight_warnings(self):
+        """Pre-solve checks. Returns (blockers, advisories):
+          blockers   -- would exhaust RAM and freeze/crash the machine (memory): run REFUSED.
+          advisories -- accuracy only (resolution, sampling): the run completes, so overridable.
+        Resolution/sampling are pure Python (work without a rebuild); memory needs the binary's
+        [MEM] line and is skipped silently otherwise (fail-open)."""
+        block, warn = [], []
+        c  = math.sqrt(1.4 * 287.05 * (self._cfg["T_C"].value() + 273.15))  # speed of sound
+        h  = self._cfg["h"].value()
+        fc = self._cfg["f_cutoff"].value()
+        # SPATIAL RESOLUTION: >= 10 cells per shortest wavelength (dispersion floor). ADVISORY.
+        if h > 0.0 and fc > 0.0:
+            ppw = c / (fc * h)
+            if ppw < 10.0:
+                warn.append(
+                    "Grid too coarse: {:.1f} cells per wavelength at {:.0f} Hz (need >= 10). "
+                    "Reduce h to <= {:.4g} m, or lower the cutoff frequency.".format(ppw, fc, c/(10.0*fc)))
+        # OUTPUT SAMPLING: RT/ISM tail is sampled at 44.1 kHz (main3D.cu), so the cutoff must stay
+        # under the usable band or high frequencies alias. (The FVM solver's own dt = CFL*h/c gives
+        # fs = c/(CFL*h) >= 2*fc automatically once the resolution check holds, so no separate
+        # temporal warning is needed -- a coarse grid surfaces as the resolution advisory.) ADVISORY.
+        FS_OUT = 44100.0
+        if fc > 0.45 * FS_OUT:
+            warn.append(
+                "Cutoff {:.0f} Hz is above the usable output band (44.1 kHz sample rate, "
+                "{:.1f} kHz Nyquist). Lower the cutoff to <= {:.1f} kHz.".format(
+                    fc, FS_OUT/2000, 0.45*FS_OUT/1000))
+        # MEMORY (both gates: SDF grid + field allocation): exceeding host/device RAM aborts
+        # the solver or FREEZES the machine -> HARD BLOCK. _memory_preflight returns the ready
+        # message (or None).
+        mem_msg = self._memory_preflight()
+        if mem_msg:
+            block.append(mem_msg)
+        return block, warn
+
     def _run_solver(self):
         if not self._proj_root:
             QMessageBox.warning(self,"No project","Open project first."); return
@@ -4049,6 +4160,24 @@ class MainWindow(QMainWindow):
         self._src_tbl.save_file(os.path.join(self._proj_root,"input","src","src.txt"))
         self._rec_tbl.save_file(os.path.join(self._proj_root,"input","rec","rec.txt"))
         self._mat_panel.save_all()
+        # pre-flight checks. MEMORY over-budget is a HARD STOP -- it would exhaust RAM and
+        # freeze/crash the machine, so the run is refused outright (no override). Resolution /
+        # sampling only make the result inaccurate (the run still completes), so they warn with
+        # an override.
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        block, warn = self._preflight_warnings()
+        QApplication.restoreOverrideCursor()
+        if block:
+            QMessageBox.critical(self, "Cannot start simulation",
+                                 "\n\n".join("• " + b for b in block) +
+                                 "\n\nThe machine would run out of memory — fix this before running.")
+            return
+        if warn:
+            if QMessageBox.warning(self, "Check simulation settings",
+                                   "\n\n".join("• " + w for w in warn) + "\n\nStart anyway?",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                   QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
         scene = self._obj_path
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
@@ -4133,7 +4262,7 @@ class MainWindow(QMainWindow):
                    h = c / (PPW * f_cutoff). main3D aborts below 10 cells/lambda, so
                    PPW = 12 keeps a margin. Coarser h => fewer voxels => faster.
         t_max    : longest FINITE T60 across octave bands. t_max bounds the whole IR
-                   (FDTD + ISM + RT), so it must outlast the slowest-decaying band --
+                   (FVM + ISM + RT), so it must outlast the slowest-decaying band --
                    the last one still ringing sets when the room is silent (60 dB down).
                    estimate_T60s writes 1e9 for near-rigid bands, so those are skipped.
                    (500 Hz, T60[3], is the conventional single-number RT alternative.)
@@ -4187,17 +4316,28 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Vol -> recommended ray count (Vorlander <k>)
+        # Vol + surface area -> recommended ray count for the NEXT-EVENT diffuse tail.
+        # The diffuse detector shoots a shadow ray to the receiver at EVERY bounce, so the
+        # echogram is filled by ~Nrays*(bounces/ray) deposits, NOT by rare detection-sphere
+        # crossings. With bounces/ray = c*T_IR/mfp and mfp = 4V/A_tot [Kuttruff], the deposits
+        # per sample bin come out T_IR-independent:
+        #     deposits/bin = Nrays * c * A_tot / (4 V fs)  ->  Nrays = k' * 4 V fs / (c * A_tot)
+        # This is R-INDEPENDENT: the receiver radius only drives the minor late-SPECULAR
+        # (detection-sphere) channel, so a small auralization receiver (R<0.12 m) does NOT
+        # inflate it -- the old sphere formula N=V*fs/(c*pi*R^2) over-counted by ~100x.
+        # k' = target diffuse deposits per sample bin; ~100 gives per-bin ~1/sqrt(k')=10%,
+        # smoothed to ~1-2% over the ms envelope. Raise it if the LATE tail looks grainy
+        # (high-order bounces are the first to thin out in a very absorptive room).
         vol_path = os.path.join(cdir, "Vol.bin")
         if os.path.isfile(vol_path):
             try:
                 V = float(np.fromfile(vol_path, dtype=np.float32, count=1)[0])
                 if V > 0.0:
                     fs = 44100.0                      # RT/ISM sample rate (main3D.cu)
-                    R  = 0.15                         # MUST match main3D.cu rt_recv_radius
-                    k  = 1.0                          # target detections per sample bin
-                    N  = k * V * fs / (c * math.pi * R * R)
-                    self._nrays.setValue(int(max(1000, min(N, 50_000_000))))
+                    kp = 100.0                        # target diffuse deposits per sample bin
+                    S  = A_tot if (A_tot and A_tot > 0.0) else 6.0 * V**(2.0/3.0)  # fallback: cube-ish
+                    N  = kp * 4.0 * V * fs / (c * S)
+                    self._nrays.setValue(int(max(10_000, min(N, 10_000_000))))
 
                     # ISM max order from the mean-free-path relation with Polack's
                     # sqrt(V) mixing time: mfp = 4V/A_tot [Kuttruff], order to reach
@@ -4218,15 +4358,17 @@ class MainWindow(QMainWindow):
                 pass
 
     def _estimate_room(self):
-        """Run the solver's --estimate pass (parse + V + T60, no FDTD) so the
+        """Run the solver's --estimate pass (parse + V + T60, no FVM) so the
         recommended Cutoff frequency / Number of rays fill in BEFORE a real run.
         Needs no poles.txt/fit -- T60 uses only the .mat absorption."""
         if not self._proj_root:
             QMessageBox.warning(self, "No project", "Open a project folder first."); return
         if not self._obj_path:
             QMessageBox.warning(self, "No scene", "Load an OBJ first."); return
-        # write config so h / temperature are current for the estimate
+        # write config + materials so the estimate uses CURRENT values: T60/f_Schroeder depend
+        # on the .mat absorptions, which are otherwise only flushed on Run/Fit/Save.
         self._write_config(os.path.join(self._proj_root, "config", "config.txt"))
+        self._mat_panel.save_all()
         scene = self._obj_path
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
@@ -4238,7 +4380,9 @@ class MainWindow(QMainWindow):
                "--estimate"]
         self._btn_estimate.setEnabled(False)
         self._sb.showMessage("Estimating V, T60 …")
+        self._log.append("$ " + " ".join(cmd))
         self._estimate_thread = SolverThread(cmd, self._proj_root)
+        self._estimate_thread.output.connect(self._log.append)   # show its output in the Run log
         self._estimate_thread.done.connect(self._on_estimate_done)
         self._estimate_thread.start()
 
@@ -4246,12 +4390,20 @@ class MainWindow(QMainWindow):
         self._btn_estimate.setEnabled(True)
         if rc == 0:
             self._load_recommended()   # reads Vol.bin / f_Schroeder.bin, fills the fields
+            self._sb.showMessage("Estimate done — recommended values filled in.")
         else:
-            self._sb.showMessage(f"Estimate failed (rc={rc}) — check the scene/materials")
+            self._sb.showMessage(f"Estimate failed (rc={rc}).")
+            QMessageBox.warning(self, "Estimate failed",
+                f"The estimate pass exited with code {rc} and did NOT update the fields.\n\n"
+                "The most common cause is that the current grid is too fine to even build "
+                "(the estimate builds the SDF at the current h, so a small h can run out of "
+                "memory before it can recommend a coarser one).\n\n"
+                "Increase h (or lower the cutoff frequency) and retry. The Run-tab log shows "
+                "the solver's exact message (e.g. an SDF 'does not fit' line).")
 
     def _dump_rays(self):
         """Run the solver's --dump-rays pass (trace 'Debug rays' rays up to 'Order'
-        bounces, no FDTD) and overlay the paths on the 3D scene (purplish blue)."""
+        bounces, no FVM) and overlay the paths on the 3D scene (purplish blue)."""
         if not self._proj_root:
             QMessageBox.warning(self, "No project", "Open a project folder first."); return
         if not self._obj_path:
