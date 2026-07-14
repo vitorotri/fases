@@ -139,8 +139,8 @@ inline static void rt_scatter_bands(float g, float s_out[RT_NBANDS]){
 inline static int rt_t_cross(float V, float S, float c, float fs, int max_order){
 	// Polack
     //const float t_mix = std::sqrt(RT_TCROSS_NOVERLAP * V / (4.f*(float)M_PI * c*c*c * RT_TCROSS_DT_AUD)); // [s]
-    const float mfp   = (S > 0.f) ? 4.f*V/S : 0.f; // mean free path [m]
-    const float t_complete = (float)max_order * mfp / c; // [s]
+    const float mfp   = (S > 0.f) ? 4.0*V/S : 0.f; // mean free path [m] Kuttruff eq 5.14
+    const float t_complete = (float)max_order * mfp / c; // [s] use equation above in Kuttruff eq 5.12
     //return (int)(fs * std::min(t_mix, t_complete));
     return (int)(fs*t_complete);
 }
@@ -527,7 +527,7 @@ inline static void rt_trace_late(const RTScene& S,
                         // Note d_rec (physical B->receiver distance) -- NOT R (the detection-sphere radius).
                         // The detector radius R must not appear here or the diffuse level would scale with a
                         // solver knob; d_rec MUST appear because a farther receiver physically gets less.
-                        const float geo = cosr * RT_INVPI / d2;   // cos(theta)/(pi d_rec^2)
+                        const float geo = cosr * RT_INVPI / d2; // cos(theta)/(pi d_rec^2) (Kuttruff eq 4.22)
                         for(int b = 0;b < RT_NBANDS; b++){
                             const float sb = std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b]));
                             if(sb <= 0.f) continue;
@@ -572,7 +572,7 @@ inline static void rt_trace_late(const RTScene& S,
                     rt_compute_reflected(ref, d, N);
                 }
                 
-                //rt_compute_reflected(ref, d, N); // amplitude validation
+                //rt_compute_reflected(ref, d, N); // amplitude validation (comment block above)
                 // change ray's direction
                 r.ox=p1.x + ref.x*1e-4f; r.oy=p1.y + ref.y*1e-4f; r.oz=p1.z + ref.z*1e-4f;
                 r.dx=ref.x; r.dy=ref.y; r.dz=ref.z;

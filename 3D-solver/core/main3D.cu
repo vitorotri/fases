@@ -1073,7 +1073,7 @@ int main(int argc, char *argv[]){
 	// smears it. Nrays trades tail smoothness for time. Raise both if the tail is noisy.
 	// ray count: user value from config.txt line 15 (conf_arr[14]) if present, else
 	// a safe default. The GUI seeds that field from Vol.bin (Vorlander <k>).
-	int   rt_nrays       = (conf_arr.size() > 14) ? std::max(1000, (int)conf_arr[14]) : 20000;
+	int   rt_nrays       = (conf_arr.size() > 14) ? std::max(0, (int)conf_arr[14]) : 10000;
 	int   rt_max_order   = 200;	// energy floor kills most rays far sooner
 	float rt_recv_radius = 0.12f; // [m] receiver radius (keep it around 0.10 m to match ray-tracer)
 	// per-group scattering: read the single value from input/sctr/<name>.sctr and expand
@@ -1112,18 +1112,17 @@ int main(int argc, char *argv[]){
 	std::vector<float> e_spec, e_diff;
 	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(),
 			  sctr_g.data(), c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, e_spec, e_diff);
-
-	// ISM -> RT crossover = HYBRID min(mixing time, ISM completeness): the ISM owns time until the
-	// field mixes (Polack ~sqrt(V)) OR the exact ISM runs out of orders (max_order*mfp/c),
-	// whichever comes FIRST; the RT e_spec owns t > t_cross. Single source of truth in
-	// raytrace3D.h (rt_t_cross); same for every band/receiver, so compute it ONCE.
-	int t_cross = rt_t_cross(V, A_tot, c, fs, max_order);
+	
+	//int t_cross = (int)Nt; // ISM amplitude validation
+	//int t_cross = 0; // RT amplitude validation
+	
+	int t_cross = rt_t_cross(V, A_tot, c, fs, max_order); // index for t_cross, not value in seconds
 	if (t_cross < 1)        t_cross = 1;
 	if (t_cross >= (int)Nt) t_cross = (int)Nt - 1;
-	printf("\n[OK] t_cross = %f ms  (min of mixing time & ISM order %d, V = %.2f m^3)\n",
-	       (float)t_cross * 1000.0f / fs, max_order, V);
+	
+	printf("\n[OK] t_cross = %f ms\n", (float)t_cross * 1000.0f / fs);
 
-	// compute IRs
+	// compute IRs ISM fraction
 	// for each band
 	for (int b = 0; b < 8; b++){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
@@ -1149,7 +1148,7 @@ int main(int argc, char *argv[]){
 
 		// for each receiver
 		for (int r = 0; r < Q.Nr; r++){
-			//std::vector<float> e_ism(Nt, 0.0); // INCOHERENT ISM energy per bin (GA: sum energy, not pressure)
+			//std::vector<float> e_ism(Nt, 0.0); // incoherent ISM energy (amplitude validation)
 			// ISM specular contributions, deposited ONLY up to t_cross (the Polack mixing time
 			// computed above). Beyond it the field is diffuse and the RT e_spec takes over, so
 			// capping here prevents ISM/RT double-counting -- ONE pass, no arrivals list, no
@@ -1159,22 +1158,31 @@ int main(int argc, char *argv[]){
 			// they add incoherently (sqrt(K)), not coherently (K -> the spurious 2x-direct peak).
 			// Keying on tau shared one sign across them; key on aid instead.
 			unsigned aid = 0;
+			// Antithetic sign: consecutive arrivals pair up as (+base,-base) so the count is
+			// exactly 50/50 (+-1) -> kills the low-order positive lean, without an ordering/comb
+			// pattern (base is random per pair). Coincident arrivals land in different pairs, so
+			// they stay incoherent. Balances the COUNT only; energy |gS| is untouched.
+			auto asign = [&](unsigned k){
+				return rt_sign((k>>1)*2654435761u + (unsigned)r*40503u + (unsigned)b*97u) * ((k & 1u) ? -1.f : 1.f);
+			};
+			// for each source
 			for (int s = 0; s < Q.Ns; s++){
 				// direct (earliest arrival; guarded for consistency)
     			float d_0 = Q.direct_at(s, r); // 0.0f if blocked
     			if (d_0 > 0.0f){
         			float tau_0 = fs * d_0 / c; int t_0 = (int)tau_0;
         			if (t_0 < Nt && t_0 <= t_cross){
+        				// comment exp term below for amplitude validation
         				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0) * std::exp(-m_air[b]*d_0);
         				// INCOHERENT (GA) energy deposit at the integer sample (validation path).
-        				// no fractional delay
+        				// no fractional delay (amplitude validation)
             			//e_ism[t_0] += (float)gS_0 * gS_0;
             			// fractional delay
-            			deposit(tau_0, rt_sign((aid++)*2654435761u + (unsigned)r*40503u + (unsigned)b*97u)*gS_0, r, d_0);
+            			deposit(tau_0, asign(aid++)*gS_0, r, d_0);
         			}
     			}
 
-				// image sources
+				// image sources loop
 				for (const ISMImagePath& iS : Q.images_at(s, r)){
 					float d = iS.distance; float tau = fs * d / c; int t = (int)tau;
 					if (t >= Nt || t > t_cross) continue; // out of range, or handed to the RT
@@ -1192,11 +1200,13 @@ int main(int argc, char *argv[]){
 					}
 					// iS.amp in [0,1] handles curved surfaces (parser heuristic)
 					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d) * std::exp(-m_air[b]*d);
+					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d); // amplitude validation
+					
 					// INCOHERENT (GA) energy deposit at the integer sample (validation path).
-					// no fractional delay
+					// no fractional delay (amplitude validation)
 					//e_ism[t] += (float)gS * gS;
 					// fractional delay
-					deposit(tau, rt_sign((aid++)*2654435761u + (unsigned)r*40503u + (unsigned)b*97u)*gS, r, d);
+					deposit(tau, asign(aid++)*gS, r, d);
 				}
 			}
 
@@ -1209,12 +1219,13 @@ int main(int argc, char *argv[]){
 			// coinciding arrivals add in energy (sqrt(sum a^2)), matching the ray-tracer and
 			// the incoherent rir_ism.py. Random sign for the audible IR (comment for
 			// amplitude validation).
+			unsigned rid = 0; // antithetic pairing over non-zero bins: caps same-sign runs at 2, independent of t_cross/order
 			for (int t = 1; t < (int)Nt; t++){
-				//float e = e_ism[t] + e_diff[((size_t)b*Q.Nr + r)*Nt + t]; // amplitude valiation
+				//float e = e_ism[t]; // amplitude validation (comment below)
 				float e = e_diff[((size_t)b*Q.Nr + r)*Nt + t];
 				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;
-				p_hf[flat(t, r, Nt)] += rt_sign((unsigned)(t*2654435761u + r*40503u + b*97u)) * (float)std::sqrt(e);
+				p_hf[flat(t, r, Nt)] += asign(rid++) * (float)std::sqrt(e);
 				//p_hf[flat(t, r, Nt)] += (float)std::sqrt(e); // amplitude validation
 			}
 

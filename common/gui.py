@@ -3506,7 +3506,7 @@ class MainWindow(QMainWindow):
         # Number of rays for the ray-traced late tail (line 15 of config.txt; main3D
         # reads v[14]). Seeded from Vol.bin after a solve (Vorlander <k>); user may
         # override. Wide range for large rooms.
-        self._nrays = QSpinBox(); self._nrays.setRange(1000, 50_000_000)
+        self._nrays = QSpinBox(); self._nrays.setRange(0, 50_000_000)  # 0 = RT off (clean ISM-only test)
         self._nrays.setValue(20000); self._nrays.setMinimumWidth(130)
         lay.addRow("Number of rays:", self._nrays)
 
