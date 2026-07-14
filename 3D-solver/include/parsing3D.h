@@ -120,6 +120,20 @@ inline static size_t count_air_voxels(const float* S, size_t N){
     return n;
 }
 
+// Ghost band added on EACH side of the mesh bbox so surfaces flush with the domain edge are
+// still covered by the WENO5 stencil. The grid dims (Nx.., Lx..) INCLUDE it; the room ("air")
+// dims strip it. pad = PARSE3D_GHOST*h per side, so the grid is 2*PARSE3D_GHOST cells / 2*pad m
+// wider per axis than the room. (V = n_air*h^3 already excludes it: the ghost is outside the
+// walls where S<0, so it is not counted.)
+static const int PARSE3D_GHOST = 3;
+
+// Air-only (room, no ghost) cell counts from the padded grid dims.
+inline static void air_dims(int Nx,int Ny,int Nz, int* Nx_air,int* Ny_air,int* Nz_air){
+    if(Nx_air) *Nx_air = Nx - 2*PARSE3D_GHOST;
+    if(Ny_air) *Ny_air = Ny - 2*PARSE3D_GHOST;
+    if(Nz_air) *Nz_air = Nz - 2*PARSE3D_GHOST;
+}
+
 // ============================================================
 // OBJ parsing helpers
 // ============================================================
@@ -654,7 +668,7 @@ inline static bool parse_obj_3d(const std::string& path, Scene3D& Sc, float h){
     // Force scene min corner to (0,0,0) in transformed space
     //Sc.shift = v3(-Sc.bmin.x, -Sc.bmin.y, -Sc.bmin.z);
     // Force scene min corner to (0,0,0) in transformed space, padded
-    const int ng = 3;
+    const int ng = PARSE3D_GHOST;
 	const float pad = ng * h;
 	// 1) shift so transformed bbox min becomes 0
 	// 2) then inset the whole scene by +3h
@@ -841,7 +855,7 @@ inline static int build_sdf(Scene3D* sc, float h,
     if(!sc||!Nx||!Ny||!Nz||!Lx||!Ly||!Lz||!S) return 0;
     *Nx=*Ny=*Nz=0; *S=nullptr;
 
-    const int ng = 3;
+    const int ng = PARSE3D_GHOST;
 	const float pad = ng * h;
 
 	vec3 bmin, bmax;
