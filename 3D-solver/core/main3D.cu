@@ -452,8 +452,17 @@ int main(int argc, char *argv[]){
         }
     }
 
-    printf("\n\n[OK] Nx = %d  Ny = %d  Nz = %d\n", Nx, Ny, Nz);
-    printf("\n[Ok] Lx = %f  Ly = %f  Lz = %f\n", Lx, Ly, Lz);
+    // Room ("air") dimensions = the padded grid minus the WENO5 ghost band on each side.
+    // Nx/Ny/Nz and Lx/Ly/Lz stay the PADDED grid (needed for the FVM and the S.bin cache);
+    // these strip the 2*PARSE3D_GHOST ghost cells so the reported size is the actual room.
+    int Nx_air, Ny_air, Nz_air;
+    air_dims(Nx, Ny, Nz, &Nx_air, &Ny_air, &Nz_air);
+    float Lx_air = Lx - 2*PARSE3D_GHOST*h, Ly_air = Ly - 2*PARSE3D_GHOST*h, Lz_air = Lz - 2*PARSE3D_GHOST*h;
+
+    printf("\n\n[OK] grid  Nx = %d  Ny = %d  Nz = %d   (room %d x %d x %d + %d-cell ghost)\n",
+           Nx, Ny, Nz, Nx_air, Ny_air, Nz_air, 2*PARSE3D_GHOST);
+    printf("\n[Ok] room  Lx = %f  Ly = %f  Lz = %f   (padded domain %f x %f x %f)\n",
+           Lx_air, Ly_air, Lz_air, Lx, Ly, Lz);
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
     
@@ -1047,7 +1056,8 @@ int main(int argc, char *argv[]){
 	fs = 44100.0; // new sample rate
 	dt = 1.0/fs; // new time-step size
 	Nt = (int)(t_max/dt); // new number of samples
-	int Nw = 1024; // Hann window size for the fractional-delay deposit (sub-sample arrival timing)
+	int Nw = 32;   // Hann-windowed-sinc fractional-delay length (33 taps): plenty for sub-sample
+	               // timing, and its short support stops nearby arrivals' sinc tails from piling up.
 	
 	// ----- ray-traced late reverberant tail (continues the ISM past max_order) -----
 	// Flat absorption table for the BVH tracer: alpha_gb[gid*8 + band]. Z is indexed
@@ -1103,6 +1113,16 @@ int main(int argc, char *argv[]){
 	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(),
 			  sctr_g.data(), c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, e_spec, e_diff);
 
+	// ISM -> RT crossover = HYBRID min(mixing time, ISM completeness): the ISM owns time until the
+	// field mixes (Polack ~sqrt(V)) OR the exact ISM runs out of orders (max_order*mfp/c),
+	// whichever comes FIRST; the RT e_spec owns t > t_cross. Single source of truth in
+	// raytrace3D.h (rt_t_cross); same for every band/receiver, so compute it ONCE.
+	int t_cross = rt_t_cross(V, A_tot, c, fs, max_order);
+	if (t_cross < 1)        t_cross = 1;
+	if (t_cross >= (int)Nt) t_cross = (int)Nt - 1;
+	printf("\n[OK] t_cross = %f ms  (min of mixing time & ISM order %d, V = %.2f m^3)\n",
+	       (float)t_cross * 1000.0f / fs, max_order, V);
+
 	// compute IRs
 	// for each band
 	for (int b = 0; b < 8; b++){
@@ -1129,44 +1149,39 @@ int main(int argc, char *argv[]){
 
 		// for each receiver
 		for (int r = 0; r < Q.Nr; r++){
-			int t_cross = 0.0; // crossover time index, for late tail reverberation
-			std::vector<int> arrivals; // sample index of every deposited arrival, for the crossover
 			//std::vector<float> e_ism(Nt, 0.0); // INCOHERENT ISM energy per bin (GA: sum energy, not pressure)
-			// sum contributions of sources (real and virtual)
+			// ISM specular contributions, deposited ONLY up to t_cross (the Polack mixing time
+			// computed above). Beyond it the field is diffuse and the RT e_spec takes over, so
+			// capping here prevents ISM/RT double-counting -- ONE pass, no arrivals list, no
+			// Poisson crossover, since t_cross is known from V a priori.
+			// Per-ARRIVAL sign counter: coincident image sources (same int(tau), common in a
+			// shoebox and more numerous at higher order) must get INDEPENDENT random signs so
+			// they add incoherently (sqrt(K)), not coherently (K -> the spurious 2x-direct peak).
+			// Keying on tau shared one sign across them; key on aid instead.
+			unsigned aid = 0;
 			for (int s = 0; s < Q.Ns; s++){
-				// direct: guard the deposit only - do NOT skip the image loop
+				// direct (earliest arrival; guarded for consistency)
     			float d_0 = Q.direct_at(s, r); // 0.0f if blocked
     			if (d_0 > 0.0f){
-        			float tau_0 = fs * d_0 / c;
-        			int t_0 = (int)tau_0;
-        			if (t_0 < Nt){
-        				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0);
-        				gS_0 *= std::exp(-m_air[b]*d_0);
+        			float tau_0 = fs * d_0 / c; int t_0 = (int)tau_0;
+        			if (t_0 < Nt && t_0 <= t_cross){
+        				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0) * std::exp(-m_air[b]*d_0);
         				// INCOHERENT (GA) energy deposit at the integer sample (validation path).
         				// no fractional delay
             			//e_ism[t_0] += (float)gS_0 * gS_0;
             			// fractional delay
-            			deposit(tau_0, rt_sign((unsigned)(t_0*2654435761u+r*40503u+b*97u))*gS_0, r, d_0);
-
-            			if (t_0 > t_cross) t_cross = t_0;
-            			arrivals.push_back(t_0);
+            			deposit(tau_0, rt_sign((aid++)*2654435761u + (unsigned)r*40503u + (unsigned)b*97u)*gS_0, r, d_0);
         			}
     			}
 
-				// sum contributions of image sources for a given real source
-				// for each image-source 'iS' in container Q.images_at()
+				// image sources
 				for (const ISMImagePath& iS : Q.images_at(s, r)){
-					float d = iS.distance;
-					float tau = fs * d / c;
-					int t = (int)tau;
-					if (t >= Nt) continue; // safety guard
-					if (t > t_cross) t_cross = t;
-					arrivals.push_back(t);
-					float P = 1.0; // iterated product
-					// for each surface k crossed by the image source
+					float d = iS.distance; float tau = fs * d / c; int t = (int)tau;
+					if (t >= Nt || t > t_cross) continue; // out of range, or handed to the RT
+					float P = 1.0; // iterated product of per-surface reflection coefficients
 					for(int k = 0; k < iS.angle_rad.size(); k++){
 						float theta = iS.angle_rad[k];
-						//float theta = 0.0; // amplitude validation
+						//float theta = 0.0; // amplitude validation (normal incidence)
 						float R = R_oblique(iS.alpha[k][b], std::cos(theta));
 						// scattered fraction leaves the specular path: keep sqrt(1-s) of the
 						// pressure (energy x (1-s)), matching the RT (1-s) split.
@@ -1175,33 +1190,16 @@ int main(int argc, char *argv[]){
 							R *= std::sqrt(std::max(0.0f, 1.0f - sctr_gb[(size_t)gk*8 + b]));
 						P *= R;
 					}
-					// .amp is a factor rangining [0,1] that handles curved surfaces (part of the
-					// parser's heuristics)
-
-					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d);
-					gS *= std::exp(-m_air[b]*d);
+					// iS.amp in [0,1] handles curved surfaces (parser heuristic)
+					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d) * std::exp(-m_air[b]*d);
 					// INCOHERENT (GA) energy deposit at the integer sample (validation path).
 					// no fractional delay
 					//e_ism[t] += (float)gS * gS;
 					// fractional delay
-					deposit(tau, rt_sign((unsigned)(t*2654435761u+r*40503u+b*97u))*gS, r, d);
+					deposit(tau, rt_sign((aid++)*2654435761u + (unsigned)r*40503u + (unsigned)b*97u)*gS, r, d);
 				}
 			}
-			
-			// Crossover where the computed arrival count falls 2 sigma (Poisson) below the
-			// theoretical count Ns*(4/3)*pi*(c*t)^3/V: the ISM is complete before that point
-			// and misses a significant echo density after it. Fallback: last arrival (t_cross
-			// as accumulated above). Later ISM arrivals still sit on top as specular echoes.
-			std::sort(arrivals.begin(), arrivals.end());
-			for (int i = 0; i < (int)arrivals.size(); i++){
-				float ct = c * (arrivals[i] + 1) / fs;
-				float theo = Q.Ns * 4.0f * (float)M_PI * ct*ct*ct / (3.0f * V);
-				if (theo - (i + 1) > 2.0f * std::sqrt(theo)){
-					t_cross = arrivals[i];
-					break;
-				}
-			}
-			
+
 			// ray-tracer late field. e_diff (scattered) enters at ALL times -- it is energy
 			// the specular ISM lacks; e_spec (specular) only AFTER the ISM crossover, to
 			// avoid duplicating the ISM early reflections. Sum the energies per bin, root

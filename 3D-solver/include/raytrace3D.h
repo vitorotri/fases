@@ -120,6 +120,31 @@ inline static void rt_scatter_bands(float g, float s_out[RT_NBANDS]){
     for(int b=0;b<RT_NBANDS;++b) s_out[b] = tab[i][b] + t*(tab[i+1][b]-tab[i][b]);
 }
 
+// ISM -> RT crossover sample index t_cross = HYBRID of two limits, whichever comes FIRST:
+//   (1) MIXING TIME (Polack): the field turns perceptually diffuse. Image sources lie on a sphere
+//       of radius c*t, so the echo-density RATE is dN/dt = 4*pi*c^3*t^2/V; the field is "mixed"
+//       once RT_TCROSS_NOVERLAP reflections fall within the ear's window RT_TCROSS_DT_AUD:
+//           t_mix = sqrt( N_OVERLAP * V / (4*pi*c^3 * DT_AUD) )   [s]   (~ sqrt(V), order-free)
+//   (2) ISM COMPLETENESS: an order-N reflection travels ~N mean free paths (mfp = 4V/S), so the
+//       exact ISM only reaches t_complete = max_order * mfp / c   [s].
+// t_cross = min(t_mix, t_complete): the ISM owns time until EITHER the field mixes (high order)
+// OR the ISM runs out of orders (low order); beyond it the RT e_spec takes over. Returned as a
+// SAMPLE INDEX (fs * t). Ref: Polack -- 10 reflections within the 24 ms auditory window.
+#ifndef RT_TCROSS_NOVERLAP
+#define RT_TCROSS_NOVERLAP 10.f    // reflections overlapping within the auditory window
+#endif
+#ifndef RT_TCROSS_DT_AUD
+#define RT_TCROSS_DT_AUD   0.024f  // auditory temporal resolution [s]
+#endif
+inline static int rt_t_cross(float V, float S, float c, float fs, int max_order){
+	// Polack
+    //const float t_mix = std::sqrt(RT_TCROSS_NOVERLAP * V / (4.f*(float)M_PI * c*c*c * RT_TCROSS_DT_AUD)); // [s]
+    const float mfp   = (S > 0.f) ? 4.f*V/S : 0.f; // mean free path [m]
+    const float t_complete = (float)max_order * mfp / c; // [s]
+    //return (int)(fs * std::min(t_mix, t_complete));
+    return (int)(fs*t_complete);
+}
+
 // Fibonacci-sphere direction i of N (near-uniform on the unit sphere), origin o.
 inline static ray3 rt_fib_ray(const vec3& o, int i, int N){
     const float ga = 2.399963229728653f;                 // golden angle, pi*(3-sqrt5)
