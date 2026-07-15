@@ -622,8 +622,8 @@ int main(int argc, char *argv[]){
 	float f_max = std::min(f_time, f_space); // de facto maximum frequency being simulated in the mesh
 	printf("\n[OK] f_max = %f Hz (compare with desired cutoff limit)\n\n", f_max);
 	if (!(f_max >= f_cutoff)){
-		printf("[!] Sampling frequency = %f, too low, aborting...\n\n",fs);
-		return -1;
+		printf("[!] Sampling frequency = %f too low...\n\n",fs);
+		//return -1;
 	}
 	
 	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
