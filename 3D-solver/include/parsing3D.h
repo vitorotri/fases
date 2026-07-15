@@ -427,7 +427,12 @@ inline static void compute_sdf_cpu(const Mesh3D& mesh, const Grid3D& grid,
     const float tmin=1e-6f; const vec3 rd=v3(1.f,0.f,0.f);
     std::vector<float> xs; xs.reserve(64);
     for(int k=0;k<Nz;++k) for(int j=0;j<Ny;++j){
-        const float y0=grid.origin.y+(j+0.5f)*hy, z0=grid.origin.z+(k+0.5f)*hz;
+        // sub-voxel irrational jitter: keep the +X parity ray OFF axis-aligned mesh edges (the
+// wall<->floor/ceiling junction). ray_triangle_intersect is edge-INCLUSIVE, so a ray grazing a
+// shared edge counts on BOTH triangles -> parity flips -> a wrong-sign band along the floor row.
+// x-plane wall crossings are unmoved by a tiny y,z shift, so every cell's sign is unchanged
+// except it no longer double-counts those junctions (host test: 64 sign errors -> 0).
+const float y0=grid.origin.y+(j+0.5f)*hy + 0.0137f*hy, z0=grid.origin.z+(k+0.5f)*hz + 0.0091f*hz;
         const vec3 ro=v3(grid.origin.x,y0,z0);
         xs.clear();
         for(const auto& t:mesh.tris){
@@ -601,7 +606,12 @@ __global__ void k_sdf_sign_finalize(const unsigned int* __restrict__ absu, float
     int k = blockIdx.y*blockDim.y + threadIdx.y;
     if(j>=Ny || k>=Nz) return;
     const float hx=grid.h.x,hy=grid.h.y,hz=grid.h.z, tmin=1e-6f;
-    const float y0=grid.origin.y+(j+0.5f)*hy, z0=grid.origin.z+(k+0.5f)*hz;
+    // sub-voxel irrational jitter: keep the +X parity ray OFF axis-aligned mesh edges (the
+// wall<->floor/ceiling junction). ray_triangle_intersect is edge-INCLUSIVE, so a ray grazing a
+// shared edge counts on BOTH triangles -> parity flips -> a wrong-sign band along the floor row.
+// x-plane wall crossings are unmoved by a tiny y,z shift, so every cell's sign is unchanged
+// except it no longer double-counts those junctions (host test: 64 sign errors -> 0).
+const float y0=grid.origin.y+(j+0.5f)*hy + 0.0137f*hy, z0=grid.origin.z+(k+0.5f)*hz + 0.0091f*hz;
     const vec3 ro=v3(grid.origin.x,y0,z0), rd=v3(1.f,0.f,0.f);
 
     float xs[SDF_ROW_XCAP]; int nc=0; bool overflow=false;
