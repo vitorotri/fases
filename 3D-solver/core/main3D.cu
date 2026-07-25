@@ -798,44 +798,48 @@ int main(int argc, char *argv[]){
 	
 	// Ref. Sheaffer, Van Walstijn, Fazenda (2012) 
 	
-	std::vector<float> F_s(2*Nt, 0.0); // source's driving force
-	std::vector<float> u_s(2*Nt, 0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
+	std::vector<float> F_s(2*Nt + 1, 0.0); // source's driving force
+	std::vector<float> u_s(2*Nt + 1, 0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
 	
 	float Q_s, A_s; // source's quality factor and sphere's surface
-	float w_0, t_, sigma_s; // system's undamped resonant frequency, driving force's time delay and variance
+	float w_0, sigma_s; // system's undamped resonant frequency and variance
 	float beta_s; // bilinear operator
 	float M_s, R_s, K_s; // system's mass, damping and elasticity constants
 	float b0, b2, a1, a2, den_s; // H(z) filter coefficients and common denominator
+	float dt_half  = 0.5 * dt; // half time-step for arrays
+	int ts_; // driving force's time delay
 	
 	Q_s = 1.25;
 	A_s = 6.0 * h*h; // [m^2]
 	w_0 = 2.0 * M_PI * 30.0; // [rad/s]
-	beta_s = w_0 / tan(0.5 * w_0 * dt); // [rad/s]
+	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
-	M_s = 0.25; // [kg]
+	M_s = 0.025; // [kg]
 	R_s = w_0 * M_s / Q_s; // [rad * kg / s]
 	K_s = M_s * w_0*w_0; // [kg * rad^2 / s^2]
 	
-	den_s = M_s*beta_s*beta_s + R_s*beta*s + K_s;
+	den_s = M_s*beta_s*beta_s + R_s*beta_s + K_s;
 	
 	b0 = beta_s/den_s;
 	b2 = -b0;
 	a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
 	a2 = 1.0 - 2.0*R_s*beta_s/den_s;
 	
-	ts_ = 2; // samples of delay, at least 2 to be able to implement sphere's surface velocity properly
-	sigma_s = 9.25 * 1e-5;
+	sigma_s = 9.25 * 1e-5; 
+	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
 	
 	// sphere's surface driving force
-	for (int t = 0; t < 2*Nt; t++){
+	
+	for (int t = 0; t <= 2*Nt; t++){
 		//src_pressure[] is the specific source amplitude, pass this to kernel as well and exclude it from F
-		F_s[t] = expf(-(t - ts_)*(t - ts_) / (2.0*sigma_s*sigma_s));
+		F_s[t] = std::exp(-(t - ts_)*(t - ts_)*dt_half*dt_half / (2.0*sigma_s*sigma_s));
 	}
 	
 	// sphere's surface velocity - F(t) filtered with H(z)
-	for (int t = ts_; t < 2*Nt; t++){
-		u_s[t] = b0*F[t] + b2*F[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
+	for (int t = 2; t <= 2*Nt; t++){
+		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
 	}
+	
 		
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
