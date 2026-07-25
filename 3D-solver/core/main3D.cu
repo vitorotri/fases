@@ -754,8 +754,8 @@ int main(int argc, char *argv[]){
 	float *d_sidx;
 	
 	// copy source positions to device (timed source injections etc)
-	cudaMalloc(&d_sidx, src_flat.size() * sizeof(float));
-	cudaMemcpy(d_sidx, src_flat.data(), src_flat.size() * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMalloc(&d_sidx, src_flat.size() * sizeof(int));
+	cudaMemcpy(d_sidx, src_flat.data(), src_flat.size() * sizeof(int), cudaMemcpyHostToDevice);
 	
 	float *d_sval;
 	
@@ -942,6 +942,10 @@ int main(int argc, char *argv[]){
     	files_rec[ct].open(str, std::ios::app | std::ios::binary);
 	}
 	
+	// launch parameters for PCS source kernel
+	int TS = 256;                    // threads per block; 64–256 all fine at this scale
+	int BS = (N_src + bS - 1) / bS;  // enough blocks to cover N_src
+	
 	
 	size_t pbin_size = 0; // for plotting animation correctly
 	
@@ -963,6 +967,8 @@ int main(int argc, char *argv[]){
 		// (0)
 			
 		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+		
+		kernel_inject_PCS<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho0, A_s, Nx, Ny, N_src, 2*n);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
@@ -970,11 +976,15 @@ int main(int argc, char *argv[]){
 			
 		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
+		kernel_inject_PCS<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho0, A_s, Nx, Ny, N_src, 2*n + 2);
+
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
 		// (2)
 			
 		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+			
+		kernel_inject_PCS<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho0, A_s, Nx, Ny, N_src, 2*n + 1);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 

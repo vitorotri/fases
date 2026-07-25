@@ -926,7 +926,7 @@ __global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, flo
     }
 }
 
-__global__ void kernel_inject_source(float *p, float *u_s, float *sidx, float *sval, float SSP3w, float c, float h, float dt, float rho0, float A_s, int Nx, int Ny, int N_src, int nn){
+__global__ void kernel_inject_PCS(float *p, float *u_s, int *sidx, float *sval, float SSP3w, float c, float h, float dt, float rho0, float A_s, int Nx, int Ny, int N_src, int nn){
 
 	int s = blockIdx.x*blockDim.x + threadIdx.x;
 	if (s >= N_src) return;
