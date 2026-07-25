@@ -926,8 +926,11 @@ __global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, flo
     }
 }
 
-__global__ void kernel_inject_source(float *p, float *p_time, int i_src, int j_src, int k_src, int Nx, int Ny, int n){
-	p[flat3(i_src, j_src, k_src, Nx, Ny)] += p_time[n];
+__global__ void kernel_inject_source(float *p, float *u_s, float *sidx, float *sval, float SSP3w, float c, float h, float dt, float rho0, float A_s, int Nx, int Ny, int N_src, int nn){
+
+	int s = blockIdx.x*blockDim.x + threadIdx.x;
+	if (s >= N_src) return;
+	p[sidx[s]] += SSP3w * dt * c*c * sval[s] * u_s[nn] * rho0 * A_s / (h*h*h);
 }
 
 // WENO5 SSP-RK3 step 0
@@ -998,7 +1001,6 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		H_wP = H_w_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
 		// compute flux H_w-
 		H_wM = H_w_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
-		
 		
 		// stage updates
 		u1[Cijk] = u0[Cijk] + dt*(-F_uP + F_uM)/h;
@@ -1082,7 +1084,6 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// compute flux H_w-
 		H_wM = H_w_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
 		
-		
 		// stage updates
 		u2[Cijk] = 0.75f*u0[Cijk] + 0.25f*(u1[Cijk] + dt*((-F_uP + F_uM)/h));
 		v2[Cijk] = 0.75f*v0[Cijk] + 0.25f*(v1[Cijk] + dt*((-G_vP + G_vM)/h));
@@ -1164,7 +1165,6 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		H_wP = H_w_Godunov(p_V[0], p_V[1], w_V[0], w_V[1], rho, c);
 		// compute flux H_w-
 		H_wM = H_w_Godunov(p_V[2], p_V[3], w_V[2], w_V[3], rho, c);
-		
 		
 		// stage update
 		// trick to avoid yet another array for each field U is to use U1 as final u here (outp), since not used

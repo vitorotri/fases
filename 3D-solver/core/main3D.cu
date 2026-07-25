@@ -710,7 +710,8 @@ int main(int argc, char *argv[]){
     
     int i_src, j_src, k_src; // discretized position of source
     
-    std::vector<float> src_arr; // source array on host
+    std::vector<float> src_arr; // source array positions (for GA)
+    std::vector<int> src_flat; // source array indexes on host (for wave-based on GPU)
     std::vector<float> src_pressure; // sound pressure values for sources
     
     file.open(src_path);
@@ -731,13 +732,16 @@ int main(int argc, char *argv[]){
         	
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
-            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
             	// push positions into source array
         		src_arr.push_back(val_x);
         		src_arr.push_back(val_y);
         		src_arr.push_back(val_z);
+        		
+        		// push indexes into source array in the host
+        		src_flat.push_back(flat3(i_src, j_src, k_src, Nx, Ny));
         		
         		// sound pressure values into pressure array
         		src_pressure.push_back(val_s);
@@ -747,10 +751,17 @@ int main(int argc, char *argv[]){
 	file.close();
 	file.clear();
 	
-	// copy source positions to device (timed source injections etc)
-	cudaMalloc(&d_src, src_arr.size() * sizeof(float));
-	cudaMemcpy(d_src, src_arr.data(), src_arr.size() * sizeof(int), cudaMemcpyHostToDevice);
+	float *d_sidx;
 	
+	// copy source positions to device (timed source injections etc)
+	cudaMalloc(&d_sidx, src_flat.size() * sizeof(float));
+	cudaMemcpy(d_sidx, src_flat.data(), src_flat.size() * sizeof(float), cudaMemcpyHostToDevice);
+	
+	float *d_sval;
+	
+	// copy source pressures to device
+	cudaMalloc(&d_sval, src_pressure.size() * sizeof(float));
+	cudaMemcpy(d_sval, src_pressure.data(), src_pressure.size() * sizeof(float), cudaMemcpyHostToDevice);
     
     
     // parse receiver(s)
@@ -840,6 +851,11 @@ int main(int argc, char *argv[]){
 		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
 	}
 	
+	float *d_us;
+	
+	// copy sphere's surface velocity array to device
+	cudaMalloc(&d_us, u_s.size() * sizeof(float));
+	cudaMemcpy(d_us, u_s.data(), u_s.size() * sizeof(int), cudaMemcpyHostToDevice);
 		
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
