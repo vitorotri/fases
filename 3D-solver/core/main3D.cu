@@ -713,7 +713,6 @@ int main(int argc, char *argv[]){
     std::vector<float> src_arr; // source array on host
     std::vector<float> src_pressure; // sound pressure values for sources
     
-    
     file.open(src_path);
 	if (!file.is_open()){
     	fprintf(stderr, "[!] Failed to open sources: %s\n", src_path.string().c_str());
@@ -799,10 +798,11 @@ int main(int argc, char *argv[]){
 	
 	// Ref. Sheaffer, Van Walstijn, Fazenda (2012) 
 	
-	std::vector<float> u_s(2*Nt,0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
+	std::vector<float> F_s(2*Nt, 0.0); // source's driving force
+	std::vector<float> u_s(2*Nt, 0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
 	
 	float Q_s, A_s; // source's quality factor and sphere's surface
-	float w_0; // system's undamped resonant frequency
+	float w_0, t_, sigma_s; // system's undamped resonant frequency, driving force's time delay and variance
 	float beta_s; // bilinear operator
 	float M_s, R_s, K_s; // system's mass, damping and elasticity constants
 	float b0, b2, a1, a2, den_s; // H(z) filter coefficients and common denominator
@@ -823,8 +823,20 @@ int main(int argc, char *argv[]){
 	a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
 	a2 = 1.0 - 2.0*R_s*beta_s/den_s;
 	
+	ts_ = 2; // samples of delay, at least 2 to be able to implement sphere's surface velocity properly
+	sigma_s = 9.25 * 1e-5;
 	
+	// sphere's surface driving force
+	for (int t = 0; t < 2*Nt; t++){
+		//src_pressure[] is the specific source amplitude, pass this to kernel as well and exclude it from F
+		F_s[t] = expf(-(t - ts_)*(t - ts_) / (2.0*sigma_s*sigma_s));
+	}
 	
+	// sphere's surface velocity - F(t) filtered with H(z)
+	for (int t = ts_; t < 2*Nt; t++){
+		u_s[t] = b0*F[t] + b2*F[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
+	}
+		
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
 	
