@@ -242,12 +242,12 @@ int main(int argc, char *argv[]){
 		if (dump_rays){
 			RTScene rtS = rt_build(sc);
 			std::vector<vec3> srcs;   // all source positions from src.txt (world coords)
-			{
-				std::ifstream sf(src_path); std::string ln;
-				while (std::getline(sf, ln)){
-					if (ln.empty() || ln[0] == '#') continue;
-					std::istringstream is(ln); float x,y,z;
-					if (is >> x >> y >> z) srcs.push_back(v3(x,y,z));
+			std::ifstream sf(src_path); std::string ln;
+			while (std::getline(sf, ln)){
+				if (ln.empty() || ln[0] == '#') continue;
+				std::istringstream is(ln); float x,y,z;
+				if (is >> x >> y >> z){
+					srcs.push_back(v3(x,y,z));
 				}
 			}
 			if (srcs.empty()) srcs.push_back(v3(0,0,0));
@@ -733,7 +733,7 @@ int main(int argc, char *argv[]){
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
             	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
-            	p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
+            	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
             	// push positions into source array
         		src_arr.push_back(val_x);
@@ -748,6 +748,11 @@ int main(int argc, char *argv[]){
 	file.close();
 	file.clear();
 	
+	// copy source positions to device (timed source injections etc)
+	cudaMalloc(&d_src, src_arr.size() * sizeof(float));
+	cudaMemcpy(d_src, src_arr.data(), src_arr.size() * sizeof(int), cudaMemcpyHostToDevice);
+	
+    
     
     // parse receiver(s)
     
@@ -788,6 +793,36 @@ int main(int argc, char *argv[]){
 	}
 	file.close();
 	file.clear();
+	
+	
+	// ------------- Pre-compute PCS (Physically Constrained Source) sphere's surface velocity --------------
+	
+	// Ref. Sheaffer, Van Walstijn, Fazenda (2012) 
+	
+	std::vector<float> u_s(2*Nt,0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
+	
+	float Q_s, A_s; // source's quality factor and sphere's surface
+	float w_0; // system's undamped resonant frequency
+	float beta_s; // bilinear operator
+	float M_s, R_s, K_s; // system's mass, damping and elasticity constants
+	float b0, b2, a1, a2, den_s; // H(z) filter coefficients and common denominator
+	
+	Q_s = 1.25;
+	A_s = 6.0 * h*h; // [m^2]
+	w_0 = 2.0 * M_PI * 30.0; // [rad/s]
+	beta_s = w_0 / tan(0.5 * w_0 * dt); // [rad/s]
+	
+	M_s = 0.25; // [kg]
+	R_s = w_0 * M_s / Q_s; // [rad * kg / s]
+	K_s = M_s * w_0*w_0; // [kg * rad^2 / s^2]
+	
+	den_s = M_s*beta_s*beta_s + R_s*beta*s + K_s;
+	
+	b0 = beta_s/den_s;
+	b2 = -b0;
+	a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
+	a2 = 1.0 - 2.0*R_s*beta_s/den_s;
+	
 	
 	
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
@@ -894,7 +929,6 @@ int main(int argc, char *argv[]){
 		// Launch WENO3 kernel + SSP-RK3
 				
 		// (0)
-			
 			
 		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
@@ -1169,6 +1203,7 @@ int main(int argc, char *argv[]){
 			for (int s = 0; s < Q.Ns; s++){
 				// direct (earliest arrival; guarded for consistency)
     			float d_0 = Q.direct_at(s, r); // 0.0f if blocked
+    			// direct ray
     			if (d_0 > 0.0f){
         			float tau_0 = fs * d_0 / c; int t_0 = (int)tau_0;
         			if (t_0 < Nt && t_0 <= t_cross){
@@ -1181,7 +1216,6 @@ int main(int argc, char *argv[]){
             			deposit(tau_0, asign(aid++)*gS_0, r, d_0);
         			}
     			}
-
 				// image sources loop
 				for (const ISMImagePath& iS : Q.images_at(s, r)){
 					float d = iS.distance; float tau = fs * d / c; int t = (int)tau;
@@ -1225,8 +1259,8 @@ int main(int argc, char *argv[]){
 				float e = e_diff[((size_t)b*Q.Nr + r)*Nt + t];
 				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;
-				p_hf[flat(t, r, Nt)] += asign(rid++) * (float)std::sqrt(e);
 				//p_hf[flat(t, r, Nt)] += (float)std::sqrt(e); // amplitude validation
+				p_hf[flat(t, r, Nt)] += asign(rid++) * (float)std::sqrt(e);		
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
