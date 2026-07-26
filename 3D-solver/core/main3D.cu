@@ -730,8 +730,9 @@ int main(int argc, char *argv[]){
         	j_src = (int)(val_y / h);
         	k_src = (int)(val_z / h);
         	
-        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){
+        	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){ 
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
+        		// comment 2 lines below if injecting PCS
             	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
@@ -822,9 +823,9 @@ int main(int argc, char *argv[]){
 	float dt_half  = 0.5 * dt; // half time-step for arrays
 	int ts_; // driving force's time delay
 	
-	Q_s = 1.25;
+	Q_s = 2.0;
 	A_s = 6.0 * h*h; // [m^2]
-	w_0 = 2.0 * M_PI * 30.0; // [rad/s]
+	w_0 = 2.0 * M_PI * 10.0; // [rad/s]
 	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
 	M_s = 0.025; // [kg]
@@ -841,14 +842,14 @@ int main(int argc, char *argv[]){
 	sigma_s = 9.25 * 1e-5; 
 	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
 	
-	// sphere's surface driving force
+	// unique sphere's surface driving force
 	
 	for (int t = 0; t <= 2*Nt; t++){
 		//src_pressure[] is the specific source amplitude, pass this to kernel as well and exclude it from F
 		F_s[t] = std::exp(-(t - ts_)*(t - ts_)*dt_half*dt_half / (2.0*sigma_s*sigma_s));
 	}
 	
-	// sphere's surface velocity - F(t) filtered with H(z)
+	// unique sphere's surface velocity - F(t) filtered with H(z)
 	for (int t = 2; t <= 2*Nt; t++){
 		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
 	}
