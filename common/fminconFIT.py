@@ -521,6 +521,73 @@ Niter = 30       # number of iterations (MATLAB did outer loop; skrf uses max_it
 N = int(v[5])    # "number of poles" in MATLAB script (here: number of REAL starting poles)
 
 # --------------------------------------------------------------------------------
+# Persistent (cross-run) fit cache: a .fit is stamped with a signature of EXACTLY
+# what produced it -- the material's octave alphas + soft flag + every config value
+# that changes the result. On the next run, a material whose current signature
+# matches its stored one is up to date, so we load its .fit and skip the expensive
+# vector-fit + refinement. It is still plotted (R_tgt/R_hat recomputed cheaply).
+# --------------------------------------------------------------------------------
+import hashlib
+
+def _fit_sig(alpha_oct, soft):
+    """Stable content hash. Uses hashlib (NOT hash(), which is per-process salted)."""
+    a = np.round(np.atleast_1d(alpha_oct).ravel()[:8], 8)
+    canon = ("|".join(f"{x:.8g}" for x in a)
+             + f"|soft={int(bool(soft))}|h={h:.10g}|cfl={C_CFL:.10g}"
+             + f"|fc={float(f_cutoff):.10g}|T={float(Temp):.10g}|N={int(N)}")
+    return hashlib.sha1(canon.encode()).hexdigest()[:16]
+
+def _read_fit_sig(path):
+    """Return the '# sig <hex>' stamped in a .fit, or None if absent/unreadable."""
+    try:
+        with open(path) as f:
+            for line in f:
+                s = line.strip()
+                if s.lower().startswith("# sig"):
+                    return s.split()[-1]
+    except OSError:
+        return None
+    return None
+
+def _load_fit_coeffs(path):
+    """Parse an existing .fit back into (Rinf, A, zeta, B, C, alpha, beta) so a cached
+    material can be plotted without refitting. Mirrors the writer in fit_material()."""
+    section = None; Rinf = 0.0
+    A = []; zeta = []; B = []; C = []; alpha = []; beta = []
+    with open(path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                k = line.lower()
+                section = ("RINF"  if "r_inf" in k else
+                           "REAL"  if ("a_k" in k and "zeta_k" in k) else
+                           "CMPLX" if ("b_l" in k and "alpha_l" in k) else None)
+                continue
+            p = line.split()
+            if section == "RINF":
+                Rinf = float(p[0])
+            elif section == "REAL":
+                A.append(float(p[0])); zeta.append(float(p[1]))
+            elif section == "CMPLX":
+                B.append(float(p[0])); C.append(float(p[1]))
+                alpha.append(float(p[2])); beta.append(float(p[3]))
+    return (Rinf, np.array(A, float), np.array(zeta, float),
+            np.array(B, float), np.array(C, float),
+            np.array(alpha, float), np.array(beta, float))
+
+def _target_R(alpha_oct, soft):
+    """Recompute the fit TARGET (min-phase only, no VF) so cached materials still plot.
+    Same branches as fit_material()."""
+    Rmag_oct = R_from_alpha(alpha_oct)
+    if is_near_one(Rmag_oct):
+        R_tgt, _ = R_constant_from_octaves(freq, Rmag_oct)
+    else:
+        R_tgt, _, _ = min_phase_octave_cepstrum(freq, Rmag_oct, ext_oct=2, n_w=4096)
+    return -R_tgt if soft else R_tgt
+
+# --------------------------------------------------------------------------------
 # Block 2+3 per material: vector fit + fmincon/Hornikx-Cotte refinement
 # --------------------------------------------------------------------------------
 # The numerical pipeline is the original fminconFIT.py pipeline, wrapped so that
@@ -679,6 +746,7 @@ def fit_material(read_file, coefs_path, soft=False):
 
     os.makedirs(os.path.dirname(coefs_path), exist_ok=True)
     with open(coefs_path, 'w') as f:
+        f.write(f"# sig {_fit_sig(alpha_oct, soft)}\n")
         f.write("# R_inf\n")
         f.write(f"{Rinf}\n")
 
@@ -725,6 +793,24 @@ for m in mat_files:
     else:
         coefs_path = os.path.join(fit_dir, base + ".fit")
     soft = soft_reg.get(base, False)
+
+    # PERSISTENT skip: a .fit already built from these exact inputs is up to date.
+    # Load it, skip the VF + refinement, but still recompute R_tgt/R_hat so it PLOTS.
+    # --refit forces a full re-fit (it already wipes poles.txt above).
+    alpha_oct = np.atleast_1d(np.loadtxt(m)).ravel()[:8]
+    sig = _fit_sig(alpha_oct, soft)
+    if (not _args.refit) and os.path.isfile(coefs_path) and _read_fit_sig(coefs_path) == sig:
+        Rinf, A, zeta, B, Cc, alpha, beta = _load_fit_coeffs(coefs_path)
+        w = 2.0 * np.pi * freq
+        R_tgt = _target_R(alpha_oct, soft)
+        R_hat = R_expected(Rinf, A, B, Cc, alpha, beta, zeta, w)
+        rms = float(np.sqrt(np.mean(np.abs(R_hat - R_tgt) ** 2)))
+        K = len(zeta); L = len(alpha)
+        print(f"[{base}] unchanged — kept existing .fit (skipped refit)")
+        results.append((base, R_tgt, R_hat, rms))
+        K_all = max(K_all, K); L_all = max(L_all, L)
+        _alpha_cache[_alpha_key(m, soft)] = (coefs_path, K, L, (base, R_tgt, R_hat, rms))
+        continue
 
     key = _alpha_key(m, soft)
     if key in _alpha_cache:
