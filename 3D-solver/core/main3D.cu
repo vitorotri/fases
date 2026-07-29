@@ -823,9 +823,9 @@ int main(int argc, char *argv[]){
 	float dt_half  = 0.5 * dt; // half time-step for arrays
 	int ts_; // driving force's time delay
 	
-	Q_s = 2.0;
+	Q_s = 1.5;
 	A_s = 6.0 * h*h; // [m^2]
-	w_0 = 2.0 * M_PI * 10.0; // [rad/s]
+	w_0 = 2.0 * M_PI * 30.0; // [rad/s]
 	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
 	M_s = 0.025; // [kg]
@@ -858,7 +858,7 @@ int main(int argc, char *argv[]){
 	
 	// copy sphere's surface velocity array to device
 	cudaMalloc(&d_us, u_s.size() * sizeof(float));
-	cudaMemcpy(d_us, u_s.data(), u_s.size() * sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_us, u_s.data(), u_s.size() * sizeof(float), cudaMemcpyHostToDevice);
 		
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
@@ -979,7 +979,7 @@ int main(int argc, char *argv[]){
 			
 		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
-		kernel_inject_PCS<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, A_s, Nx, Ny, N_src, 2*n + 2);
+		kernel_inject_PCS<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, A_s, Nx, Ny, N_src, 2*n + 2);
 
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
