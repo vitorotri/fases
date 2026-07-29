@@ -1,0 +1,15 @@
+0.034       # h  [m]
+0.09   # t_max [s]
+1005  # f_cutoff [Hz]
+20      # temperature [°C]
+0.5      # CFL
+8                               # number of poles for the ADE
+1.0  # U_PML
+1.0  # D_PML
+1.0  # R_PML
+1.0  # L_PML
+0.0  # F_PML
+1.0  # B_PML
+1                               # ISM max reflection order
+408      # altitude [m]
+50829                               # number of rays (ray-traced tail)

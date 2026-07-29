@@ -555,6 +555,11 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
 }
 
 /*
+//
+// sPML Layer - "simple" PML according to:
+// 
+// https://reference.wolfram.com/language/PDEModels/tutorial/Acoustics/AcousticsTimeDomain.html
+// 
 __host__ __device__
 void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
           
@@ -602,10 +607,13 @@ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float 
     q[Cijk] -= s * q[Cijk];
 }
 */
+//
 // sPML Layer - "simple" PML according to:
 // 
 // https://reference.wolfram.com/language/PDEModels/tutorial/Acoustics/AcousticsTimeDomain.html
 // 
+// as well as Montanaro, Knöpfel, Heutschi and Pieren (2022) - "Parallelized FDTD simulations to improve
+// engineering models of urban road traffic noise"
 //
 __host__ __device__
 void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ u, float *__restrict__ u_old, float *__restrict__ v, float *__restrict__ v_old, float *__restrict__ w, float *__restrict__ w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML){

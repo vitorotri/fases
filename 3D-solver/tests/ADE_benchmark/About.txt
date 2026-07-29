@@ -1,0 +1,14 @@
+Tested with ADE_TST.py. Configurations:
+
+5.0				# Lx = Lz [m]
+10.0			# Ly [m]	
+(2.5, 5.0, 2.5)	# src_x, src_y
+(2.5, 7.5, 2.5)	# rec_x, rec_y
+
+Remaining simulation configurations are shown in config.txt.
+In all simulations, the domain is excited with a PCS with amplitude p0 = 2.5.
+IRnoise.bin is obtained with PMLs on all sides.
+IR0.bin is obtained with a rigid boundary (R = 0.999 at all frequencies) on the north wall and PMLs on the remaining surfaces.
+IR1.bin is obtained with an adapted material fitted with fminconFIT.py for the ADE on the north wall and PMLs on the remaining surfaces.
+Then the noise is subtracted from both signals and then their FFTs are divided so we can obtain the complex R
+and compare to the analytical rational one fitted by the model.
