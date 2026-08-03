@@ -949,8 +949,8 @@ __global__ void kernel_inject_PCS_SSP(float *p, float *u_s, int *sidx, float *sv
 
 	int s = blockIdx.x*blockDim.x + threadIdx.x;
 	if (s >= N_src) return;
-	//p[sidx[s]] += SSP3w * dt * c*c * sval[s] * u_s[nn] * rho0 * A_s / (h*h*h);
-	p[sidx[s]] += SSP3w * dt * c*c * u_s[nn] * rho0 * A_s / (h*h*h);
+	p[sidx[s]] += SSP3w * dt * c*c * sval[s] * u_s[nn] * rho0 * A_s / (h*h*h);
+	//p[sidx[s]] += SSP3w * dt * c*c * u_s[nn] * rho0 * A_s / (h*h*h);
 }
 
 // WENO5 SSP-RK3 step 0
@@ -1030,7 +1030,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 	
 		// other BCs
 		
-		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
 		
 	}
 }
@@ -1112,7 +1112,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
 		
 	}
 }
@@ -1195,7 +1195,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
 		
 	}
 }

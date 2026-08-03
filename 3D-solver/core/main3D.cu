@@ -827,12 +827,12 @@ int main(int argc, char *argv[]){
 	
 	Q_s = 1.0;
 	A_s = 6.0 * h*h; // [m^2]
+	w_0 = 2.0 * M_PI * 30.0; // [rad/s]
+	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
-	M_s = 0.100; // [kg]
-	w_0 = 2.0 * M_PI * 30.0; // [rad]s]
+	M_s = 0.025; // [kg]
 	R_s = w_0 * M_s / Q_s; // [rad * kg / s]
 	K_s = M_s * w_0*w_0; // [kg * rad^2 / s^2]
-	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
 	den_s = M_s*beta_s*beta_s + R_s*beta_s + K_s;
 	
@@ -841,7 +841,8 @@ int main(int argc, char *argv[]){
 	a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
 	a2 = 1.0 - 2.0*R_s*beta_s/den_s;
 	
-	sigma_s = 1.0 / (0.75*fs); // if sigma_s = dt => Gaussian variance spans the whole desired spectrum?
+	//sigma_s = 1.0 / (0.75*fs); // if sigma_s = dt => Gaussian variance spans the whole desired spectrum?
+	sigma_s = 0.5 / f_cutoff;
 	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
 	//ts_ = 2*dt_half;
 	
@@ -860,34 +861,24 @@ int main(int argc, char *argv[]){
 	
 	// Now since u_s[] is pre-computed without an amplitude in F_s[], and the system is LTI, it can be scaled
 	// in the end. From equation (12), the solution to p(r,t) is given, and since q^(t) = A_s u(t):
-	
+	/*
 	double dqhat; // dq^ / dt
 	double p_peak = 0.0;
+	float dist_sr = 0.75; // test (distance source receiver)
 	std::vector<double> p_ref(2*Nt + 1, 0.0); // p(r,t) - equation (12)
 	for (int t = 1; t < 2*Nt; t++){
 		dqhat = A_s * (u_s[t+1] - u_s[t-1]) / (2.0*dt_half);
-		p_ref[t] = rho * dqhat / (4.0 * M_PI); // reference distance is 1 meter
-		p_peak = std::fmax(p_peak, fabsf(p_ref[t]));
+		p_ref[t] = rho * dqhat / (4.0 * M_PI); // ref distance is 1m
+		p_peak = std::fmax(p_peak, std::fabs(p_ref[t]));
 	}
-	printf("\nsrc_pressure[0] before = %f\n", src_pressure[0]);
-	printf("\np_peak = %f\n", p_peak);
+	printf("\n Pa_per_N (1m) = %f\n", p_peak);
 	
-	//eta_cal = r_cal/(p_DC * h);
-	
+	float scale_s;
 	for (int s = 0; s < N_src; s++){
+		scale_s = src_pressure[s] / (float)p_peak;
 		src_pressure[s] /= (float)p_peak; // pA -> target Force [N]
-		printf("\nsource %d driving force = %f N\n", s, src_pressure[s]);
 	}
 	
-	
-	
-	
-	/*
-	// calibration test for source 0
-	for (int t = 0; t <= 2*Nt; t++){
-		u_s[t] *= src_pressure[0];
-	}
-	*/
 	
 	
 	
@@ -897,7 +888,7 @@ int main(int argc, char *argv[]){
     std::filesystem::path cdir = config_path.parent_path();
     std::vector<double> tmp(p_ref.size());
     for (size_t t = 0; t < p_ref.size(); t++){
-        tmp[t] = p_ref[t] * (double)src_pressure[0]; // [Pa] at 1 m, source 0
+        tmp[t] = p_ref[t] * (double)scale_s; // [Pa] at 1 m, source 0
     }
     FILE* fpr = fopen((cdir / "p_ref.bin").string().c_str(), "wb");
     fwrite(tmp.data(), sizeof(double), tmp.size(), fpr);
@@ -905,6 +896,50 @@ int main(int argc, char *argv[]){
     printf("[OK] p_ref.bin: %zu samples, dt/2 = %.9e s, peak = %.6f Pa\n",
            tmp.size(), dt_half, *std::max_element(tmp.begin(), tmp.end()));
 	}
+	*/
+	
+	
+	
+	double dqhat;
+	double p_peak = 0.0;
+	std::vector<double> p_ref(2*Nt + 1, 0.0);   // [Pa per N] at 1 m
+	for (int t = 1; t < 2*Nt; t++){
+		dqhat    = A_s * (u_s[t+1] - u_s[t-1]) / (2.0*dt_half);
+		p_ref[t] = rho * dqhat / (4.0 * M_PI);
+		p_peak   = std::fmax(p_peak, std::fabs(p_ref[t]));
+	}
+	printf("\n Pa_per_N (1m) = %.6e\n", p_peak);
+
+	for (int s = 0; s < N_src; s++)
+		src_pressure[s] /= (float)p_peak;   // [Pa] at 1 m -> driving force [N]
+
+	// analytic free-field waveforms at the validation distances
+	{
+		const double r_list[] = {0.25, 0.50, 1.00, 1.50, 2.00};
+		std::filesystem::path cdir = config_path.parent_path();
+		std::vector<double> tmp(p_ref.size());
+
+		printf("\n  analytic free-field peaks (source 0, eq. 12)\n");
+		printf("   file              r [m]      p [Pa]    dB SPL\n");
+		for (int q = 0; q < 5; q++){
+			double r  = r_list[q];
+			double pk = 0.0;
+			for (size_t t = 0; t < p_ref.size(); t++){
+				tmp[t] = p_ref[t] * (double)src_pressure[0] / r;   // [Pa] at r
+				if (std::fabs(tmp[t]) > pk) pk = std::fabs(tmp[t]);
+			}
+			char name[64];
+			snprintf(name, sizeof(name), "p_ref_%d.bin", q);
+			FILE* f = fopen((cdir / name).string().c_str(), "wb");
+			if (f){ fwrite(tmp.data(), sizeof(double), tmp.size(), f); fclose(f); }
+			printf("  %-16s %6.2f %11.6f %9.2f\n", name, r, pk, 20.0*log10(pk/2e-5));
+		}
+		printf("  (%zu samples each, dt/2 = %.9e s, rho = %.6f)\n",
+		       p_ref.size(), dt_half, rho);
+	}
+	
+	
+	
 	
 	// copy scaled arrays of sound source pressures
 	float *d_sval;
@@ -1030,7 +1065,7 @@ int main(int argc, char *argv[]){
 		// (0)
 		
 		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
-		
+			
 		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
@@ -1040,7 +1075,7 @@ int main(int argc, char *argv[]){
 		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
 		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
-
+		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
 		// (2)
