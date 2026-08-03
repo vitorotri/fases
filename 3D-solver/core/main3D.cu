@@ -859,30 +859,11 @@ int main(int argc, char *argv[]){
 		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
 	}
 	
-	// Now since u_s[] is pre-computed without an amplitude in F_s[], and the system is LTI, it can be scaled
-	// in the end. From equation (12), the solution to p(r,t) is given, and since q^(t) = A_s u(t):
+	
+	
+	
+	
 	/*
-	double dqhat; // dq^ / dt
-	double p_peak = 0.0;
-	float dist_sr = 0.75; // test (distance source receiver)
-	std::vector<double> p_ref(2*Nt + 1, 0.0); // p(r,t) - equation (12)
-	for (int t = 1; t < 2*Nt; t++){
-		dqhat = A_s * (u_s[t+1] - u_s[t-1]) / (2.0*dt_half);
-		p_ref[t] = rho * dqhat / (4.0 * M_PI); // ref distance is 1m
-		p_peak = std::fmax(p_peak, std::fabs(p_ref[t]));
-	}
-	printf("\n Pa_per_N (1m) = %f\n", p_peak);
-	
-	float scale_s;
-	for (int s = 0; s < N_src; s++){
-		scale_s = src_pressure[s] / (float)p_peak;
-		src_pressure[s] /= (float)p_peak; // pA -> target Force [N]
-	}
-	
-	
-	
-	
-	
 	// write p_ref of single src to file
 	{
     std::filesystem::path cdir = config_path.parent_path();
@@ -899,7 +880,6 @@ int main(int argc, char *argv[]){
 	*/
 	
 	
-	
 	double dqhat;
 	double p_peak = 0.0;
 	std::vector<double> p_ref(2*Nt + 1, 0.0);   // [Pa per N] at 1 m
@@ -912,6 +892,10 @@ int main(int argc, char *argv[]){
 
 	for (int s = 0; s < N_src; s++)
 		src_pressure[s] /= (float)p_peak;   // [Pa] at 1 m -> driving force [N]
+
+
+
+
 
 	// analytic free-field waveforms at the validation distances
 	{
