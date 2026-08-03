@@ -651,7 +651,8 @@ int main(int argc, char *argv[]){
 	// ---------------------------------- kernel options and extra arrays --------------------------------
 	
 	
-	float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well, depite below machine precision for float, so results may be wrong even with convergence!!!
+	//float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well
+	float eps = 1e-20; // WENO-Z
 	
 	try {
 		p1 = new float[N](); // sound pressure
@@ -711,8 +712,8 @@ int main(int argc, char *argv[]){
     int i_src, j_src, k_src; // discretized position of source
     
     std::vector<float> src_arr; // source array positions (for GA)
+    std::vector<float> src_pressure; // host values for sources
     std::vector<int> src_flat; // source array indexes on host (for wave-based on GPU)
-    std::vector<float> src_pressure; // sound pressure values for sources
     
     file.open(src_path);
 	if (!file.is_open()){
@@ -744,8 +745,8 @@ int main(int argc, char *argv[]){
         		// push indexes into source array in the host
         		src_flat.push_back(flat3(i_src, j_src, k_src, Nx, Ny));
         		
-        		// sound pressure values into pressure array
-        		src_pressure.push_back(val_s);
+        		// sound pressure values into host array, computed from L_peak,1m input by user
+        		src_pressure.push_back(2e-5 * powf(10.0, val_s / 20.0));
         	}
     	}
 	}
@@ -759,13 +760,13 @@ int main(int argc, char *argv[]){
 	// copy source positions to device (timed source injections etc)
 	cudaMalloc(&d_sidx, N_src * sizeof(int));
 	cudaMemcpy(d_sidx, src_flat.data(), N_src * sizeof(int), cudaMemcpyHostToDevice);
-	
+	/*
 	float *d_sval;
 	
 	// copy source pressures to device
 	cudaMalloc(&d_sval, N_src * sizeof(float));
 	cudaMemcpy(d_sval, src_pressure.data(), N_src * sizeof(float), cudaMemcpyHostToDevice);
-    
+    */
     
     // parse receiver(s)
     
@@ -810,27 +811,28 @@ int main(int argc, char *argv[]){
 	
 	// ------------- Pre-compute PCS (Physically Constrained Source) sphere's surface velocity --------------
 	
-	// Ref. Sheaffer, Van Walstijn, Fazenda (2012) 
+	// Ref. Sheaffer, Van Walstijn, Fazenda (2012)
+	// "A Physically Constrained Source Model for FDTD Acoustic Simulation"
 	
-	std::vector<float> F_s(2*Nt + 1, 0.0); // source's driving force
-	std::vector<float> u_s(2*Nt + 1, 0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
+	std::vector<double> F_s(2*Nt + 1, 0.0); // source's driving force
+	std::vector<double> u_s(2*Nt + 1, 0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
 	
-	float Q_s, A_s; // source's quality factor and sphere's surface
-	float w_0, sigma_s; // system's undamped resonant frequency and variance
-	float beta_s; // bilinear operator
-	float M_s, R_s, K_s; // system's mass, damping and elasticity constants
-	float b0, b2, a1, a2, den_s; // H(z) filter coefficients and common denominator
-	float dt_half  = 0.5 * dt; // half time-step for arrays
+	double Q_s, A_s; // source's quality factor and sphere's surface
+	double w_0, sigma_s; // system's undamped resonant frequency and variance
+	double beta_s; // bilinear operator
+	double M_s, R_s, K_s; // system's mass, damping and elasticity constants
+	double b0, b2, a1, a2, den_s; // H(z) filter coefficients and common denominator
+	double dt_half  = 0.5 * dt; // half time-step for arrays
 	int ts_; // driving force's time delay
 	
-	Q_s = 1.5;
+	Q_s = 1.0;
 	A_s = 6.0 * h*h; // [m^2]
-	w_0 = 2.0 * M_PI * 30.0; // [rad/s]
-	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
-	M_s = 0.025; // [kg]
+	M_s = 0.100; // [kg]
+	w_0 = 2.0 * M_PI * 30.0; // [rad]s]
 	R_s = w_0 * M_s / Q_s; // [rad * kg / s]
 	K_s = M_s * w_0*w_0; // [kg * rad^2 / s^2]
+	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
 	den_s = M_s*beta_s*beta_s + R_s*beta_s + K_s;
 	
@@ -839,14 +841,16 @@ int main(int argc, char *argv[]){
 	a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
 	a2 = 1.0 - 2.0*R_s*beta_s/den_s;
 	
-	sigma_s = 9.25 * 1e-5; 
+	sigma_s = 1.0 / (0.75*fs); // if sigma_s = dt => Gaussian variance spans the whole desired spectrum?
 	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
+	//ts_ = 2*dt_half;
 	
 	// unique sphere's surface driving force
 	
 	for (int t = 0; t <= 2*Nt; t++){
 		//src_pressure[] is the specific source amplitude, pass this to kernel as well and exclude it from F
-		F_s[t] = std::exp(-(t - ts_)*(t - ts_)*dt_half*dt_half / (2.0*sigma_s*sigma_s));
+		double td = (t - ts_) * dt_half;
+		F_s[t] = std::exp(-td*td / (2.0*sigma_s*sigma_s)); // (2.7 is the calibration factor)
 	}
 	
 	// unique sphere's surface velocity - F(t) filtered with H(z)
@@ -854,11 +858,67 @@ int main(int argc, char *argv[]){
 		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
 	}
 	
-	float *d_us;
+	// Now since u_s[] is pre-computed without an amplitude in F_s[], and the system is LTI, it can be scaled
+	// in the end. From equation (12), the solution to p(r,t) is given, and since q^(t) = A_s u(t):
+	
+	double dqhat; // dq^ / dt
+	double p_peak = 0.0;
+	std::vector<double> p_ref(2*Nt + 1, 0.0); // p(r,t) - equation (12)
+	for (int t = 1; t < 2*Nt; t++){
+		dqhat = A_s * (u_s[t+1] - u_s[t-1]) / (2.0*dt_half);
+		p_ref[t] = rho * dqhat / (4.0 * M_PI); // reference distance is 1 meter
+		p_peak = std::fmax(p_peak, fabsf(p_ref[t]));
+	}
+	printf("\nsrc_pressure[0] before = %f\n", src_pressure[0]);
+	printf("\np_peak = %f\n", p_peak);
+	
+	//eta_cal = r_cal/(p_DC * h);
+	
+	for (int s = 0; s < N_src; s++){
+		src_pressure[s] /= (float)p_peak; // pA -> target Force [N]
+		printf("\nsource %d driving force = %f N\n", s, src_pressure[s]);
+	}
+	
+	
+	
+	
+	/*
+	// calibration test for source 0
+	for (int t = 0; t <= 2*Nt; t++){
+		u_s[t] *= src_pressure[0];
+	}
+	*/
+	
+	
+	
+	
+	// write p_ref of single src to file
+	{
+    std::filesystem::path cdir = config_path.parent_path();
+    std::vector<double> tmp(p_ref.size());
+    for (size_t t = 0; t < p_ref.size(); t++){
+        tmp[t] = p_ref[t] * (double)src_pressure[0]; // [Pa] at 1 m, source 0
+    }
+    FILE* fpr = fopen((cdir / "p_ref.bin").string().c_str(), "wb");
+    fwrite(tmp.data(), sizeof(double), tmp.size(), fpr);
+    fclose(fpr);
+    printf("[OK] p_ref.bin: %zu samples, dt/2 = %.9e s, peak = %.6f Pa\n",
+           tmp.size(), dt_half, *std::max_element(tmp.begin(), tmp.end()));
+	}
+	
+	// copy scaled arrays of sound source pressures
+	float *d_sval;
+	
+	// copy source pressures to device
+	cudaMalloc(&d_sval, N_src * sizeof(float));
+	cudaMemcpy(d_sval, src_pressure.data(), N_src * sizeof(float), cudaMemcpyHostToDevice);
+	
+	float *d_us; // device array of u_s
 	
 	// copy sphere's surface velocity array to device
-	cudaMalloc(&d_us, u_s.size() * sizeof(float));
-	cudaMemcpy(d_us, u_s.data(), u_s.size() * sizeof(float), cudaMemcpyHostToDevice);
+	std::vector<float> u_s_f(u_s.begin(), u_s.end());
+	cudaMalloc(&d_us, u_s_f.size() * sizeof(float));
+	cudaMemcpy(d_us, u_s_f.data(), u_s_f.size() * sizeof(float), cudaMemcpyHostToDevice);
 		
 	// ----------------------- Define kernel parameters and copy sources to device --------------------------
 	
@@ -965,13 +1025,13 @@ int main(int argc, char *argv[]){
 
 	while(n < Nt){
 				
-		// Launch WENO3 kernel + SSP-RK3
+		// Launch WENO5 kernel + SSP-RK3
 				
 		// (0)
-			
+		
 		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 		
-		kernel_inject_PCS<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, A_s, Nx, Ny, N_src, 2*n);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
@@ -979,15 +1039,15 @@ int main(int argc, char *argv[]){
 			
 		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
-		kernel_inject_PCS<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, A_s, Nx, Ny, N_src, 2*n + 2);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
 
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
 		// (2)
-			
+		
 		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
-		kernel_inject_PCS<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, A_s, Nx, Ny, N_src, 2*n + 1);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 

@@ -749,7 +749,7 @@ __device__ float compute_beta_z(float *__restrict__ u, int r, int i, int j, int 
 	
 	return (13.0*b1*b1/12.0) + (0.25*b2*b2);
 }
-
+/*
 // compute alpha[r]
 // if S = 0, compute alpha, if 1, compute alpha~
 __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta, float eps, int r, int SS){
@@ -758,6 +758,17 @@ __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta,
 	int rr = SS*3 - SS*1 - r;
 	return dd[(int)abs(rr)]/(aux*aux);
 }
+*/
+
+// WENO-Z weights: Borges, Carmona, Costa & Don (2008), eqs. (25) and (28)
+// tau5 = |beta_0 - beta_2| is symmetric, so the SS mirroring does not affect it
+__device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta, float eps, int r, int SS){
+	float tau5  = fabsf(beta[0] - beta[2]);
+	float ratio = tau5 / (beta[r] + eps); // float32 overflow guard
+	int rr = SS*3 - SS*1 - r;
+	return dd[(int)abs(rr)] * (1.0f + ratio); // q = 1 (less dissipative)
+}
+
 
 // compute omega[r] - w here is distinct from velocity in z!
 __device__ float compute_w(float *alpha, int r){
@@ -934,11 +945,12 @@ __global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, flo
     }
 }
 
-__global__ void kernel_inject_PCS(float *p, float *u_s, int *sidx, float *sval, float SSP3w, float c, float h, float dt, float rho0, float A_s, int Nx, int Ny, int N_src, int nn){
+__global__ void kernel_inject_PCS_SSP(float *p, float *u_s, int *sidx, float *sval, float SSP3w, float c, float h, float dt, float rho0, float A_s, int Nx, int Ny, int N_src, int nn){
 
 	int s = blockIdx.x*blockDim.x + threadIdx.x;
 	if (s >= N_src) return;
-	p[sidx[s]] += SSP3w * dt * c*c * sval[s] * u_s[nn] * rho0 * A_s / (h*h*h);
+	//p[sidx[s]] += SSP3w * dt * c*c * sval[s] * u_s[nn] * rho0 * A_s / (h*h*h);
+	p[sidx[s]] += SSP3w * dt * c*c * u_s[nn] * rho0 * A_s / (h*h*h);
 }
 
 // WENO5 SSP-RK3 step 0
