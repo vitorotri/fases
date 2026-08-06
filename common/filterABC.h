@@ -106,3 +106,25 @@ int build_boundary_map(uint8_t *oid, int N, int *bmap){
     printf("\n[OK] Built boundary map\n");
     return nB;
 }
+
+// Compact index map for split-field PML cells: any cell inside an ENABLED absorbing band
+// of uniform thickness n_pml (cells) on every axis. pmap[c] = 0..nP-1 for PML, -1 interior.
+// Faces match sPML: L/R = x-lo/hi, B/F = y-lo/hi, D/U = z-lo/hi.
+int build_pml_map(int Nx, int Ny, int Nz, int n_pml,
+                  float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML,
+                  int *pmap){
+    int nP = 0;
+    for (int k = 0; k < Nz; k++){
+        for (int j = 0; j < Ny; j++){
+            for (int i = 0; i < Nx; i++){
+                size_t c = i + Nx*(j + k*Ny);
+                int inx = (L_PML != 0.0f && i <  n_pml) || (R_PML != 0.0f && i >= Nx - n_pml);
+                int iny = (B_PML != 0.0f && j <  n_pml) || (F_PML != 0.0f && j >= Ny - n_pml);
+                int inz = (D_PML != 0.0f && k <  n_pml) || (U_PML != 0.0f && k >= Nz - n_pml);
+                pmap[c] = (inx || iny || inz) ? nP++ : -1;
+            }
+        }
+    }
+    printf("\n[OK] Built PML map (%d cells)\n", nP);
+    return nP;
+}

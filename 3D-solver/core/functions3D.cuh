@@ -616,7 +616,7 @@ void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float 
 // engineering models of urban road traffic noise"
 //
 __host__ __device__
-void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ u, float *__restrict__ u_old, float *__restrict__ v, float *__restrict__ v_old, float *__restrict__ w, float *__restrict__ w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML){
+void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ u, float *__restrict__ u_old, float *__restrict__ v, float *__restrict__ v_old, float *__restrict__ w, float *__restrict__ w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w){
 	
 	const float d_x = perc_x * (float)Nx;
     const float d_y = perc_y * (float)Ny;
@@ -624,8 +624,8 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
 
     const int Cijk = flat3(i, j, k, Nx, Ny);
 
-    const float R0   = 0.01f;
-    const float m    = 4.0f;
+    const float R0   = 1e-6;
+    const float m    = 3.0;
     const float lnR0 = logf(R0);
 
     // Small guard to avoid division by zero without branching the profiles.
@@ -674,10 +674,12 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
     const float sig_v = B_PML * sy_M + F_PML * sy_P;
     const float sig_w = D_PML * sz_M + U_PML * sz_P;
 
-    p[Cijk] -= sig_p * dt * p_old[Cijk];
-    u[Cijk] -= sig_u * dt * u_old[Cijk];
-    v[Cijk] -= sig_v * dt * v_old[Cijk];
-    w[Cijk] -= sig_w * dt * w_old[Cijk];
+    const float dte = SSP_w * dt;
+    
+    p[Cijk] -= (1.0f - expf(-sig_p * dte)) * p_old[Cijk];
+    u[Cijk] -= (1.0f - expf(-sig_u * dte)) * u_old[Cijk];
+    v[Cijk] -= (1.0f - expf(-sig_v * dte)) * v_old[Cijk];
+    w[Cijk] -= (1.0f - expf(-sig_w * dte)) * w_old[Cijk];
 
 }
 
@@ -950,7 +952,6 @@ __global__ void kernel_inject_PCS_SSP(float *p, float *u_s, int *sidx, float *sv
 	int s = blockIdx.x*blockDim.x + threadIdx.x;
 	if (s >= N_src) return;
 	p[sidx[s]] += SSP3w * dt * c*c * sval[s] * u_s[nn] * rho0 * A_s / (h*h*h);
-	//p[sidx[s]] += SSP3w * dt * c*c * u_s[nn] * rho0 * A_s / (h*h*h);
 }
 
 // WENO5 SSP-RK3 step 0
@@ -1030,7 +1031,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 	
 		// other BCs
 		
-		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
 		
 	}
 }
@@ -1112,7 +1113,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25);
 		
 	}
 }
@@ -1195,7 +1196,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0/3.0);
 		
 	}
 }

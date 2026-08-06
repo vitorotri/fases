@@ -2765,7 +2765,8 @@ class PointTable(QWidget):
         # Column 0 is an editable Name (defaults to the row number). The numeric
         # columns follow; get_points()/save_file deliberately skip the name so
         # the solver file format (x y z [p0]) is unchanged.
-        cols = ["Name", "x (m)", "y (m)", "z (m)"] + (["p₀ (Pa)"] if has_amplitude else [])
+        # Unicode subscripts (QTableWidget headers are plain text, no HTML): L_p,1m
+        cols = ["Name", "x (m)", "y (m)", "z (m)"] + (["Lₚ,₁ₘ (dB)"] if has_amplitude else [])
         self._coff = 1            # numeric coordinates start at this column
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
         self._tbl = QTableWidget(0, len(cols))

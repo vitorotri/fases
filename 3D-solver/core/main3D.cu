@@ -745,7 +745,7 @@ int main(int argc, char *argv[]){
         		// push indexes into source array in the host
         		src_flat.push_back(flat3(i_src, j_src, k_src, Nx, Ny));
         		
-        		// sound pressure values into host array, computed from L_peak,1m input by user
+        		// sound pressure values into host array, computed from L_p,1m input by user
         		src_pressure.push_back(2e-5 * powf(10.0, val_s / 20.0));
         	}
     	}
@@ -841,8 +841,8 @@ int main(int argc, char *argv[]){
 	a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
 	a2 = 1.0 - 2.0*R_s*beta_s/den_s;
 	
-	//sigma_s = 1.0 / (0.75*fs); // if sigma_s = dt => Gaussian variance spans the whole desired spectrum?
-	sigma_s = 0.5 / f_cutoff;
+	//sigma_s = 1.0 / (0.75*fs);
+	sigma_s = 0.4 / f_cutoff;
 	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
 	//ts_ = 2*dt_half;
 	
@@ -859,17 +859,28 @@ int main(int argc, char *argv[]){
 		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
 	}
 	
+	// compute dq_hat to retrieve analytical peak for PCS and scale sources
+	double dqhat;
+	double p_peak = 0.0;
+	double r_ref = 1.0;
+	std::vector<double> p_ref(2*Nt + 1, 0.0);   // [Pa per N] at 1 m
+	for (int t = 1; t < 2*Nt; t++){
+		dqhat    = A_s * (u_s[t+1] - u_s[t-1]) / (2.0*dt_half);
+		p_ref[t] = rho * dqhat / (4.0 * M_PI); // reference for this is always at 1m from source (Lp,1m)
+		p_peak   = std::fmax(p_peak, std::fabs(p_ref[t]));
+	}
 	
+	// scale sources
+	for (int s = 0; s < N_src; s++){
+		src_pressure[s] /= (float)p_peak;   // [Pa] at 1 m -> driving force [N]
+	}
 	
-	
-	
-	/*
-	// write p_ref of single src to file
+	// write p_ref of single tst src/rec to file
 	{
     std::filesystem::path cdir = config_path.parent_path();
     std::vector<double> tmp(p_ref.size());
     for (size_t t = 0; t < p_ref.size(); t++){
-        tmp[t] = p_ref[t] * (double)scale_s; // [Pa] at 1 m, source 0
+        tmp[t] = p_ref[t] * (double)src_pressure[0] / r_ref; // [Pa] at 1 m, source 0
     }
     FILE* fpr = fopen((cdir / "p_ref.bin").string().c_str(), "wb");
     fwrite(tmp.data(), sizeof(double), tmp.size(), fpr);
@@ -877,26 +888,10 @@ int main(int argc, char *argv[]){
     printf("[OK] p_ref.bin: %zu samples, dt/2 = %.9e s, peak = %.6f Pa\n",
            tmp.size(), dt_half, *std::max_element(tmp.begin(), tmp.end()));
 	}
-	*/
 	
-	
-	double dqhat;
-	double p_peak = 0.0;
-	std::vector<double> p_ref(2*Nt + 1, 0.0);   // [Pa per N] at 1 m
-	for (int t = 1; t < 2*Nt; t++){
-		dqhat    = A_s * (u_s[t+1] - u_s[t-1]) / (2.0*dt_half);
-		p_ref[t] = rho * dqhat / (4.0 * M_PI);
-		p_peak   = std::fmax(p_peak, std::fabs(p_ref[t]));
-	}
-	printf("\n Pa_per_N (1m) = %.6e\n", p_peak);
-
-	for (int s = 0; s < N_src; s++)
-		src_pressure[s] /= (float)p_peak;   // [Pa] at 1 m -> driving force [N]
 
 
-
-
-
+	/*
 	// analytic free-field waveforms at the validation distances
 	{
 		const double r_list[] = {0.25, 0.50, 1.00, 1.50, 2.00};
@@ -921,7 +916,7 @@ int main(int argc, char *argv[]){
 		printf("  (%zu samples each, dt/2 = %.9e s, rho = %.6f)\n",
 		       p_ref.size(), dt_half, rho);
 	}
-	
+	*/
 	
 	
 	
@@ -970,7 +965,7 @@ int main(int argc, char *argv[]){
 		printf("[!] CUDA error: %s\n", cudaGetErrorString(err));
 	}
 	
-	size_t anim_step = (int)(0.025*Nt);
+	size_t anim_step = (int)(0.01*Nt);
 	if (anim_step == 0) anim_step = 1; // Nt < 40 would make n % anim_step divide by zero (fix this)
 	size_t frames = Nt/anim_step; // make denominator smaller for more frames
 	printf("\n[OK] anim_step = %d\n\n",anim_step);
@@ -1069,6 +1064,16 @@ int main(int argc, char *argv[]){
 		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+
+		// tst for energy
+		if (n % 100 == 0){
+    		cudaMemcpy(p1, d_p1, (size_t)Nx*Ny*Nz*sizeof(float), cudaMemcpyDeviceToHost);
+    		double S = 0.0;
+    		for (int k = 3; k < Nz-3; k++)
+    			for (int j = 3; j < Ny-3; j++)
+    				for (int i = 3; i < Nx-3; i++) S += p1[flat3(i,j,k,Nx,Ny)];
+    					printf("n=%6d  t=%7.2f ms  sum(p) = %+.6e\n", n, n*dt*1e3, S);
+		}
 
 		// sync
 		cudaDeviceSynchronize();
