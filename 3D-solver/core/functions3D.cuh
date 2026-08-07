@@ -553,7 +553,31 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	*/
     }
 }
+__host__ __device__
+void absorbTerm(float *p, float *u, float *v, float *w,
+                int i, int j, int k, int Nx, int Ny, int Nz,
+                float rho, float c, int d_xc, int d_yc, int d_zc,
+                float u_ref, float L_PML, float R_PML /*...*/)
+{
+    // ---- x-min face, outward normal (-1,0,0) ----
+    if (L_PML > 0.5f && i == 0) {
+        // angle sampled at the layer ENTRANCE, where amplitude is still full
+        const int Ce = flat3(d_xc, j, k, Nx, Ny);
+        const float ex = u[Ce], ey = v[Ce], ez = w[Ce];
+        const float em = sqrtf(ex*ex + ey*ey + ez*ez);
+        float cth = (em > 1e-6f*u_ref) ? fabsf(ex)/(em + 1e-20f) : 1.0f;
+        cth = fmaxf(cth, 0.30f);            // grazing clamp — see below
+        const float Z = rho*c/cth;
 
+        const int Cb = flat3(0, j, k, Nx, Ny);
+        const float un   = -u[Cb];          // component along outward normal
+        const float wout =  p[Cb] + Z*un;   // outgoing invariant, preserved
+        p[Cb] =  0.5f*wout;
+        u[Cb] = -0.5f*wout/Z;
+    }
+    // ---- x-max: i == Nx-1, normal (+1,0,0): un = +u[Cb], entrance at Nx-1-d_xc,
+    //      u[Cb] = +0.5f*wout/Z. Then repeat for y (v) and z (w).
+}
 /*
 //
 // sPML Layer - "simple" PML according to:
@@ -625,15 +649,20 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
     const int Cijk = flat3(i, j, k, Nx, Ny);
 
     const float R0   = 1e-6;
-    const float m    = 3.0;
     const float lnR0 = logf(R0);
-
+    const float m = 3.0;
+    /*
+    const float X = 1.1;
+    const float sigmax = X * c / h;
+	const float pref_x = sigmax, pref_y = sigmax, pref_z = sigmax;
+	*/
     // Small guard to avoid division by zero without branching the profiles.
     // If perc_* is zero, corresponding sigma terms collapse to ~0 after clamping.
+    
     const float inv_dxh = (d_x > 0.0f) ? 1.0f / (d_x * h) : 0.0f;
     const float inv_dyh = (d_y > 0.0f) ? 1.0f / (d_y * h) : 0.0f;
     const float inv_dzh = (d_z > 0.0f) ? 1.0f / (d_z * h) : 0.0f;
-
+	
     const float inv_dx  = (d_x > 0.0f) ? 1.0f / d_x : 0.0f;
     const float inv_dy  = (d_y > 0.0f) ? 1.0f / d_y : 0.0f;
     const float inv_dz  = (d_z > 0.0f) ? 1.0f / d_z : 0.0f;
@@ -654,11 +683,11 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
     yp = fminf(1.0f, fmaxf(0.0f, yp));
     zm = fminf(1.0f, fmaxf(0.0f, zm));
     zp = fminf(1.0f, fmaxf(0.0f, zp));
-
+	
     const float pref_x = -0.5f * c * (m + 1.0f) * lnR0 * inv_dxh;
     const float pref_y = -0.5f * c * (m + 1.0f) * lnR0 * inv_dyh;
     const float pref_z = -0.5f * c * (m + 1.0f) * lnR0 * inv_dzh;
-
+	
     const float sx_M = pref_x * powf(xm, m);   // x-
     const float sx_P = pref_x * powf(xp, m);   // x+
     const float sy_M = pref_y * powf(ym, m);   // y-
@@ -1032,6 +1061,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// other BCs
 		
 		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
+		absorbTerm(p, u, v, w, i,j,k, Nx,Ny,Nz, rho, c, d_xc,d_yc,d_zc, u_ref, ...);
 		
 	}
 }
