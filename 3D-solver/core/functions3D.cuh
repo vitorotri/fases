@@ -553,31 +553,6 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	*/
     }
 }
-__host__ __device__
-void absorbTerm(float *p, float *u, float *v, float *w,
-                int i, int j, int k, int Nx, int Ny, int Nz,
-                float rho, float c, int d_xc, int d_yc, int d_zc,
-                float u_ref, float L_PML, float R_PML /*...*/)
-{
-    // ---- x-min face, outward normal (-1,0,0) ----
-    if (L_PML > 0.5f && i == 0) {
-        // angle sampled at the layer ENTRANCE, where amplitude is still full
-        const int Ce = flat3(d_xc, j, k, Nx, Ny);
-        const float ex = u[Ce], ey = v[Ce], ez = w[Ce];
-        const float em = sqrtf(ex*ex + ey*ey + ez*ez);
-        float cth = (em > 1e-6f*u_ref) ? fabsf(ex)/(em + 1e-20f) : 1.0f;
-        cth = fmaxf(cth, 0.30f);            // grazing clamp — see below
-        const float Z = rho*c/cth;
-
-        const int Cb = flat3(0, j, k, Nx, Ny);
-        const float un   = -u[Cb];          // component along outward normal
-        const float wout =  p[Cb] + Z*un;   // outgoing invariant, preserved
-        p[Cb] =  0.5f*wout;
-        u[Cb] = -0.5f*wout/Z;
-    }
-    // ---- x-max: i == Nx-1, normal (+1,0,0): un = +u[Cb], entrance at Nx-1-d_xc,
-    //      u[Cb] = +0.5f*wout/Z. Then repeat for y (v) and z (w).
-}
 /*
 //
 // sPML Layer - "simple" PML according to:
@@ -1010,8 +985,6 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// compute WENO values V_i+, V_i-
 		compute_Vs_x(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_x(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_x(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_x(w_V, w0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux F_p+
 		F_pP = F_p_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c);
@@ -1024,9 +997,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_y(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_y(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(w_V, w0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c);
@@ -1039,8 +1010,6 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// compute WENO values V_k+, V_k- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_z(p_V, p0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(u_V, u0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(v_V, v0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_z(w_V, w0, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux H_p+
@@ -1061,7 +1030,6 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// other BCs
 		
 		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
-		absorbTerm(p, u, v, w, i,j,k, Nx,Ny,Nz, rho, c, d_xc,d_yc,d_zc, u_ref, ...);
 		
 	}
 }
@@ -1093,8 +1061,6 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// compute WENO values V_i+, V_i-
 		compute_Vs_x(p_V, p1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_x(u_V, u1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_x(v_V, v1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_x(w_V, w1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux F_p+
 		F_pP = F_p_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c);
@@ -1107,9 +1073,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_y(p_V, p1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(u_V, u1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_y(v_V, v1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(w_V, w1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c);
@@ -1122,8 +1086,6 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// compute WENO values V_k+, V_k- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_z(p_V, p1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(u_V, u1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(v_V, v1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_z(w_V, w1, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux H_p+
@@ -1175,8 +1137,6 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// compute WENO values V_i+, V_i-
 		compute_Vs_x(p_V, p2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_x(u_V, u2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_x(v_V, v2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_x(w_V, w2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux F_p+
 		F_pP = F_p_Godunov(p_V[0], p_V[1], u_V[0], u_V[1], rho, c);
@@ -1189,9 +1149,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// compute WENO values V_j+, V_j- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_y(p_V, p2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(u_V, u2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_y(v_V, v2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_y(w_V, w2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux G_p+
 		G_pP = G_p_Godunov(p_V[0], p_V[1], v_V[0], v_V[1], rho, c);
@@ -1204,8 +1162,6 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// compute WENO values V_k+, V_k- (re-use of arrays p_V, u_V and v_V)
 		compute_Vs_z(p_V, p2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(u_V, u2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
-		compute_Vs_z(v_V, v2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		compute_Vs_z(w_V, w2, dd, c_rl, beta_rl, i, j, k, Nx, Ny, eps);
 		
 		// compute flux H_p+

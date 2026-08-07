@@ -734,7 +734,7 @@ int main(int argc, char *argv[]){
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){ 
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
         		// comment 2 lines below if injecting PCS
-            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
             	// push positions into source array
@@ -875,7 +875,7 @@ int main(int argc, char *argv[]){
 	}
 	
 	// write p_ref of single tst src/rec to file (comment session below)
-	/*
+	
 	{
     std::filesystem::path cdir = config_path.parent_path();
     std::vector<double> tmp(p_ref.size());
@@ -888,8 +888,8 @@ int main(int argc, char *argv[]){
     printf("[OK] p_ref.bin: %zu samples, dt/2 = %.9e s, peak = %.6f Pa\n",
            tmp.size(), dt_half, *std::max_element(tmp.begin(), tmp.end()));
 	}
-	*/
 	
+	/*
 	// analytic free-field waveforms at the validation distances (comment session above)
 	{
 		const double r_list[] = {0.25, 0.50, 1.00, 1.50, 2.00};
@@ -914,7 +914,7 @@ int main(int argc, char *argv[]){
 		printf("  (%zu samples each, dt/2 = %.9e s, rho = %.6f)\n",
 		       p_ref.size(), dt_half, rho);
 	}
-	
+	*/
 	
 	
 	
@@ -1043,7 +1043,7 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
@@ -1051,7 +1051,7 @@ int main(int argc, char *argv[]){
 			
 		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
@@ -1059,20 +1059,10 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
-		/*
-		// tst for energy
-		if (n % 100 == 0){
-    		cudaMemcpy(p1, d_p1, (size_t)Nx*Ny*Nz*sizeof(float), cudaMemcpyDeviceToHost);
-    		double S = 0.0;
-    		for (int k = 3; k < Nz-3; k++)
-    			for (int j = 3; j < Ny-3; j++)
-    				for (int i = 3; i < Nx-3; i++) S += p1[flat3(i,j,k,Nx,Ny)];
-    					printf("n=%6d  t=%7.2f ms  sum(p) = %+.6e\n", n, n*dt*1e3, S);
-		}
-		*/
+
 		// sync
 		cudaDeviceSynchronize();
 
