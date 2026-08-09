@@ -618,21 +618,18 @@ __host__ __device__
 void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ u, float *__restrict__ u_old, float *__restrict__ v, float *__restrict__ v_old, float *__restrict__ w, float *__restrict__ w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w){
 	
 	const float d_x = perc_x * (float)Nx;
-    const float d_y = perc_y * (float)Ny;
-    const float d_z = perc_z * (float)Nz;
+	const float d_y = perc_y * (float)Ny;
+	const float d_z = perc_z * (float)Nz;
 
     const int Cijk = flat3(i, j, k, Nx, Ny);
 
-    const float R0   = 1e-6;
+    const float R0   = 1e-6; // 1e-6
     const float lnR0 = logf(R0);
-    const float m = 3.0;
-    /*
-    const float X = 1.1;
-    const float sigmax = X * c / h;
-	const float pref_x = sigmax, pref_y = sigmax, pref_z = sigmax;
-	*/
+
+    const float m = 2.0; // 2
+
     // Small guard to avoid division by zero without branching the profiles.
-    // If perc_* is zero, corresponding sigma terms collapse to ~0 after clamping.
+    // If a face's thickness is zero, corresponding sigma terms collapse to ~0 after clamping.
     
     const float inv_dxh = (d_x > 0.0f) ? 1.0f / (d_x * h) : 0.0f;
     const float inv_dyh = (d_y > 0.0f) ? 1.0f / (d_y * h) : 0.0f;
@@ -662,7 +659,7 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
     const float pref_x = -0.5f * c * (m + 1.0f) * lnR0 * inv_dxh;
     const float pref_y = -0.5f * c * (m + 1.0f) * lnR0 * inv_dyh;
     const float pref_z = -0.5f * c * (m + 1.0f) * lnR0 * inv_dzh;
-	
+
     const float sx_M = pref_x * powf(xm, m);   // x-
     const float sx_P = pref_x * powf(xp, m);   // x+
     const float sy_M = pref_y * powf(ym, m);   // y-
@@ -765,7 +762,7 @@ __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta,
 	return dd[(int)abs(rr)]/(aux*aux);
 }
 */
-
+/*
 // WENO-Z weights: Borges, Carmona, Costa & Don (2008), eqs. (25) and (28)
 // tau5 = |beta_0 - beta_2| is symmetric, so the SS mirroring does not affect it
 __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta, float eps, int r, int SS){
@@ -773,6 +770,12 @@ __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta,
 	float ratio = tau5 / (beta[r] + eps); // float32 overflow guard
 	int rr = SS*3 - SS*1 - r;
 	return dd[(int)abs(rr)] * (1.0f + ratio); // q = 1 (less dissipative)
+}
+*/
+// UP5 (5th linear Upwind scheme)
+__device__ float compute_alpha(float *__restrict__ dd, int r, int SS){
+	int rr = SS*3 - SS*1 - r;
+	return dd[(int)abs(rr)];
 }
 
 
@@ -796,15 +799,20 @@ __device__ float WENO_x(float *__restrict__ V, float *__restrict__ dd, float *__
 	// 2) Compute coefficients d_r: computed on array dd
 	
 	// 3) Compute smoothness indicators beta[r]
+	//WENO-5/Z
+	/*
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_x(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
-	
+	*/
 	// 4) Define omega[r]
 	float alpha[3], w[3];
 	for (int r = 0; r < 3; r++){
-		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		//WENO-5/Z
+		//alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		// UP5
+		alpha[r] = compute_alpha(dd, r, abs(idx-1));
 	}
 	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
@@ -832,15 +840,19 @@ __device__ float WENO_y(float *__restrict__ V, float *__restrict__ dd, float *__
 	// 2) Compute coefficients d_r: computed on array dd
 	
 	// 3) Compute smoothness indicators beta[r]
+	//WENO-5/Z
+	/*
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_y(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
-	
+	*/
 	// 4) Define omega[r]
 	float alpha[3], w[3];
 	for (int r = 0; r < 3; r++){
-		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		//alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		// UP5
+		alpha[r] = compute_alpha(dd, r, abs(idx-1));
 	}
 	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
@@ -868,15 +880,19 @@ __device__ float WENO_z(float *__restrict__ V, float *__restrict__ dd, float *__
 	// 2) Compute coefficients d_r: computed on array dd
 	
 	// 3) Compute smoothness indicators beta[r]
+	//WENO-5/Z
+	/*
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_z(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
-	
+	*/
 	// 4) Define omega[r]
 	float alpha[3], w[3]; // != velocity in z!
 	for (int r = 0; r < 3; r++){
-		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		//alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		// UP5
+		alpha[r] = compute_alpha(dd, r, abs(idx-1));
 	}
 	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
@@ -1029,7 +1045,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 	
 		// other BCs
 		
-		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
+		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.3, 0.3, 0.3, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
 		
 	}
 }
@@ -1105,7 +1121,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25);
+		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.3, 0.3, 0.3, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25);
 		
 	}
 }
@@ -1182,7 +1198,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.2, 0.2, 0.2, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0/3.0);
+		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.3, 0.3, 0.3, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0/3.0);
 		
 	}
 }

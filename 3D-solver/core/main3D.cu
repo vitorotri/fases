@@ -627,6 +627,7 @@ int main(int argc, char *argv[]){
 	}
 	
 	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
+	// ppw
 	float lambda = c/f_cutoff;
 	if (lambda / h < 10.0f){
 		printf("[!] Resolution too low...\n\n");
@@ -734,7 +735,7 @@ int main(int argc, char *argv[]){
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){ 
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
         		// comment 2 lines below if injecting PCS
-            	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
             	// push positions into source array
@@ -817,17 +818,18 @@ int main(int argc, char *argv[]){
 	std::vector<double> F_s(2*Nt + 1, 0.0); // source's driving force
 	std::vector<double> u_s(2*Nt + 1, 0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
 	
-	double Q_s, A_s; // source's quality factor and sphere's surface
+	double Q_s, A_s, f_0; // source's quality factor, sphere's surface and natural resonance frequency
 	double w_0, sigma_s; // system's undamped resonant frequency and variance
 	double beta_s; // bilinear operator
 	double M_s, R_s, K_s; // system's mass, damping and elasticity constants
 	double b0, b2, a1, a2, den_s; // H(z) filter coefficients and common denominator
 	double dt_half  = 0.5 * dt; // half time-step for arrays
-	int ts_; // driving force's time delay
+	int ts_; // driving force's discrete samples delay (time delay)
 	
 	Q_s = 1.0;
 	A_s = 6.0 * h*h; // [m^2]
-	w_0 = 2.0 * M_PI * 30.0; // [rad/s]
+	f_0 = 0.05 * f_cutoff; // [Hz]
+	w_0 = 2.0 * M_PI * f_0; // [rad/s]
 	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
 	M_s = 0.025; // [kg]
@@ -841,10 +843,25 @@ int main(int argc, char *argv[]){
 	a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
 	a2 = 1.0 - 2.0*R_s*beta_s/den_s;
 	
+	/*						
+	For a Gaussian force F(t) = exp(−t²/2σ²), the spectrum is exp(−ω²σ²/2). Setting it to a level L in dB and
+	solving:
+
+	f·σ = √(−(L/10)·ln10) / 2π
+	
+	level	f·σ		meaning
+	−1 dB	0.0764	end of the flat band
+	−3 dB	0.1323	
+	−6 dB	0.1871	
+	−10 dB	0.2415	
+	−20 dB	0.3415	
+	−40 dB	0.4830	conservative alternative
+	*/
+	
 	//sigma_s = 1.0 / (0.75*fs);
 	sigma_s = 0.425 / f_cutoff;
 	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
-	//ts_ = 2*dt_half;
+
 	
 	// unique sphere's surface driving force
 	for (int t = 0; t <= 2*Nt; t++){
@@ -915,8 +932,6 @@ int main(int argc, char *argv[]){
 		       p_ref.size(), dt_half, rho);
 	}
 	*/
-	
-	
 	
 	// copy scaled arrays of sound source pressures
 	float *d_sval;
@@ -1043,7 +1058,7 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
+		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
@@ -1051,7 +1066,7 @@ int main(int argc, char *argv[]){
 			
 		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
+		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
@@ -1059,7 +1074,7 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
+		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 
