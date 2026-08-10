@@ -570,12 +570,12 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
 	const float d_z = perc_z * (float)Nz;
 	
 	// fixed number of cells (30)
-	/*
-	float Ncells = 30.0;
-	const float d_x = Ncells;
-	const float d_y = Ncells;
-	const float d_z = Ncells;
-	*/
+	
+	//float Ncells = 30.0;
+	//const float d_x = Ncells;
+	//const float d_y = Ncells;
+	//const float d_z = Ncells;
+	
     const int Cijk = flat3(i, j, k, Nx, Ny);
 
     const float R0   = 1e-6;// 1e-6 for 30 cells (perc = 0.3 for a 1x1x1 m^3 domain with h = 0.01 m)
@@ -638,6 +638,7 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
     w[Cijk] -= (1.0f - expf(-sig_w * dte)) * w_old[Cijk];
 
 }
+
 
 // --- WENO5 functions ---
 
