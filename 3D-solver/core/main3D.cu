@@ -1009,17 +1009,17 @@ int main(int argc, char *argv[]){
 	std::vector<float> p_Z(stride_Z); // reuse each frame
 	
 	// open BIN file for writing pressure fields
-	FILE *file_pX = fopen(out_file("pressureX.bin").c_str(), "ab");
+	FILE *file_pX = fopen(out_file("pressureX.bin").c_str(), "wb");
 	if (file_pX == NULL) {
     	printf("[!] Error opening pressureX.bin file!\n");
     	exit(1);
 	}
-	FILE *file_pY = fopen(out_file("pressureY.bin").c_str(), "ab");
+	FILE *file_pY = fopen(out_file("pressureY.bin").c_str(), "wb");
 	if (file_pY == NULL) {
     	printf("[!] Error opening pressureY.bin file!\n");
     	exit(1);
 	}
-	FILE *file_pZ = fopen(out_file("pressureZ.bin").c_str(), "ab");
+	FILE *file_pZ = fopen(out_file("pressureZ.bin").c_str(), "wb");
 	if (file_pZ == NULL) {
     	printf("[!] Error opening pressureZ.bin file!\n");
     	exit(1);
@@ -1030,7 +1030,7 @@ int main(int argc, char *argv[]){
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
 	for (int ct = 0; ct < i_recV.size(); ct++){
     	std::string str = out_file("IR" + std::to_string(ct) + ".bin");
-    	files_rec[ct].open(str, std::ios::app | std::ios::binary);
+    	files_rec[ct].open(str, std::ios::out | std::ios::binary);
 	}
 	
 	// launch parameters for PCS source kernel
