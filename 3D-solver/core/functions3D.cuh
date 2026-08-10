@@ -553,59 +553,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	*/
     }
 }
-/*
-//
-// sPML Layer - "simple" PML according to:
-// 
-// https://reference.wolfram.com/language/PDEModels/tutorial/Acoustics/AcousticsTimeDomain.html
-// 
-__host__ __device__
-void sPML(float *q, int i, int j, int k, int Nx, int Ny, int Nz, float h, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
-          
-    const float s_max = 0.018f;
-    const int ng = 3;
 
-    // physical interior sizes
-    const int Nxi = Nx - 2*ng;
-    const int Nyi = Ny - 2*ng;
-    const int Nzi = Nz - 2*ng;
-
-    const int max_idx = (int)(0.15f * min(Nxi, min(Nyi, Nzi)));
-    const float half = (float)max_idx;
-
-    // physical-domain limits
-    const float xL = (float)ng;
-    const float xR = (float)(Nx - ng - 1);
-    const float yL = (float)ng;
-    const float yR = (float)(Ny - ng - 1);
-    const float zL = (float)ng;
-    const float zR = (float)(Nz - ng - 1);
-
-    // ramps measured from physical boundaries, not ghost boundaries
-    float rx = R_PML * fmaxf(0.0f, fminf((i - (xR - half + 1.0f)) / half, 1.0f));
-    float lx = L_PML * fmaxf(0.0f, fminf(((xL + half - 1.0f) - i) / half, 1.0f));
-
-    float fy = F_PML * fmaxf(0.0f, fminf((j - (yR - half + 1.0f)) / half, 1.0f));
-    float by = B_PML * fmaxf(0.0f, fminf(((yL + half - 1.0f) - j) / half, 1.0f));
-
-    float uz = U_PML * fmaxf(0.0f, fminf((k - (zR - half + 1.0f)) / half, 1.0f));
-    float lz = D_PML * fmaxf(0.0f, fminf(((zL + half - 1.0f) - k) / half, 1.0f));
-
-    float rx3 = rx*rx*rx, lx3 = lx*lx*lx;
-    float fy3 = fy*fy*fy, by3 = by*by*by;
-    float uz3 = uz*uz*uz, lz3 = lz*lz*lz;
-
-    float sx = s_max * (rx3 + lx3);
-    float sy = s_max * (fy3 + by3);
-    float sz = s_max * (uz3 + lz3);
-
-    float s = 1.0f - (1.0f - sx) * (1.0f - sy) * (1.0f - sz);
-    s = fminf(s, 0.999f);
-
-    int Cijk = flat3(i, j, k, Nx, Ny);
-    q[Cijk] -= s * q[Cijk];
-}
-*/
 //
 // sPML Layer - "simple" PML according to:
 // 
@@ -620,13 +568,20 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
 	const float d_x = perc_x * (float)Nx;
 	const float d_y = perc_y * (float)Ny;
 	const float d_z = perc_z * (float)Nz;
-
+	
+	// fixed number of cells (30)
+	/*
+	float Ncells = 30.0;
+	const float d_x = Ncells;
+	const float d_y = Ncells;
+	const float d_z = Ncells;
+	*/
     const int Cijk = flat3(i, j, k, Nx, Ny);
 
-    const float R0   = 1e-6; // 1e-6
+    const float R0   = 1e-6;// 1e-6 for 30 cells (perc = 0.3 for a 1x1x1 m^3 domain with h = 0.01 m)
     const float lnR0 = logf(R0);
 
-    const float m = 2.0; // 2
+    const float m = 2.0; // 2 for 30 cells 
 
     // Small guard to avoid division by zero without branching the profiles.
     // If a face's thickness is zero, corresponding sigma terms collapse to ~0 after clamping.
