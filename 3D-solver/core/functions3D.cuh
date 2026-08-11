@@ -643,13 +643,25 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
 
 
 __host__ __device__
-void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py, float *__restrict__ pz, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w, float rho){
+void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py, float *__restrict__ pz, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w, float rho, int px_size, int py_size, int pz_size){
+	
+	if ((i >= d_x || i <= Nx - d_x) && (j >= d_y || j <= Ny - d_y) && (k >= d_z || k <= Nz - d_z)) return;
 	
 	const float d_x = perc_x * (float)Nx;
 	const float d_y = perc_y * (float)Ny;
 	const float d_z = perc_z * (float)Nz;
 	
     const int Cijk = flat3(i, j, k, Nx, Ny);
+    
+    int ix, jy, kz; // indexes for px, py and pz
+    
+    int ix = (i < dx) ? i : i - (int)((float)Nx - 2.0*d_x);
+    int jy = (j < dy) ? j : j - (int)((float)Ny - 2.0*d_y);
+    int kz = (k < dz) ? k : k - (int)((float)Nz - 2.0*d_z);
+    
+    const int Xijk = flat3(ix, j, k, px_size/(Ny*Nz), Ny); // flattened px index
+    const int Yijk = flat3(i, jy, k, Nx, py_size/(Nx*Nz)); // flattened py index
+    const int Zijk = flat3(i, j, kz, Nx, Ny);			   // flattened pz index
 
     const float R0   = 0.01;
     const float lnR0 = logf(R0);
@@ -704,11 +716,11 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
     v[Cijk] += sig_v*rho*dte*v[Cijk];
     w[Cijk] += sig_w*rho*dte*w[Cijk];
     
-    px[] = p[Cijk] - sig_px*px[];
-    py[] = p[Cijk] - sig_py*py[];
-    pz[] = p[Cijk] - sig_pz*pz[];
+    px[Xijk] = p[Cijk] - sig_px*px[Xijk];
+    py[Yijk] = p[Cijk] - sig_py*py[Yijk];
+    pz[Zijk] = p[Cijk] - sig_pz*pz[Zijk];
     
-    p[Cijk] = px[] + py[] + pz[];
+    p[Cijk] = px[Xijk] + py[Yijk] + pz[Zijk];
     
 }
 

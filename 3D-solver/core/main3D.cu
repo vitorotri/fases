@@ -1047,13 +1047,18 @@ int main(int argc, char *argv[]){
 	
 	float *px, *py, *pz;
 	float perc_x = 0.15, perc_y = 0.15, perc_z = 0.15;
-	cudaMalloc(&px, (int)(2.0*perc_x*(float)Nx)*Ny*Nz * sizeof(float));
-	cudaMalloc(&py, (int)(2.0*perc_y*(float)Ny)*Nx*Nz * sizeof(float));
-	cudaMalloc(&pz, (int)(2.0*perc_z*(float)Nz)*Ny*Nx * sizeof(float));
 	
-	cudaMemset(px, 0.0, (int)(2.0*perc_x*(float)Nx)*Ny*Nz * sizeof(float));
-	cudaMemset(py, 0.0, (int)(2.0*perc_y*(float)Ny)*Nx*Nz * sizeof(float));
-	cudaMemset(pz, 0.0, (int)(2.0*perc_z*(float)Nz)*Ny*Nx * sizeof(float));
+	int px_size = (int)(2.0*perc_x*(float)Nx)*Ny*Nz,
+		py_size = (int)(2.0*perc_y*(float)Ny)*Nx*Nz,
+		pz_size = (int)(2.0*perc_z*(float)Nz)*Ny*Nx;
+	
+	cudaMalloc(&px, px_size * sizeof(float));
+	cudaMalloc(&py, py_size * sizeof(float));
+	cudaMalloc(&pz, pz_size * sizeof(float));
+	
+	cudaMemset(px, 0.0, px_size * sizeof(float));
+	cudaMemset(py, 0.0, py_size * sizeof(float));
+	cudaMemset(pz, 0.0, pz_size * sizeof(float));
 	
 	// --------------------------------------------------------------------------------------------------------
 	/*
