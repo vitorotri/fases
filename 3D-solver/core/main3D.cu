@@ -728,9 +728,9 @@ int main(int argc, char *argv[]){
     	std::istringstream iss(line);
     	
     	if (iss >> val_x >> val_y >> val_z >> val_s){
-        	i_src = (int)(val_x / h);
-        	j_src = (int)(val_y / h);
-        	k_src = (int)(val_z / h);
+        	i_src = (int)(val_x / h) + 3; // summing padded domain's ghosts
+        	j_src = (int)(val_y / h) + 3;
+        	k_src = (int)(val_z / h) + 3;
         	
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){ 
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
@@ -738,7 +738,7 @@ int main(int argc, char *argv[]){
             	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
-            	// push positions into source array
+            	// push positions into source array for HFs
         		src_arr.push_back(val_x);
         		src_arr.push_back(val_y);
         		src_arr.push_back(val_z);
@@ -786,9 +786,9 @@ int main(int argc, char *argv[]){
     	float val_x, val_y, val_z;
     	std::istringstream iss(line);
     	if (iss >> val_x >> val_y >> val_z){
-        	i_rec = (int)(val_x / h);
-        	j_rec = (int)(val_y / h);
-        	k_rec = (int)(val_z / h);
+        	i_rec = (int)(val_x / h) + 3; // summing padded domain's ghosts
+        	j_rec = (int)(val_y / h) + 3;
+        	k_rec = (int)(val_z / h) + 3;
         	
         	if (!(i_rec >= 0 && i_rec < Nx && j_rec >= 0 && j_rec < Ny && k_rec >= 0 && k_rec < Nz)){
         		printf("\n[!] Receiver(s) outside domain, will now stop...\n");
@@ -799,7 +799,7 @@ int main(int argc, char *argv[]){
         		j_recV.push_back(j_rec);
         		k_recV.push_back(k_rec);
         		
-        		// push positions into receiver array
+        		// push positions into receiver array for HFs
         		rec_arr.push_back(val_x);
         		rec_arr.push_back(val_y);
         		rec_arr.push_back(val_z);
@@ -1025,6 +1025,8 @@ int main(int argc, char *argv[]){
     	exit(1);
 	}
 	
+	// --------------------------------------------------------------------------------------------------------
+	
 	// open BIN files for writing pressure at multiple receivers
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
@@ -1033,11 +1035,21 @@ int main(int argc, char *argv[]){
     	files_rec[ct].open(str, std::ios::out | std::ios::binary);
 	}
 	
+	// --------------------------------------------------------------------------------------------------------
+	
 	// launch parameters for PCS source kernel
 	int TS = 256;                    // threads per block; 64–256 all fine at this scale
 	int BS = (N_src + TS - 1) / TS;  // enough blocks to cover N_src
 	
 	size_t pbin_size = 0; // for plotting animation correctly
+	
+	// ---------------------------------- slipt p field tiles for split PML -----------------------------------
+	
+	float *px, *py, *pz;
+	float perc_x = 0.15, perc_y = 0.15, perc_z = 0.15;
+	cudaMalloc(&px, (int)(2.0*perc_x*(float)Nx)*Ny*Nz * sizeof(float));
+	cudaMalloc(&py, (int)(2.0*perc_y*(float)Ny)*Nx*Nz * sizeof(float));
+	cudaMalloc(&pz, (int)(2.0*perc_z*(float)Nz)*Ny*Nx * sizeof(float));
 	
 	// --------------------------------------------------------------------------------------------------------
 	/*
@@ -1057,7 +1069,7 @@ int main(int argc, char *argv[]){
 				
 		// (0)
 		
-		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, perc_x, perc_y, perc_z);
 			
 		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
 			
@@ -1065,7 +1077,7 @@ int main(int argc, char *argv[]){
 			
 		// (1)
 			
-		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, perc_x, perc_y, perc_z);
 
 		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
 		
@@ -1073,7 +1085,7 @@ int main(int argc, char *argv[]){
 			
 		// (2)
 		
-		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, perc_x, perc_y, perc_z);
 			
 		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
