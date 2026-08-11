@@ -643,7 +643,7 @@ void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ 
 
 
 __host__ __device__
-void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py, float *__restrict__ pz, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w){
+void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py, float *__restrict__ pz, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w, float rho){
 	
 	const float d_x = perc_x * (float)Nx;
 	const float d_y = perc_y * (float)Ny;
@@ -690,8 +690,8 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
     const float sz_M = pref_z * powf(zm, m); // z-
     const float sz_P = pref_z * powf(zp, m); // z+
 
-    const float sig_px = L_PML * sx_M + R_PML * sx_P
-    const float sig_py = B_PML * sy_M + F_PML * sy_P
+    const float sig_px = L_PML * sx_M + R_PML * sx_P;
+    const float sig_py = B_PML * sy_M + F_PML * sy_P;
     const float sig_pz = D_PML * sz_M + U_PML * sz_P;
 
     const float sig_u = L_PML * sx_M + R_PML * sx_P;
@@ -1075,7 +1075,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// other BCs
 		
 		//sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
-		sPML(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
+		sPML(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0, rho);
 		
 	}
 }
@@ -1152,7 +1152,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// other BCs
 		
 		//sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25);
-		sPML(p2, u2, v2, w2, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25);
+		sPML(p2, u2, v2, w2, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25, rho);
 		
 	}
 }
@@ -1230,7 +1230,7 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		// other BCs
 		
 		//sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0/3.0);
-		sPML(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0/3.0);
+		sPML(p1, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, perc_x, perc_y, perc_z, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0/3.0, rho);
 		
 	}
 }

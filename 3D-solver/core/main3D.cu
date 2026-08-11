@@ -1051,6 +1051,10 @@ int main(int argc, char *argv[]){
 	cudaMalloc(&py, (int)(2.0*perc_y*(float)Ny)*Nx*Nz * sizeof(float));
 	cudaMalloc(&pz, (int)(2.0*perc_z*(float)Nz)*Ny*Nx * sizeof(float));
 	
+	cudaMemset(px, 0.0, (int)(2.0*perc_x*(float)Nx)*Ny*Nz * sizeof(float));
+	cudaMemset(py, 0.0, (int)(2.0*perc_y*(float)Ny)*Nx*Nz * sizeof(float));
+	cudaMemset(pz, 0.0, (int)(2.0*perc_z*(float)Nz)*Ny*Nx * sizeof(float));
+	
 	// --------------------------------------------------------------------------------------------------------
 	/*
 	 *
