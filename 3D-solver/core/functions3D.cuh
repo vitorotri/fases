@@ -648,7 +648,7 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
 	const float d_y = perc_y * (float)Ny;
 	const float d_z = perc_z * (float)Nz;
 	
-	if ((i >= d_x || i <= Nx - d_x) && (j >= d_y || j <= Ny - d_y) && (k >= d_z || k <= Nz - d_z)) return;
+	if ((i >= d_x && i <= Nx - d_x) && (j >= d_y && j <= Ny - d_y) && (k >= d_z && k <= Nz - d_z)) return;
 	
     const int Cijk = flat3(i, j, k, Nx, Ny);
     
@@ -690,9 +690,9 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
     zm = fminf(1.0f, fmaxf(0.0f, zm));
     zp = fminf(1.0f, fmaxf(0.0f, zp));
 	
-    const float pref_x = -0.5 * c * (m + 1.0) * lnR0 * inv_dx;
-    const float pref_y = -0.5 * c * (m + 1.0) * lnR0 * inv_dy;
-    const float pref_z = -0.5 * c * (m + 1.0) * lnR0 * inv_dz;
+    const float pref_x = -0.5 * c * (m + 1.0) * lnR0 * inv_dx / h;
+    const float pref_y = -0.5 * c * (m + 1.0) * lnR0 * inv_dy / h;
+    const float pref_z = -0.5 * c * (m + 1.0) * lnR0 * inv_dz / h;
 
     const float sx_M = pref_x * powf(xm, m); // x-
     const float sx_P = pref_x * powf(xp, m); // x+
@@ -711,13 +711,13 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
 
     const float dte = SSP_w * dt;
     
-    u[Cijk] += sig_u*rho*dte*u[Cijk];
-    v[Cijk] += sig_v*rho*dte*v[Cijk];
-    w[Cijk] += sig_w*rho*dte*w[Cijk];
+    u[Cijk] -= dt*sig_u*rho*dte*u[Cijk];
+    v[Cijk] -= dt*sig_v*rho*dte*v[Cijk];
+    w[Cijk] -= dt*sig_w*rho*dte*w[Cijk];
     
-    px[Xijk] = p[Cijk] - sig_px*px[Xijk];
-    py[Yijk] = p[Cijk] - sig_py*py[Yijk];
-    pz[Zijk] = p[Cijk] - sig_pz*pz[Zijk];
+    px[Xijk] = p[Cijk] - dt*sig_px*px[Xijk];
+    py[Yijk] = p[Cijk] - dt*sig_py*py[Yijk];
+    pz[Zijk] = p[Cijk] - dt*sig_pz*pz[Zijk];
     
     p[Cijk] = px[Xijk] + py[Yijk] + pz[Zijk];
     
