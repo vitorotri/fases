@@ -728,17 +728,17 @@ int main(int argc, char *argv[]){
     	std::istringstream iss(line);
     	
     	if (iss >> val_x >> val_y >> val_z >> val_s){
-        	i_src = (int)(val_x / h) + 3; // summing padded domain's ghosts
+        	i_src = (int)(val_x / h) + 3;
         	j_src = (int)(val_y / h) + 3;
         	k_src = (int)(val_z / h) + 3;
         	
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){ 
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
         		// comment 2 lines below if injecting PCS
-            	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
-            	// push positions into source array for HFs
+            	// push positions into source array
         		src_arr.push_back(val_x);
         		src_arr.push_back(val_y);
         		src_arr.push_back(val_z);
@@ -786,7 +786,7 @@ int main(int argc, char *argv[]){
     	float val_x, val_y, val_z;
     	std::istringstream iss(line);
     	if (iss >> val_x >> val_y >> val_z){
-        	i_rec = (int)(val_x / h) + 3; // summing padded domain's ghosts
+        	i_rec = (int)(val_x / h) + 3;
         	j_rec = (int)(val_y / h) + 3;
         	k_rec = (int)(val_z / h) + 3;
         	
@@ -799,7 +799,7 @@ int main(int argc, char *argv[]){
         		j_recV.push_back(j_rec);
         		k_recV.push_back(k_rec);
         		
-        		// push positions into receiver array for HFs
+        		// push positions into receiver array
         		rec_arr.push_back(val_x);
         		rec_arr.push_back(val_y);
         		rec_arr.push_back(val_z);
@@ -1025,8 +1025,6 @@ int main(int argc, char *argv[]){
     	exit(1);
 	}
 	
-	// --------------------------------------------------------------------------------------------------------
-	
 	// open BIN files for writing pressure at multiple receivers
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
@@ -1035,30 +1033,11 @@ int main(int argc, char *argv[]){
     	files_rec[ct].open(str, std::ios::out | std::ios::binary);
 	}
 	
-	// --------------------------------------------------------------------------------------------------------
-	
 	// launch parameters for PCS source kernel
 	int TS = 256;                    // threads per block; 64–256 all fine at this scale
 	int BS = (N_src + TS - 1) / TS;  // enough blocks to cover N_src
 	
 	size_t pbin_size = 0; // for plotting animation correctly
-	
-	// ---------------------------------- slipt p field tiles for split PML -----------------------------------
-	
-	float *px, *py, *pz;
-	float perc_x = 0.15, perc_y = 0.15, perc_z = 0.15;
-	
-	int px_size = (int)(2.0*perc_x*(float)Nx)*Ny*Nz,
-		py_size = (int)(2.0*perc_y*(float)Ny)*Nx*Nz,
-		pz_size = (int)(2.0*perc_z*(float)Nz)*Ny*Nx;
-	
-	cudaMalloc(&px, px_size * sizeof(float));
-	cudaMalloc(&py, py_size * sizeof(float));
-	cudaMalloc(&pz, pz_size * sizeof(float));
-	
-	cudaMemset(px, 0.0, px_size * sizeof(float));
-	cudaMemset(py, 0.0, py_size * sizeof(float));
-	cudaMemset(pz, 0.0, pz_size * sizeof(float));
 	
 	// --------------------------------------------------------------------------------------------------------
 	/*
@@ -1078,25 +1057,25 @@ int main(int argc, char *argv[]){
 				
 		// (0)
 		
-		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, perc_x, perc_y, perc_z, px, py, pz, px_size, py_size, pz_size);
+		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
+		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
 		// (1)
 			
-		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, perc_x, perc_y, perc_z, px, py, pz, px_size, py_size, pz_size);
+		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
+		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
 		// (2)
 		
-		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, perc_x, perc_y, perc_z, px, py, pz, px_size, py_size, pz_size);
+		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
 			
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
+		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 
@@ -1127,7 +1106,9 @@ int main(int argc, char *argv[]){
   				for (int j = 0; j < Ny; ++j){
     				size_t dst = (size_t)j + (size_t)Ny * (size_t)k;
     				size_t src = (size_t)i0 + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
-    				p_X[dst] = p0[src];
+    				//p_X[dst] = p0[src];
+    				p_X[dst] = p0[src] * sqrtf((k - k0)*(k - k0) + (j - j0)*(j - j0)) * h;
+    				//p_X[dst] = 20.0*log10f(p0[src]/0.00002);
   				}
 			}
 			fwrite(p_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_pX);
@@ -1138,15 +1119,25 @@ int main(int argc, char *argv[]){
   				for (int i = 0; i < Nx; ++i){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;
     				size_t src = (size_t)i + (size_t)Nx * ((size_t)j0 + (size_t)Ny * (size_t)k);
-    				p_Y[dst] = p0[src];
+    				//p_Y[dst] = p0[src];
+    				p_Y[dst] = p0[src] * sqrtf((k - k0)*(k - k0) + (i - i0)*(i - i0)) * h;
+    				//p_Y[dst] = 20*log10f(p0[src]/0.00002);
   				}
 			}
 			fwrite(p_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_pY);
 			
-			// XY slice in k0 (for z axis, contiguous in row-major order), faster the way below
-			size_t start = (size_t)Nx * (size_t)Ny * (size_t)k0;
-			std::memcpy(p_Z.data(), p0 + start, stride_Z * sizeof(float));
-			fwrite(p_Z.data(), sizeof(float), stride_Z, file_pZ);
+			// XY slice at k0: dst = i + Nx*j
+			#pragma omp parallel for collapse(2) schedule(static)
+			for (int j = 0; j < Ny; ++j){
+  				for (int i = 0; i < Nx; ++i){
+    				size_t dst = (size_t)i + (size_t)Nx * (size_t)j;
+    				size_t src = (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k0);
+    				//p_Z[dst] = p0[src];
+    				p_Z[dst] = p0[src] * sqrtf((j - j0)*(j - j0) + (i - i0)*(i - i0)) * h;
+    				//p_Z[dst] = 20.0*log10f(p0[src]/0.00002);
+  				}
+			}
+			fwrite(p_Z.data(), sizeof(float), (size_t)Nx * (size_t)Ny, file_pZ);
     			
     		// increment real size of binnaries
     		pbin_size += 1;
