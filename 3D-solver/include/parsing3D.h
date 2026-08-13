@@ -796,9 +796,9 @@ inline static bool grid_dims_checked(float Lxf,float Lyf,float Lzf,float h,
     if(!(h > 0.f)){ if(err) *err = "grid spacing h must be > 0 (got <=0 or NaN)"; return false; }
 
     const double Lx=(double)Lxf, Ly=(double)Lyf, Lz=(double)Lzf;
-    const double nxd = std::ceil(Lx/h) + 1.0;   // +1: cell-centered convention
-    const double nyd = std::ceil(Ly/h) + 1.0;
-    const double nzd = std::ceil(Lz/h) + 1.0;
+    const double nxd = std::ceil(Lx/h);
+    const double nyd = std::ceil(Ly/h);
+    const double nzd = std::ceil(Lz/h);
 
     if(nxd < 2.0 || nyd < 2.0 || nzd < 2.0){
         if(err) *err = "degenerate grid (domain too small for this h)";
