@@ -6,6 +6,12 @@
 #define P_0 101325 // [Pa]
 #define T_0 293.15 // [K]
 
+// Split-PML layer thickness in cells (per face). Used by BOTH sPML (below) and the
+// px/py/pz tile allocation in main3D.cu — keep them in sync via this one constant.
+#ifndef PML_CELLS
+#define PML_CELLS 35
+#endif
+
 // Computes relaxation frequency for Oxygen in air
 __host__ float frO(float p_a, float h){
 	return p_a*(24.0 + 4.04*1e4*h*(0.02 + h)/(0.391 + h))/P_0;
@@ -562,75 +568,151 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
 // as well as Montanaro, Knöpfel, Heutschi and Pieren (2022) - "Parallelized FDTD simulations to improve
 // engineering models of urban road traffic noise"
 //
+//
+// Memory-lean split PML. Total pressure p stays a full-grid field; each axis sub-field
+// px/py/pz lives ONLY in its own boundary band (px_size = 2*PML_CELLS*Ny*Nz etc, allocated
+// in main3D.cu). Bérenger split, reformulated so no px+py+pz reconstruction is needed:
+//
+//     dp_i/dt = L_i - sig_i * p_i          (L_i = i-direction flux divergence, passed in)
+//     dp/dt   = L - sum_i sig_i * p_i       (p already got +dt*L in the kernel)
+//
+// A sub-field is touched ONLY inside its own enabled face-band, so there is no cross-axis
+// access and no out-of-bounds. Velocity: each component damped by its own-axis conductivity.
+//
 __host__ __device__
-void sPML(float *__restrict__ p, float *__restrict__ p_old, float *__restrict__ u, float *__restrict__ u_old, float *__restrict__ v, float *__restrict__ v_old, float *__restrict__ w, float *__restrict__ w_old, int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float perc_x, float perc_y, float perc_z, float c, float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w){
-	/*
-	const float d_x = perc_x * (float)Nx;
-	const float d_y = perc_y * (float)Ny;
-	const float d_z = perc_z * (float)Nz;
-	*/
-	// fixed number of cells
-	const float d_x = 20.0;
-	const float d_y = d_x;
-	const float d_z = d_x;
-	
-    const int Cijk = flat3(i, j, k, Nx, Ny);
+void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py, float *__restrict__ pz,
+          float Lx, float Ly, float Lz,
+          float *__restrict__ u, float *__restrict__ v, float *__restrict__ w,
+          int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float c,
+          float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w){
 
-    const float R0   = 1e-5;// 1e-6 for 30 cells (perc = 0.3 for a 1x1x1 m^3 domain with h = 0.01 m)
-    const float lnR0 = logf(R0);
-
-    const float m = 2.0; // 2 for 30 cells 
-
-    // Small guard to avoid division by zero without branching the profiles.
-    // If a face's thickness is zero, corresponding sigma terms collapse to ~0 after clamping.
-	
-    const float inv_dx  = (d_x > 0.0f) ? 1.0f / d_x : 0.0f;
-    const float inv_dy  = (d_y > 0.0f) ? 1.0f / d_y : 0.0f;
-    const float inv_dz  = (d_z > 0.0f) ? 1.0f / d_z : 0.0f;
+    const int   d   = PML_CELLS;
+    const int   Cijk = flat3(i, j, k, Nx, Ny);
+    const float R0 = 1e-6f, lnR0 = logf(R0), m = 2.0f;
 
     // Normalized local depth in each slab, clamped to [0,1].
-    float xm = ((d_x - (float)i) * inv_dx);
-    float xp = (((float)i - ((float)(Nx - 1) - d_x)) * inv_dx);
+    const float xm = fminf(1.f, fmaxf(0.f, ((float)d - (float)i) / (float)d));
+    const float xp = fminf(1.f, fmaxf(0.f, ((float)i - ((float)(Nx-1) - (float)d)) / (float)d));
+    const float ym = fminf(1.f, fmaxf(0.f, ((float)d - (float)j) / (float)d));
+    const float yp = fminf(1.f, fmaxf(0.f, ((float)j - ((float)(Ny-1) - (float)d)) / (float)d));
+    const float zm = fminf(1.f, fmaxf(0.f, ((float)d - (float)k) / (float)d));
+    const float zp = fminf(1.f, fmaxf(0.f, ((float)k - ((float)(Nz-1) - (float)d)) / (float)d));
 
-    float ym = ((d_y - (float)j) * inv_dy);
-    float yp = (((float)j - ((float)(Ny - 1) - d_y)) * inv_dy);
+    const float pref = -0.5f * c * (m + 1.0f) * lnR0 / ((float)d * h);
 
-    float zm = ((d_z - (float)k) * inv_dz);
-    float zp = (((float)k - ((float)(Nz - 1) - d_z)) * inv_dz);
-
-    xm = fminf(1.0f, fmaxf(0.0f, xm));
-    xp = fminf(1.0f, fmaxf(0.0f, xp));
-    ym = fminf(1.0f, fmaxf(0.0f, ym));
-    yp = fminf(1.0f, fmaxf(0.0f, yp));
-    zm = fminf(1.0f, fmaxf(0.0f, zm));
-    zp = fminf(1.0f, fmaxf(0.0f, zp));
-	
-    const float pref_x = -0.5f * c * (m + 1.0f) * lnR0 * inv_dx / h;
-    const float pref_y = -0.5f * c * (m + 1.0f) * lnR0 * inv_dy / h;
-    const float pref_z = -0.5f * c * (m + 1.0f) * lnR0 * inv_dz / h;
-
-    const float sx_M = pref_x * powf(xm, m); // x-
-    const float sx_P = pref_x * powf(xp, m); // x+
-    const float sy_M = pref_y * powf(ym, m); // y-
-    const float sy_P = pref_y * powf(yp, m); // y+
-    const float sz_M = pref_z * powf(zm, m); // z-
-    const float sz_P = pref_z * powf(zp, m); // z+
-
-    const float sig_p = L_PML * sx_M + R_PML * sx_P
-                      + B_PML * sy_M + F_PML * sy_P
-                      + D_PML * sz_M + U_PML * sz_P;
-
-    const float sig_u = L_PML * sx_M + R_PML * sx_P;
-    const float sig_v = B_PML * sy_M + F_PML * sy_P;
-    const float sig_w = D_PML * sz_M + U_PML * sz_P;
+    // per-axis conductivity (face-flagged; 0 outside the band via the clamp)
+    const float sig_x = L_PML*pref*powf(xm,m) + R_PML*pref*powf(xp,m);
+    const float sig_y = B_PML*pref*powf(ym,m) + F_PML*pref*powf(yp,m);
+    const float sig_z = D_PML*pref*powf(zm,m) + U_PML*pref*powf(zp,m);
 
     const float dte = SSP_w * dt;
-    
-    p[Cijk] -= sig_p * dte * p[Cijk];
-    u[Cijk] -= sig_u * dte * u[Cijk];
-    v[Cijk] -= sig_v * dte * v[Cijk];
-    w[Cijk] -= sig_w * dte * w[Cijk];
-	
+
+    // Only enter a band whose face is enabled -> tile index is always in range.
+    const bool bx = (L_PML > 0.f && i < d) || (R_PML > 0.f && i >= Nx - d);
+    const bool by = (B_PML > 0.f && j < d) || (F_PML > 0.f && j >= Ny - d);
+    const bool bz = (D_PML > 0.f && k < d) || (U_PML > 0.f && k >= Nz - d);
+
+    float corr = 0.0f;   // pressure correction = sum_i sig_i * p_i
+    if (bx){
+        const int ix = (i < d) ? i : i - (Nx - 2*d);
+        const int X  = ix + (2*d)*(j + Ny*k);       // px tile: 2*d wide in x, full y,z
+        px[X] += dte*(Lx - sig_x*px[X]);
+        corr  += sig_x*px[X];
+    }
+    if (by){
+        const int jy = (j < d) ? j : j - (Ny - 2*d);
+        const int Y  = i + Nx*(jy + (2*d)*k);        // py tile: 2*d wide in y
+        py[Y] += dte*(Ly - sig_y*py[Y]);
+        corr  += sig_y*py[Y];
+    }
+    if (bz){
+        const int kz = (k < d) ? k : k - (Nz - 2*d);
+        const int Z  = i + Nx*(j + Ny*kz);           // pz tile: 2*d wide in z
+        pz[Z] += dte*(Lz - sig_z*pz[Z]);
+        corr  += sig_z*pz[Z];
+    }
+    p[Cijk] -= dte*corr;
+
+    u[Cijk] -= dte*sig_x*u[Cijk];
+    v[Cijk] -= dte*sig_y*v[Cijk];
+    w[Cijk] -= dte*sig_z*w[Cijk];
+}
+
+
+//
+// Unsplit recursive CFS-cPML (Roden-Gedney), SECOND PML option — sPML above is untouched.
+// Stretches one directional flux divergence D -> D/kappa + psi, psi advanced by exact
+// recursive convolution (one register). Returns the CORRECTION (D_pml - D); caller adds
+// dt*correction on top of the plain kernel update. alpha=0 => plain PML; alpha>0 => CFS.
+//
+__device__ __forceinline__
+float cPML_stretch(float D, float kappa, float sigma, float alpha, float dt, float &psi){
+    const float a  = alpha + sigma/kappa;
+    const float b  = expf(-a*dt);
+    const float ca = (sigma > 0.f) ? (sigma/(kappa*(sigma + kappa*alpha)))*(b - 1.f) : 0.f;
+    psi = b*psi + ca*D;                       // recursive-convolution memory update
+    return (1.0f/kappa - 1.0f)*D + psi;       // D_pml - D  (correction to add)
+}
+
+//
+// cPML layer. Same tiling/placement as sPML (once per step, in kernel_WENO_step2). Six psi
+// band-tiles: p<-x,y,z and u<-x, v<-y, w<-z. Needs the per-axis flux divergences (Lp*, Lu/Lv/Lw).
+// kappa_max/alpha_max are the CFS knobs (default alpha_max=0 => reproduces a plain sigma-PML).
+//
+__device__
+void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w,
+          float *__restrict__ psi_px, float *__restrict__ psi_py, float *__restrict__ psi_pz,
+          float *__restrict__ psi_ux, float *__restrict__ psi_vy, float *__restrict__ psi_wz,
+          float Lpx, float Lpy, float Lpz, float Lux, float Lvy, float Lwz,
+          int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float c,
+          float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML){
+
+    const int   d    = PML_CELLS;
+    const int   Cijk = flat3(i, j, k, Nx, Ny);
+    const float R0 = 1e-6f, lnR0 = logf(R0), m = 2.0f;
+    const float kappa_max = 8.0;   // knob: >1 real coordinate stretch (grazing incidence)
+    const float alpha_max = M_PI * 18.0;   // knob: >0 = CFS shift [rad/s ~ pi*f_min]; 0 = plain PML
+
+    const float xm = fminf(1.f, fmaxf(0.f, ((float)d - (float)i) / (float)d));
+    const float xp = fminf(1.f, fmaxf(0.f, ((float)i - ((float)(Nx-1) - (float)d)) / (float)d));
+    const float ym = fminf(1.f, fmaxf(0.f, ((float)d - (float)j) / (float)d));
+    const float yp = fminf(1.f, fmaxf(0.f, ((float)j - ((float)(Ny-1) - (float)d)) / (float)d));
+    const float zm = fminf(1.f, fmaxf(0.f, ((float)d - (float)k) / (float)d));
+    const float zp = fminf(1.f, fmaxf(0.f, ((float)k - ((float)(Nz-1) - (float)d)) / (float)d));
+
+    const float pref = -0.5f * c * (m + 1.0f) * lnR0 / ((float)d * h);
+    const float sig_x = L_PML*pref*powf(xm,m) + R_PML*pref*powf(xp,m);
+    const float sig_y = B_PML*pref*powf(ym,m) + F_PML*pref*powf(yp,m);
+    const float sig_z = D_PML*pref*powf(zm,m) + U_PML*pref*powf(zp,m);
+
+    const float dep_x = L_PML*xm + R_PML*xp, dep_y = B_PML*ym + F_PML*yp, dep_z = D_PML*zm + U_PML*zp;
+    const float kap_x = 1.f + (kappa_max-1.f)*powf(dep_x,m);
+    const float kap_y = 1.f + (kappa_max-1.f)*powf(dep_y,m);
+    const float kap_z = 1.f + (kappa_max-1.f)*powf(dep_z,m);
+    const float alp_x = alpha_max*(1.f - dep_x), alp_y = alpha_max*(1.f - dep_y), alp_z = alpha_max*(1.f - dep_z);
+
+    const bool bx = (L_PML > 0.f && i < d) || (R_PML > 0.f && i >= Nx - d);
+    const bool by = (B_PML > 0.f && j < d) || (F_PML > 0.f && j >= Ny - d);
+    const bool bz = (D_PML > 0.f && k < d) || (U_PML > 0.f && k >= Nz - d);
+
+    if (bx){
+        const int ix = (i < d) ? i : i - (Nx - 2*d);
+        const int X  = ix + (2*d)*(j + Ny*k);
+        p[Cijk] += dt*cPML_stretch(Lpx, kap_x, sig_x, alp_x, dt, psi_px[X]);
+        u[Cijk] += dt*cPML_stretch(Lux, kap_x, sig_x, alp_x, dt, psi_ux[X]);
+    }
+    if (by){
+        const int jy = (j < d) ? j : j - (Ny - 2*d);
+        const int Y  = i + Nx*(jy + (2*d)*k);
+        p[Cijk] += dt*cPML_stretch(Lpy, kap_y, sig_y, alp_y, dt, psi_py[Y]);
+        v[Cijk] += dt*cPML_stretch(Lvy, kap_y, sig_y, alp_y, dt, psi_vy[Y]);
+    }
+    if (bz){
+        const int kz = (k < d) ? k : k - (Nz - 2*d);
+        const int Z  = i + Nx*(j + Ny*kz);
+        p[Cijk] += dt*cPML_stretch(Lpz, kap_z, sig_z, alp_z, dt, psi_pz[Z]);
+        w[Cijk] += dt*cPML_stretch(Lwz, kap_z, sig_z, alp_z, dt, psi_wz[Z]);
+    }
 }
 
 
@@ -992,10 +1074,6 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		v1[Cijk] = v0[Cijk] + dt*(-G_vP + G_vM)/h;
 		w1[Cijk] = w0[Cijk] + dt*(-H_wP + H_wM)/h;
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
-	
-		// other BCs
-		
-		sPML(p1, p0, u1, u0, v1, v0, w1, w0, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
 		
 	}
 }
@@ -1069,15 +1147,11 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		w2[Cijk] = 0.75f*w0[Cijk] + 0.25f*(w1[Cijk] + dt*((-H_wP + H_wM)/h));
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
 		
-		// other BCs
-		
-		sPML(p2, p1, u2, u1, v2, v1, w2, w1, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25);
-		
 	}
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1148,8 +1222,12 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		sPML(p1, p2, u1, u2, v1, v2, w1, w2, i, j, k, Nx, Ny, Nz, h, dt, 0.15, 0.15, 0.15, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0/3.0);
-		
+		if (pml_mode == 1){
+			cPML(p1, u1, v1, w1, psi_px, psi_py, psi_pz, psi_ux, psi_vy, psi_wz,
+				(-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
+				(-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
+				i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+		}
 	}
 }
 

@@ -521,7 +521,7 @@ int main(int argc, char *argv[]){
     	std::string filename = (fit_dir / (names[m+1] + ".fit")).string(); // names[0] = BoundingBox
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
 	}
-	
+
 
 	// ----- device arrays for materials -----
 
@@ -566,7 +566,7 @@ int main(int argc, char *argv[]){
 	int *d_bmap;
 	cudaMalloc(&d_bmap, N * sizeof(int));
 	cudaMemcpy(d_bmap, h_bmap, N * sizeof(int), cudaMemcpyHostToDevice);
-	
+
 	// ----- allocate and initialize phi and psi (device side only) -----
 	
 	float *phi, *psi_1, *psi_2;
@@ -686,7 +686,34 @@ int main(int argc, char *argv[]){
 	cudaMemset(d_u2, 0.0, N * sizeof(float));
 	cudaMemset(d_v2, 0.0, N * sizeof(float));
 	cudaMemset(d_w2, 0.0, N * sizeof(float));
-			
+
+	// Split-PML sub-pressure tiles: each spans only its own boundary band (2*PML_CELLS cells
+	// thick on that axis, full on the other two). PML_CELLS is defined in functions3D.cuh.
+	const size_t px_n = (size_t)(2*PML_CELLS)*Ny*Nz;
+	const size_t py_n = (size_t)Nx*(2*PML_CELLS)*Nz;
+	const size_t pz_n = (size_t)Nx*Ny*(2*PML_CELLS);
+	//float *d_px, *d_py, *d_pz;
+	/*
+	cudaMalloc(&d_px, px_n*sizeof(float)); cudaMemset(d_px, 0, px_n*sizeof(float));
+	cudaMalloc(&d_py, py_n*sizeof(float)); cudaMemset(d_py, 0, py_n*sizeof(float));
+	cudaMalloc(&d_pz, pz_n*sizeof(float)); cudaMemset(d_pz, 0, pz_n*sizeof(float));
+	*/
+	// PML mode: 0 = split sPML (Bérenger, tiles above); 1 = unsplit recursive CFS-CPML.
+	// CPML uses 6 psi band-tiles (p<-x,y,z and u<-x,v<-y,w<-z), same tiling as px/py/pz.
+	// Allocated only when selected; passed as nullptr otherwise (kernel branch never reads them).
+	int pml_mode = 1;   // <-- flip to 1 to activate from user's input
+	float *d_psi_px=nullptr, *d_psi_py=nullptr, *d_psi_pz=nullptr;
+	float *d_psi_ux=nullptr, *d_psi_vy=nullptr, *d_psi_wz=nullptr;
+	if (pml_mode == 1){
+		cudaMalloc(&d_psi_px, px_n*sizeof(float)); cudaMemset(d_psi_px, 0, px_n*sizeof(float));
+		cudaMalloc(&d_psi_ux, px_n*sizeof(float)); cudaMemset(d_psi_ux, 0, px_n*sizeof(float));
+		cudaMalloc(&d_psi_py, py_n*sizeof(float)); cudaMemset(d_psi_py, 0, py_n*sizeof(float));
+		cudaMalloc(&d_psi_vy, py_n*sizeof(float)); cudaMemset(d_psi_vy, 0, py_n*sizeof(float));
+		cudaMalloc(&d_psi_pz, pz_n*sizeof(float)); cudaMemset(d_psi_pz, 0, pz_n*sizeof(float));
+		cudaMalloc(&d_psi_wz, pz_n*sizeof(float)); cudaMemset(d_psi_wz, 0, pz_n*sizeof(float));
+	}
+
+	// WENO-5/Z coefficients
 	cudaMallocManaged(&c_rl, 12*sizeof(float)); // coefficients
 	cudaMallocManaged(&beta_rl, 9*sizeof(float)); // coefficients for second term of beta_r
 	cudaMallocManaged(&dd, 3*sizeof(float)); // array
@@ -701,7 +728,6 @@ int main(int argc, char *argv[]){
 	beta_rl[flat(2,0,9)] = 1.0; beta_rl[flat(2,1,9)] = -4.0; beta_rl[flat(2,2,9)] = 3.0;
 			
 	dd[0] = 3.0/10.0; dd[1] = 3.0/5.0; dd[2] = 1.0/10.0;
-	
 		
 	cudaDeviceSynchronize();
 
@@ -1073,7 +1099,7 @@ int main(int argc, char *argv[]){
 			
 		// (2)
 		
-		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML);
+		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 			
 		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
@@ -1096,7 +1122,7 @@ int main(int argc, char *argv[]){
 		
 		// Copy result back to host for creating animation
 		cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
-			
+
 		// write animation slices
 		if (n % anim_step == 0){
 				
@@ -1107,8 +1133,8 @@ int main(int argc, char *argv[]){
     				size_t dst = (size_t)j + (size_t)Ny * (size_t)k;
     				size_t src = (size_t)i0 + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
     				//p_X[dst] = p0[src];
-    				p_X[dst] = p0[src] * sqrtf((k - k0)*(k - k0) + (j - j0)*(j - j0)) * h;
-    				//p_X[dst] = 20.0*log10f(p0[src]/0.00002);
+    				//p_X[dst] = p0[src] * sqrtf((k - k0)*(k - k0) + (j - j0)*(j - j0)) * h;
+    				p_X[dst] = 20.0*log10f(fabsf(p0[src])/0.00002);
   				}
 			}
 			fwrite(p_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_pX);
@@ -1120,8 +1146,8 @@ int main(int argc, char *argv[]){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;
     				size_t src = (size_t)i + (size_t)Nx * ((size_t)j0 + (size_t)Ny * (size_t)k);
     				//p_Y[dst] = p0[src];
-    				p_Y[dst] = p0[src] * sqrtf((k - k0)*(k - k0) + (i - i0)*(i - i0)) * h;
-    				//p_Y[dst] = 20*log10f(p0[src]/0.00002);
+    				//p_Y[dst] = p0[src] * sqrtf((k - k0)*(k - k0) + (i - i0)*(i - i0)) * h;
+    				p_Y[dst] = 20*log10f(fabsf(p0[src])/0.00002);
   				}
 			}
 			fwrite(p_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_pY);
@@ -1133,8 +1159,8 @@ int main(int argc, char *argv[]){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)j;
     				size_t src = (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k0);
     				//p_Z[dst] = p0[src];
-    				p_Z[dst] = p0[src] * sqrtf((j - j0)*(j - j0) + (i - i0)*(i - i0)) * h;
-    				//p_Z[dst] = 20.0*log10f(p0[src]/0.00002);
+    				//p_Z[dst] = p0[src] * sqrtf((j - j0)*(j - j0) + (i - i0)*(i - i0)) * h;
+    				p_Z[dst] = 20.0*log10f(fabsf(p0[src])/0.00002);
   				}
 			}
 			fwrite(p_Z.data(), sizeof(float), (size_t)Nx * (size_t)Ny, file_pZ);
@@ -1203,6 +1229,11 @@ int main(int argc, char *argv[]){
     
     cudaFree(d_S);
     cudaFree(d_oid);
+    
+    if (pml_mode == 1){
+    	cudaFree(d_psi_px); cudaFree(d_psi_py); cudaFree(d_psi_pz);
+    	cudaFree(d_psi_ux); cudaFree(d_psi_vy); cudaFree(d_psi_wz);
+    }
     
     printf("\n[OK] Freed wave-based arrays\n");  
     
