@@ -854,7 +854,8 @@ int main(int argc, char *argv[]){
 	
 	Q_s = 1.0;
 	A_s = 6.0 * h*h; // [m^2]
-	f_0 = 0.05 * f_cutoff; // [Hz]
+	//f_0 = 0.05 * f_cutoff; // [Hz]
+	f_0 = 25.0; // [Hz]
 	w_0 = 2.0 * M_PI * f_0; // [rad/s]
 	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 	
@@ -884,28 +885,27 @@ int main(int argc, char *argv[]){
 	−40 dB	0.4830	conservative alternative
 	*/
 	
-	sigma_s = 8.5 * dt; // 6*dt covers almost the full distribution
-	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // discrete samples
-	/*
+	//sigma_s = 8.5 * dt; // 6*dt covers almost the full distribution (delta distr)
 	sigma_s = 0.425 / f_cutoff;
 	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
-	*/
-	printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 130.9/f_cutoff); //  for current constants above
+	
+	//printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 130.9/f_cutoff); //  for current constants above
+	printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 3.0 * f_0); //  for current constants above
 	
 	// unique sphere's surface driving force
 	for (int t = 0; t <= 2*Nt; t++){
 		//src_pressure[] is the specific source amplitude, pass this to kernel as well and exclude it from F
 		double td = (t - ts_) * dt_half;
-		//F_s[t] = std::exp(-td*td / (2.0*sigma_s*sigma_s));
-		u_s[t] = std::exp(-td*td / (sigma_s*sigma_s)) / (sigma_s * sqrtf(M_PI)); // delta distr
+		F_s[t] = std::exp(-td*td / (2.0*sigma_s*sigma_s));
+		//u_s[t] = std::exp(-td*td / (sigma_s*sigma_s)) / (sigma_s * sqrtf(M_PI)); // delta distr
 		// comment below if using u above)
 	}
-	/*
-	// unique sphere's surface velocity - F(t) filtered with H(z)
+	
+	// unique sphere's surface velocity - F(t) filtered with H(z) - comment if using delta distr TST
 	for (int t = 2; t <= 2*Nt; t++){
 		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
 	}
-	*/
+	
 	// compute dq_hat to retrieve analytical peak for PCS and scale sources
 	double dqhat;
 	double p_peak = 0.0;
