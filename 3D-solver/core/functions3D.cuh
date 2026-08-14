@@ -588,7 +588,7 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
 
     const int   d   = PML_CELLS;
     const int   Cijk = flat3(i, j, k, Nx, Ny);
-    const float R0 = 1e-7, lnR0 = logf(R0), m = 2.0;
+    const float R0 = 5e-8, lnR0 = logf(R0), m = 2.0;
 
     // Normalized local depth in each slab, clamped to [0,1].
     const float xm = fminf(1.f, fmaxf(0.f, ((float)d - (float)i) / (float)d));
@@ -639,24 +639,28 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
     v[Cijk] -= dte*sig_y*v[Cijk];
     w[Cijk] -= dte*sig_z*w[Cijk];
 
-    // unsplit option
+    // unsplit version
     p[Cijk] -= dte*(sig_x + sig_y + sig_z)*p[Cijk];
 }
 
 
 //
-// Unsplit recursive convolutional PML (cPML).
-// Stretches one directional flux divergence D -> D/kappa + psi, psi advanced by exact
-// recursive convolution (one register). Returns the CORRECTION (D_pml - D); caller adds
-// dt*correction on top of the plain kernel update. alpha=0 => plain PML; alpha>0 => CFS.
+// Unsplit recursive convolutional PML (cPML). Stretch a directional divergence D -> D/kappa + psi.
+// Split into two ops so the FIELD can be stretched in every RK stage (RK-consistent) while the
+// psi memory advances only ONCE per step:
+//   cpml_corr : read-only correction (D_pml - D) using the current (frozen) psi.
+//   cpml_adv  : advance psi by exact recursive convolution (call once per step).
+// alpha=0 => plain PML; alpha>0 => CFS.
 //
 __device__ __forceinline__
-float cPML_stretch(float D, float kappa, float sigma, float alpha, float dt, float &psi){
-    const float a  = alpha + sigma/kappa;
-    const float b  = expf(-a*dt);
+float cpml_corr(float D, float kappa, float psi){
+    return (1.0f/kappa - 1.0f)*D + psi;       // D_pml - D
+}
+__device__ __forceinline__
+void cpml_adv(float D, float kappa, float sigma, float alpha, float dt, float &psi){
+    const float b  = expf(-(alpha + sigma/kappa)*dt);
     const float ca = (sigma > 0.f) ? (sigma/(kappa*(sigma + kappa*alpha)))*(b - 1.f) : 0.f;
-    psi = b*psi + ca*D;                       // recursive-convolution memory update
-    return (1.0f/kappa - 1.0f)*D + psi;       // D_pml - D  (correction to add)
+    psi = b*psi + ca*D;
 }
 
 //
@@ -664,13 +668,18 @@ float cPML_stretch(float D, float kappa, float sigma, float alpha, float dt, flo
 // band-tiles: p<-x,y,z and u<-x, v<-y, w<-z. Needs the per-axis flux divergences (Lp*, Lu/Lv/Lw).
 // kappa_max/alpha_max are the CFS knobs (default alpha_max=0 => reproduces a plain sigma-PML).
 //
+// SSP_w = the stage's dt-weight in the SSP-RK3 combination (step0 1.0, step1 0.25, step2 2/3):
+//   the correction rides the same weight as the flux, so the FIELD is RK-consistent.
+// advance = true only on the final stage (step2): psi advances once per step at full dt,
+//   using that stage's divergence, AFTER the correction has read the frozen psi.
 __device__
 void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, float *__restrict__ w,
           float *__restrict__ psi_px, float *__restrict__ psi_py, float *__restrict__ psi_pz,
           float *__restrict__ psi_ux, float *__restrict__ psi_vy, float *__restrict__ psi_wz,
           float Lpx, float Lpy, float Lpz, float Lux, float Lvy, float Lwz,
           int i, int j, int k, int Nx, int Ny, int Nz, float h, float dt, float c,
-          float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML){
+          float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML,
+          float SSP_w, bool advance){
 
     const int   d    = PML_CELLS;
     const int   Cijk = flat3(i, j, k, Nx, Ny);
@@ -694,29 +703,47 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
     const float kap_x = 1.f + (kappa_max-1.f)*powf(dep_x,m);
     const float kap_y = 1.f + (kappa_max-1.f)*powf(dep_y,m);
     const float kap_z = 1.f + (kappa_max-1.f)*powf(dep_z,m);
-    const float alp_x = alpha_max*(1.f - dep_x), alp_y = alpha_max*(1.f - dep_y), alp_z = alpha_max*(1.f - dep_z);
+    // alpha graded alpha_max (inner) -> alpha_min (outer), NEVER to 0: alpha=0 at the wall
+    // reseeds the plain-PML late-time instability exactly where evanescent energy piles up.
+    const float alpha_min = 0.1f * alpha_max;   // CFS floor, keeps stabilization everywhere
+    const float alp_x = alpha_min + (alpha_max - alpha_min)*(1.f - dep_x);
+    const float alp_y = alpha_min + (alpha_max - alpha_min)*(1.f - dep_y);
+    const float alp_z = alpha_min + (alpha_max - alpha_min)*(1.f - dep_z);
 
     const bool bx = (L_PML > 0.f && i < d) || (R_PML > 0.f && i >= Nx - d);
     const bool by = (B_PML > 0.f && j < d) || (F_PML > 0.f && j >= Ny - d);
     const bool bz = (D_PML > 0.f && k < d) || (U_PML > 0.f && k >= Nz - d);
 
+    const float wdt = SSP_w * dt;   // correction weight = flux weight in this RK stage
     if (bx){
         const int ix = (i < d) ? i : i - (Nx - 2*d);
         const int X  = ix + (2*d)*(j + Ny*k);
-        p[Cijk] += dt*cPML_stretch(Lpx, kap_x, sig_x, alp_x, dt, psi_px[X]);
-        u[Cijk] += dt*cPML_stretch(Lux, kap_x, sig_x, alp_x, dt, psi_ux[X]);
+        p[Cijk] += wdt*cpml_corr(Lpx, kap_x, psi_px[X]);   // read frozen psi
+        u[Cijk] += wdt*cpml_corr(Lux, kap_x, psi_ux[X]);
+        if (advance){                                       // then advance once per step
+            cpml_adv(Lpx, kap_x, sig_x, alp_x, dt, psi_px[X]);
+            cpml_adv(Lux, kap_x, sig_x, alp_x, dt, psi_ux[X]);
+        }
     }
     if (by){
         const int jy = (j < d) ? j : j - (Ny - 2*d);
         const int Y  = i + Nx*(jy + (2*d)*k);
-        p[Cijk] += dt*cPML_stretch(Lpy, kap_y, sig_y, alp_y, dt, psi_py[Y]);
-        v[Cijk] += dt*cPML_stretch(Lvy, kap_y, sig_y, alp_y, dt, psi_vy[Y]);
+        p[Cijk] += wdt*cpml_corr(Lpy, kap_y, psi_py[Y]);
+        v[Cijk] += wdt*cpml_corr(Lvy, kap_y, psi_vy[Y]);
+        if (advance){
+            cpml_adv(Lpy, kap_y, sig_y, alp_y, dt, psi_py[Y]);
+            cpml_adv(Lvy, kap_y, sig_y, alp_y, dt, psi_vy[Y]);
+        }
     }
     if (bz){
         const int kz = (k < d) ? k : k - (Nz - 2*d);
         const int Z  = i + Nx*(j + Ny*kz);
-        p[Cijk] += dt*cPML_stretch(Lpz, kap_z, sig_z, alp_z, dt, psi_pz[Z]);
-        w[Cijk] += dt*cPML_stretch(Lwz, kap_z, sig_z, alp_z, dt, psi_wz[Z]);
+        p[Cijk] += wdt*cpml_corr(Lpz, kap_z, psi_pz[Z]);
+        w[Cijk] += wdt*cpml_corr(Lwz, kap_z, psi_wz[Z]);
+        if (advance){
+            cpml_adv(Lpz, kap_z, sig_z, alp_z, dt, psi_pz[Z]);
+            cpml_adv(Lwz, kap_z, sig_z, alp_z, dt, psi_wz[Z]);
+        }
     }
 }
 
@@ -809,6 +836,7 @@ __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta,
 	return dd[(int)abs(rr)] * (1.0f + ratio); // q = 1 (less dissipative)
 }
 */
+
 // UP5 (5th linear Upwind scheme)
 __device__ float compute_alpha(float *__restrict__ dd, int r, int SS){
 	int rr = SS*3 - SS*1 - r;
@@ -834,10 +862,9 @@ __device__ float WENO_x(float *__restrict__ V, float *__restrict__ dd, float *__
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
-	
-	// 3) Compute smoothness indicators beta[r]
-	//WENO-5/Z
 	/*
+	// 3) Compute smoothness indicators beta[r] (comment for UP5)
+	//WENO-5/Z
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_x(V, r, i, j, k, Nx, Ny, beta_rl);
@@ -854,7 +881,7 @@ __device__ float WENO_x(float *__restrict__ V, float *__restrict__ dd, float *__
 	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
 	}
-
+	
 	// 5) Compute V_i+ / V_i-, depending on the value of idx
 	float V_i = 0.0;
 	for (int r = 0; r < 3; r++){
@@ -875,10 +902,9 @@ __device__ float WENO_y(float *__restrict__ V, float *__restrict__ dd, float *__
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
-	
-	// 3) Compute smoothness indicators beta[r]
-	//WENO-5/Z
 	/*
+	// 3) Compute smoothness indicators beta[r] (comment for UP5)
+	//WENO-5/Z
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_y(V, r, i, j, k, Nx, Ny, beta_rl);
@@ -915,10 +941,9 @@ __device__ float WENO_z(float *__restrict__ V, float *__restrict__ dd, float *__
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
-	
-	// 3) Compute smoothness indicators beta[r]
-	//WENO-5/Z
 	/*
+	// 3) Compute smoothness indicators beta[r] (comment for UP5)
+	//WENO-5/Z
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_z(V, r, i, j, k, Nx, Ny, beta_rl);
@@ -1012,7 +1037,7 @@ __global__ void kernel_inject_PCS_SSP(float *p, float *u_s, int *sidx, float *sv
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz){
+__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1081,15 +1106,18 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
 	
 		// other BCs
-		
-		// split PML applied once per step in kernel_WENO_step2 (full dt), operator-split from RK3
-		//sPML(p1, px, py, pz, (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
-		
+		// split PML (mode 0) runs once per step in step2. cPML (mode 1) is RK-consistent:
+		// stretch the field this stage (weight 1.0), do NOT advance psi yet.
+		if (pml_mode == 1)
+			cPML(p1, u1, v1, w1, psi_px, psi_py, psi_pz, psi_ux, psi_vy, psi_wz,
+			     (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
+			     (-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
+			     i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0f, false);
 	}
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz){
+__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1158,10 +1186,12 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
 		
 		// other BCs
-		
-		// split PML applied once per step in kernel_WENO_step2 (full dt), operator-split from RK3
-		//sPML(p2, px, py, pz, (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h, u2, v2, w2, i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25);
-		
+		// cPML (mode 1): stretch the field this stage (weight 0.25), do NOT advance psi yet.
+		if (pml_mode == 1)
+			cPML(p2, u2, v2, w2, psi_px, psi_py, psi_pz, psi_ux, psi_vy, psi_wz,
+			     (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
+			     (-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
+			     i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25f, false);
 	}
 }
 
@@ -1237,14 +1267,15 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		// PML: pml_mode 0 = split sPML (Bérenger), 1 = unsplit recursive CFS-cPML. Both once/step, full dt.
+		// PML: mode 0 = split sPML (Bérenger, once/step). mode 1 = RK-consistent cPML:
+		// final stage (weight 2/3), and advance psi ONCE here (advance=true, full dt).
 		if (pml_mode == 0)
 			sPML(p1, px, py, pz, (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
 		else
 			cPML(p1, u1, v1, w1, psi_px, psi_py, psi_pz, psi_ux, psi_vy, psi_wz,
 			     (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
 			     (-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
-			     i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+			     i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0f/3.0f, true);
 		
 	}
 }

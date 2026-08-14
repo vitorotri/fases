@@ -144,6 +144,7 @@ int main(int argc, char *argv[]){
     // Remove stale outputs from the project output directory, not from cwd.
     // S.bin / oid.bin are kept: they double as a cache (see scene_cache.txt below)
     for (const char* fn : {"pressureX.bin", "pressureY.bin", "pressureZ.bin",
+                           "Iy_X.bin", "Iz_X.bin", "Ix_Y.bin", "Iz_Y.bin", "Ix_Z.bin", "Iy_Z.bin",
                            "header.txt", "pre_header.txt"}) {
         std::remove(out_file(fn).c_str());
     }
@@ -760,7 +761,7 @@ int main(int argc, char *argv[]){
         	if (i_src >= 0 && i_src < Nx && j_src >= 0 && j_src < Ny && k_src >= 0 && k_src < Nz){ 
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
         		// comment 2 lines below if injecting PCS
-            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
             	// push positions into source array
@@ -883,24 +884,28 @@ int main(int argc, char *argv[]){
 	−40 dB	0.4830	conservative alternative
 	*/
 	
-	//sigma_s = 1.0 / (0.75*fs);
+	sigma_s = 8.5 * dt; // 6*dt covers almost the full distribution
+	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // discrete samples
+	/*
 	sigma_s = 0.425 / f_cutoff;
 	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
-	
+	*/
 	printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 130.9/f_cutoff); //  for current constants above
 	
 	// unique sphere's surface driving force
 	for (int t = 0; t <= 2*Nt; t++){
 		//src_pressure[] is the specific source amplitude, pass this to kernel as well and exclude it from F
 		double td = (t - ts_) * dt_half;
-		F_s[t] = std::exp(-td*td / (2.0*sigma_s*sigma_s)); // (2.7 is the calibration factor)
+		//F_s[t] = std::exp(-td*td / (2.0*sigma_s*sigma_s));
+		u_s[t] = std::exp(-td*td / (sigma_s*sigma_s)) / (sigma_s * sqrtf(M_PI)); // delta distr
+		// comment below if using u above)
 	}
-	
+	/*
 	// unique sphere's surface velocity - F(t) filtered with H(z)
 	for (int t = 2; t <= 2*Nt; t++){
 		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
 	}
-	
+	*/
 	// compute dq_hat to retrieve analytical peak for PCS and scale sources
 	double dqhat;
 	double p_peak = 0.0;
@@ -972,8 +977,9 @@ int main(int argc, char *argv[]){
 	std::vector<float> u_s_f(u_s.begin(), u_s.end());
 	cudaMalloc(&d_us, u_s_f.size() * sizeof(float));
 	cudaMemcpy(d_us, u_s_f.data(), u_s_f.size() * sizeof(float), cudaMemcpyHostToDevice);
-		
-	// ----------------------- Define kernel parameters and copy sources to device --------------------------
+	
+	
+	// ----------------------- Define kernel parameters and copy sources to device ----------------------------
 	
 	
 	// Kernel launch parameters
@@ -997,7 +1003,7 @@ int main(int argc, char *argv[]){
     }
 	
 	
-	// --------------------------------- Memory assessment ---------------------------------
+	// --------------------------------------- Memory assessment ----------------------------------------------
 	
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -1032,7 +1038,13 @@ int main(int argc, char *argv[]){
 	int k0 = k_src;
 	size_t stride_Z = (size_t)Nx * (size_t)Ny;
 	std::vector<float> p_Z(stride_Z); // reuse each frame
-	
+
+	// Acoustic intensity (Poynting) I = p*u, in-plane components per slice, for quiver overlay.
+	// YZ slice: (Iy,Iz)=(p*v,p*w);  XZ slice: (Ix,Iz)=(p*u,p*w);  XY slice: (Ix,Iy)=(p*u,p*v).
+	std::vector<float> Iy_X(stride_X), Iz_X(stride_X);   // YZ slice (x = x0)
+	std::vector<float> Ix_Y(stride_Y), Iz_Y(stride_Y);   // XZ slice (y = y0)
+	std::vector<float> Ix_Z(stride_Z), Iy_Z(stride_Z);   // XY slice (z = z0)
+
 	// open BIN file for writing pressure fields
 	FILE *file_pX = fopen(out_file("pressureX.bin").c_str(), "wb");
 	if (file_pX == NULL) {
@@ -1049,7 +1061,18 @@ int main(int argc, char *argv[]){
     	printf("[!] Error opening pressureZ.bin file!\n");
     	exit(1);
 	}
-	
+
+	// Poynting (acoustic intensity) in-plane component bins, one pair per slice.
+	FILE *file_IyX = fopen(out_file("Iy_X.bin").c_str(), "wb");
+	FILE *file_IzX = fopen(out_file("Iz_X.bin").c_str(), "wb");
+	FILE *file_IxY = fopen(out_file("Ix_Y.bin").c_str(), "wb");
+	FILE *file_IzY = fopen(out_file("Iz_Y.bin").c_str(), "wb");
+	FILE *file_IxZ = fopen(out_file("Ix_Z.bin").c_str(), "wb");
+	FILE *file_IyZ = fopen(out_file("Iy_Z.bin").c_str(), "wb");
+	if (!file_IyX || !file_IzX || !file_IxY || !file_IzY || !file_IxZ || !file_IyZ){
+		printf("[!] Error opening Poynting I*_*.bin file(s)!\n"); exit(1);
+	}
+
 	// open BIN files for writing pressure at multiple receivers
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
@@ -1082,17 +1105,17 @@ int main(int argc, char *argv[]){
 				
 		// (0)
 		
-		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz);
+		kernel_WENO_step0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 			
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0f, 1.0f, 1.0f, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
 		// (1)
 			
-		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz);
+		kernel_WENO_step1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0f, 1.0f, 4.0f, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
@@ -1100,7 +1123,7 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_step2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 			
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0f, 2.0f, 3.0f, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 
@@ -1121,48 +1144,66 @@ int main(int argc, char *argv[]){
 		
 		// Copy result back to host for creating animation
 		cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
 
 		// write animation slices
 		if (n % anim_step == 0){
 				
-			// YZ slice at i0: dst = j + Ny*k
+			// Unit energy-flow direction: Ihat = sign(p) * vel / |vel|  (eps-guarded).
+			const float veps = 1e-20f;
+
+			// YZ slice at i0: dst = j + Ny*k ; in-plane comps (Iy, Iz)
 			#pragma omp parallel for collapse(2) schedule(static)
 			for (int k = 0; k < Nz; ++k){
   				for (int j = 0; j < Ny; ++j){
     				size_t dst = (size_t)j + (size_t)Ny * (size_t)k;
     				size_t src = (size_t)i0 + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
-    				//p_X[dst] = p0[src];
-    				p_X[dst] = p0[src] * sqrtf((k - k0)*(k - k0) + (j - j0)*(j - j0)) * h;
-    				//p_X[dst] = 20.0*log10f(p0[src]/0.00002);
+    				p_X[dst] = p0[src];   // pressure background
+    				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
+    				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
+    				Iy_X[dst] = v0[src] * inv;
+    				Iz_X[dst] = w0[src] * inv;
   				}
 			}
-			fwrite(p_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_pX);
-			
-			// XZ slice at j0: dst = i + Nx*k
+			fwrite(p_X.data(),  sizeof(float), (size_t)Ny*(size_t)Nz, file_pX);
+			fwrite(Iy_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_IyX);
+			fwrite(Iz_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_IzX);
+
+			// XZ slice at j0: dst = i + Nx*k ; in-plane comps (Ix, Iz)
 			#pragma omp parallel for collapse(2) schedule(static)
 			for (int k = 0; k < Nz; ++k){
   				for (int i = 0; i < Nx; ++i){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;
     				size_t src = (size_t)i + (size_t)Nx * ((size_t)j0 + (size_t)Ny * (size_t)k);
-    				//p_Y[dst] = p0[src];
-    				p_Y[dst] = p0[src] * sqrtf((k - k0)*(k - k0) + (i - i0)*(i - i0)) * h;
-    				//p_Y[dst] = 20*log10f(p0[src]/0.00002);
+    				p_Y[dst] = p0[src];
+    				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
+    				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
+    				Ix_Y[dst] = u0[src] * inv;
+    				Iz_Y[dst] = w0[src] * inv;
   				}
 			}
-			fwrite(p_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_pY);
-			
-			// XY slice at k0: dst = i + Nx*j
+			fwrite(p_Y.data(),  sizeof(float), (size_t)Nx*(size_t)Nz, file_pY);
+			fwrite(Ix_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_IxY);
+			fwrite(Iz_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_IzY);
+
+			// XY slice at k0: dst = i + Nx*j ; in-plane comps (Ix, Iy)
 			#pragma omp parallel for collapse(2) schedule(static)
 			for (int j = 0; j < Ny; ++j){
   				for (int i = 0; i < Nx; ++i){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)j;
     				size_t src = (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k0);
-    				//p_Z[dst] = p0[src];
-    				p_Z[dst] = p0[src] * sqrtf((j - j0)*(j - j0) + (i - i0)*(i - i0)) * h;
-    				//p_Z[dst] = 20.0*log10f(p0[src]/0.00002);
+    				p_Z[dst] = p0[src];
+    				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
+    				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
+    				Ix_Z[dst] = u0[src] * inv;
+    				Iy_Z[dst] = v0[src] * inv;
   				}
 			}
-			fwrite(p_Z.data(), sizeof(float), (size_t)Nx * (size_t)Ny, file_pZ);
+			fwrite(p_Z.data(),  sizeof(float), (size_t)Nx*(size_t)Ny, file_pZ);
+			fwrite(Ix_Z.data(), sizeof(float), (size_t)Nx*(size_t)Ny, file_IxZ);
+			fwrite(Iy_Z.data(), sizeof(float), (size_t)Nx*(size_t)Ny, file_IyZ);
     			
     		// increment real size of binnaries
     		pbin_size += 1;
@@ -1199,6 +1240,7 @@ int main(int argc, char *argv[]){
     printf("\n[OK] Simulation time: %f min \n\n", elapsed_time); 
     
     fclose(file_pX); fclose(file_pY); fclose(file_pZ);
+    fclose(file_IyX); fclose(file_IzX); fclose(file_IxY); fclose(file_IzY); fclose(file_IxZ); fclose(file_IyZ);
     
     FILE *header; // file for data output
 	header = fopen(out_file("header.txt").c_str(), "w");
