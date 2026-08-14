@@ -9,7 +9,7 @@
 // Split-PML layer thickness in cells (per face). Used by BOTH sPML (below) and the
 // px/py/pz tile allocation in main3D.cu — keep them in sync via this one constant.
 #ifndef PML_CELLS
-#define PML_CELLS 35
+#define PML_CELLS 20
 #endif
 
 // Computes relaxation frequency for Oxygen in air
@@ -588,7 +588,7 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
 
     const int   d   = PML_CELLS;
     const int   Cijk = flat3(i, j, k, Nx, Ny);
-    const float R0 = 1e-6f, lnR0 = logf(R0), m = 2.0f;
+    const float R0 = 1e-7, lnR0 = logf(R0), m = 2.0;
 
     // Normalized local depth in each slab, clamped to [0,1].
     const float xm = fminf(1.f, fmaxf(0.f, ((float)d - (float)i) / (float)d));
@@ -598,7 +598,7 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
     const float zm = fminf(1.f, fmaxf(0.f, ((float)d - (float)k) / (float)d));
     const float zp = fminf(1.f, fmaxf(0.f, ((float)k - ((float)(Nz-1) - (float)d)) / (float)d));
 
-    const float pref = -0.5f * c * (m + 1.0f) * lnR0 / ((float)d * h);
+    const float pref = -0.5f * c * (m + 1.0) * lnR0 / ((float)d * h);
 
     // per-axis conductivity (face-flagged; 0 outside the band via the clamp)
     const float sig_x = L_PML*pref*powf(xm,m) + R_PML*pref*powf(xp,m);
@@ -612,6 +612,8 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
     const bool by = (B_PML > 0.f && j < d) || (F_PML > 0.f && j >= Ny - d);
     const bool bz = (D_PML > 0.f && k < d) || (U_PML > 0.f && k >= Nz - d);
 
+	// split
+	/*
     float corr = 0.0f;   // pressure correction = sum_i sig_i * p_i
     if (bx){
         const int ix = (i < d) ? i : i - (Nx - 2*d);
@@ -632,15 +634,18 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
         corr  += sig_z*pz[Z];
     }
     p[Cijk] -= dte*corr;
-
+	*/
     u[Cijk] -= dte*sig_x*u[Cijk];
     v[Cijk] -= dte*sig_y*v[Cijk];
     w[Cijk] -= dte*sig_z*w[Cijk];
+
+    // unsplit option
+    p[Cijk] -= dte*(sig_x + sig_y + sig_z)*p[Cijk];
 }
 
 
 //
-// Unsplit recursive CFS-cPML (Roden-Gedney), SECOND PML option — sPML above is untouched.
+// Unsplit recursive convolutional PML (cPML).
 // Stretches one directional flux divergence D -> D/kappa + psi, psi advanced by exact
 // recursive convolution (one register). Returns the CORRECTION (D_pml - D); caller adds
 // dt*correction on top of the plain kernel update. alpha=0 => plain PML; alpha>0 => CFS.
@@ -669,9 +674,9 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
 
     const int   d    = PML_CELLS;
     const int   Cijk = flat3(i, j, k, Nx, Ny);
-    const float R0 = 1e-6f, lnR0 = logf(R0), m = 2.0f;
-    const float kappa_max = 8.0;   // knob: >1 real coordinate stretch (grazing incidence)
-    const float alpha_max = M_PI * 18.0;   // knob: >0 = CFS shift [rad/s ~ pi*f_min]; 0 = plain PML
+    const float R0 = 1e-7, lnR0 = logf(1.0/R0), m = 2.0;
+    const float kappa_max = 10.0; // knob: [1,15] -> causes wave to be 'squared' fixing grazing incidence
+    const float alpha_max = M_PI * 20.0; // knob: >0 = CFS shift [rad/s ~ pi*f_min]; 0 = plain PML
 
     const float xm = fminf(1.f, fmaxf(0.f, ((float)d - (float)i) / (float)d));
     const float xp = fminf(1.f, fmaxf(0.f, ((float)i - ((float)(Nx-1) - (float)d)) / (float)d));
@@ -680,7 +685,7 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
     const float zm = fminf(1.f, fmaxf(0.f, ((float)d - (float)k) / (float)d));
     const float zp = fminf(1.f, fmaxf(0.f, ((float)k - ((float)(Nz-1) - (float)d)) / (float)d));
 
-    const float pref = -0.5f * c * (m + 1.0f) * lnR0 / ((float)d * h);
+    const float pref = 0.5 * c * (m + 1.0) * lnR0 / ((float)d * h);
     const float sig_x = L_PML*pref*powf(xm,m) + R_PML*pref*powf(xp,m);
     const float sig_y = B_PML*pref*powf(ym,m) + F_PML*pref*powf(yp,m);
     const float sig_z = D_PML*pref*powf(zm,m) + U_PML*pref*powf(zp,m);
@@ -1007,7 +1012,7 @@ __global__ void kernel_inject_PCS_SSP(float *p, float *u_s, int *sidx, float *sv
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1074,12 +1079,17 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 		v1[Cijk] = v0[Cijk] + dt*(-G_vP + G_vM)/h;
 		w1[Cijk] = w0[Cijk] + dt*(-H_wP + H_wM)/h;
 		p1[Cijk] = p0[Cijk] + dt*(-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h;
+	
+		// other BCs
+		
+		// split PML applied once per step in kernel_WENO_step2 (full dt), operator-split from RK3
+		//sPML(p1, px, py, pz, (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
 		
 	}
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML){
+__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1147,11 +1157,16 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 		w2[Cijk] = 0.75f*w0[Cijk] + 0.25f*(w1[Cijk] + dt*((-H_wP + H_wM)/h));
 		p2[Cijk] = 0.75f*p0[Cijk] + 0.25f*(p1[Cijk] + dt*((-F_pP + F_pM - G_pP + G_pM - H_pP + H_pM)/h));
 		
+		// other BCs
+		
+		// split PML applied once per step in kernel_WENO_step2 (full dt), operator-split from RK3
+		//sPML(p2, px, py, pz, (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h, u2, v2, w2, i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25);
+		
 	}
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
+__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1222,12 +1237,15 @@ __global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0
 		
 		// other BCs
 		
-		if (pml_mode == 1){
+		// PML: pml_mode 0 = split sPML (Bérenger), 1 = unsplit recursive CFS-cPML. Both once/step, full dt.
+		if (pml_mode == 0)
+			sPML(p1, px, py, pz, (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
+		else
 			cPML(p1, u1, v1, w1, psi_px, psi_py, psi_pz, psi_ux, psi_vy, psi_wz,
-				(-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
-				(-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
-				i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
-		}
+			     (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
+			     (-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
+			     i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML);
+		
 	}
 }
 
