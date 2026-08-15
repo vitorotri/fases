@@ -3520,9 +3520,9 @@ class MainWindow(QMainWindow):
 
         lay.addRow(QLabel("PML faces  (check = active):"))
         grid = QGridLayout(); self._pml = {}
-        for idx, (k, lbl) in enumerate([("U_PML","Up"),("D_PML","Down"),
-                                         ("R_PML","Right"),("L_PML","Left"),
-                                         ("F_PML","Front"),("B_PML","Back")]):
+        # labels: Right=x+, Front=y+, Up=z+ / Left=x-, Back=y-, Down=z- (keys unchanged)
+        for idx, (k, lbl) in enumerate([("R_PML","x+"),("F_PML","y+"),("U_PML","z+"),
+                                         ("L_PML","x -"),("B_PML","y -"),("D_PML","z -")]):
             chk = QCheckBox(lbl); chk.setChecked(True)
             self._pml[k] = chk; grid.addWidget(chk, idx//3, idx%3)
         lay.addRow(grid)
