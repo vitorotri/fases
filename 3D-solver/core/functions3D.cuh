@@ -587,16 +587,17 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
           float U_PML, float D_PML, float F_PML, float B_PML, float R_PML, float L_PML, float SSP_w){
 
     const int   d   = PML_CELLS;
+    const int   ng  = PARSE3D_GHOST;    // band on UPDATED cells only, i in [ng, ng+d)
     const int   Cijk = flat3(i, j, k, Nx, Ny);
     const float R0 = 5e-8, lnR0 = logf(R0), m = 2.0;
 
-    // Normalized local depth in each slab, clamped to [0,1].
-    const float xm = fminf(1.f, fmaxf(0.f, ((float)d - (float)i) / (float)d));
-    const float xp = fminf(1.f, fmaxf(0.f, ((float)i - ((float)(Nx-1) - (float)d)) / (float)d));
-    const float ym = fminf(1.f, fmaxf(0.f, ((float)d - (float)j) / (float)d));
-    const float yp = fminf(1.f, fmaxf(0.f, ((float)j - ((float)(Ny-1) - (float)d)) / (float)d));
-    const float zm = fminf(1.f, fmaxf(0.f, ((float)d - (float)k) / (float)d));
-    const float zp = fminf(1.f, fmaxf(0.f, ((float)k - ((float)(Nz-1) - (float)d)) / (float)d));
+    // depth anchored at interior edge ng: peak sigma on outermost updated cell, ghosts excluded.
+    const float xm = fminf(1.f, fmaxf(0.f, ((float)(ng + d) - (float)i) / (float)d));
+    const float xp = fminf(1.f, fmaxf(0.f, ((float)i - ((float)(Nx-1-ng) - (float)d)) / (float)d));
+    const float ym = fminf(1.f, fmaxf(0.f, ((float)(ng + d) - (float)j) / (float)d));
+    const float yp = fminf(1.f, fmaxf(0.f, ((float)j - ((float)(Ny-1-ng) - (float)d)) / (float)d));
+    const float zm = fminf(1.f, fmaxf(0.f, ((float)(ng + d) - (float)k) / (float)d));
+    const float zp = fminf(1.f, fmaxf(0.f, ((float)k - ((float)(Nz-1-ng) - (float)d)) / (float)d));
 
     const float pref = -0.5f * c * (m + 1.0) * lnR0 / ((float)d * h);
 
@@ -608,9 +609,9 @@ void sPML(float *__restrict__ p, float *__restrict__ px, float *__restrict__ py,
     const float dte = SSP_w * dt;
 
     // Only enter a band whose face is enabled -> tile index is always in range.
-    const bool bx = (L_PML > 0.f && i < d) || (R_PML > 0.f && i >= Nx - d);
-    const bool by = (B_PML > 0.f && j < d) || (F_PML > 0.f && j >= Ny - d);
-    const bool bz = (D_PML > 0.f && k < d) || (U_PML > 0.f && k >= Nz - d);
+    const bool bx = (L_PML > 0.f && i >= ng && i < ng + d) || (R_PML > 0.f && i >= Nx-ng-d && i <= Nx-1-ng);
+    const bool by = (B_PML > 0.f && j >= ng && j < ng + d) || (F_PML > 0.f && j >= Ny-ng-d && j <= Ny-1-ng);
+    const bool bz = (D_PML > 0.f && k >= ng && k < ng + d) || (U_PML > 0.f && k >= Nz-ng-d && k <= Nz-1-ng);
 
 	// split
 	/*
@@ -664,7 +665,7 @@ void cpml_adv(float D, float kappa, float sigma, float alpha, float dt, float &p
 }
 
 //
-// cPML layer. Same tiling/placement as sPML (once per step, in kernel_WENO_step2). Six psi
+// cPML layer. Same tiling/placement as sPML (once per step, in kernel_WENO_stage2). Six psi
 // band-tiles: p<-x,y,z and u<-x, v<-y, w<-z. Needs the per-axis flux divergences (Lp*, Lu/Lv/Lw).
 // kappa_max/alpha_max are the CFS knobs (default alpha_max=0 => reproduces a plain sigma-PML).
 //
@@ -682,17 +683,20 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
           float SSP_w, bool advance){
 
     const int   d    = PML_CELLS;
+    const int   ng   = PARSE3D_GHOST;   // absorbing band lives on UPDATED cells, i in [ng, ng+d)
     const int   Cijk = flat3(i, j, k, Nx, Ny);
     const float R0 = 1e-7, lnR0 = logf(1.0/R0), m = 2.0;
-    const float kappa_max = 10.0; // knob: [1,15] -> causes wave to be 'squared' fixing grazing incidence
+    const float kappa_max = 5.0; // knob: [1,15] -> causes wave to be 'squared' fixing grazing incidence
     const float alpha_max = M_PI * 20.0; // knob: >0 = CFS shift [rad/s ~ pi*f_min]; 0 = plain PML
 
-    const float xm = fminf(1.f, fmaxf(0.f, ((float)d - (float)i) / (float)d));
-    const float xp = fminf(1.f, fmaxf(0.f, ((float)i - ((float)(Nx-1) - (float)d)) / (float)d));
-    const float ym = fminf(1.f, fmaxf(0.f, ((float)d - (float)j) / (float)d));
-    const float yp = fminf(1.f, fmaxf(0.f, ((float)j - ((float)(Ny-1) - (float)d)) / (float)d));
-    const float zm = fminf(1.f, fmaxf(0.f, ((float)d - (float)k) / (float)d));
-    const float zp = fminf(1.f, fmaxf(0.f, ((float)k - ((float)(Nz-1) - (float)d)) / (float)d));
+    // depth anchored at the interior edge ng (not the grid edge): peak sigma sits on the
+    // outermost UPDATED cell (i=ng), 0 at the inner edge (i=ng+d). Ghost cells excluded.
+    const float xm = fminf(1.f, fmaxf(0.f, ((float)(ng + d) - (float)i) / (float)d));
+    const float xp = fminf(1.f, fmaxf(0.f, ((float)i - ((float)(Nx-1-ng) - (float)d)) / (float)d));
+    const float ym = fminf(1.f, fmaxf(0.f, ((float)(ng + d) - (float)j) / (float)d));
+    const float yp = fminf(1.f, fmaxf(0.f, ((float)j - ((float)(Ny-1-ng) - (float)d)) / (float)d));
+    const float zm = fminf(1.f, fmaxf(0.f, ((float)(ng + d) - (float)k) / (float)d));
+    const float zp = fminf(1.f, fmaxf(0.f, ((float)k - ((float)(Nz-1-ng) - (float)d)) / (float)d));
 
     const float pref = 0.5 * c * (m + 1.0) * lnR0 / ((float)d * h);
     const float sig_x = L_PML*pref*powf(xm,m) + R_PML*pref*powf(xp,m);
@@ -710,13 +714,13 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
     const float alp_y = alpha_min + (alpha_max - alpha_min)*(1.f - dep_y);
     const float alp_z = alpha_min + (alpha_max - alpha_min)*(1.f - dep_z);
 
-    const bool bx = (L_PML > 0.f && i < d) || (R_PML > 0.f && i >= Nx - d);
-    const bool by = (B_PML > 0.f && j < d) || (F_PML > 0.f && j >= Ny - d);
-    const bool bz = (D_PML > 0.f && k < d) || (U_PML > 0.f && k >= Nz - d);
+    const bool bx = (L_PML > 0.f && i >= ng && i < ng + d) || (R_PML > 0.f && i >= Nx-ng-d && i <= Nx-1-ng);
+    const bool by = (B_PML > 0.f && j >= ng && j < ng + d) || (F_PML > 0.f && j >= Ny-ng-d && j <= Ny-1-ng);
+    const bool bz = (D_PML > 0.f && k >= ng && k < ng + d) || (U_PML > 0.f && k >= Nz-ng-d && k <= Nz-1-ng);
 
     const float wdt = SSP_w * dt;   // correction weight = flux weight in this RK stage
     if (bx){
-        const int ix = (i < d) ? i : i - (Nx - 2*d);
+        const int ix = (i < ng + d) ? (i - ng) : (i - (Nx-ng-d) + d);   // -> [0, 2d)
         const int X  = ix + (2*d)*(j + Ny*k);
         p[Cijk] += wdt*cpml_corr(Lpx, kap_x, psi_px[X]);   // read frozen psi
         u[Cijk] += wdt*cpml_corr(Lux, kap_x, psi_ux[X]);
@@ -726,7 +730,7 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
         }
     }
     if (by){
-        const int jy = (j < d) ? j : j - (Ny - 2*d);
+        const int jy = (j < ng + d) ? (j - ng) : (j - (Ny-ng-d) + d);
         const int Y  = i + Nx*(jy + (2*d)*k);
         p[Cijk] += wdt*cpml_corr(Lpy, kap_y, psi_py[Y]);
         v[Cijk] += wdt*cpml_corr(Lvy, kap_y, psi_vy[Y]);
@@ -736,7 +740,7 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
         }
     }
     if (bz){
-        const int kz = (k < d) ? k : k - (Nz - 2*d);
+        const int kz = (k < ng + d) ? (k - ng) : (k - (Nz-ng-d) + d);
         const int Z  = i + Nx*(j + Ny*kz);
         p[Cijk] += wdt*cpml_corr(Lpz, kap_z, psi_pz[Z]);
         w[Cijk] += wdt*cpml_corr(Lwz, kap_z, psi_wz[Z]);
@@ -1037,7 +1041,7 @@ __global__ void kernel_inject_PCS_SSP(float *p, float *u_s, int *sidx, float *sv
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
+__global__ void kernel_WENO_stage0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1117,7 +1121,7 @@ __global__ void kernel_WENO_step0(int Nx, int Ny, int Nz, float *__restrict__ p0
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
+__global__ void kernel_WENO_stage1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1196,7 +1200,7 @@ __global__ void kernel_WENO_step1(int Nx, int Ny, int Nz, float *__restrict__ p0
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_step2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
+__global__ void kernel_WENO_stage2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
