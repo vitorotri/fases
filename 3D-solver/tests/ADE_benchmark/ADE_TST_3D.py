@@ -186,7 +186,7 @@ mask = (
 
 # Loads expected reflection coefficients
 script_dir = os.path.dirname(os.path.abspath(__file__)) # tests/
-coef_path = os.path.join(script_dir, "north.fit")
+coef_path = os.path.join(script_dir, "sample.fit")
 
 R_inf, A, zeta, B, Cc, alpha, beta = load_R(coef_path)
 
