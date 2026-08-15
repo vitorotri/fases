@@ -189,6 +189,13 @@ MANIFEST_NAME = "project.txt"
 # ─────────────────────────────────────────────────────────────
 #  OBJ parser  (mirrors parsing3D.h)
 # ─────────────────────────────────────────────────────────────
+def _is_bbox(name: str) -> bool:
+    """The reserved domain layer (names[0] in the solver, used for the PML shell,
+    never a material). Match both spellings: 'BoundingBox' and legacy 'boundary'."""
+    n = name.lower()
+    return "bounding" in n or "boundary" in n
+
+
 def parse_obj(path: str):
     """
     Parse vertices and grouped faces from an OBJ file.
@@ -446,7 +453,7 @@ class GLViewer(QOpenGLWidget):
         self._groups = []
         color_idx = 0   # counts only non-bbox groups so colors are never skipped
         for g in groups:
-            is_bbox = "boundary" in g["name"].lower()
+            is_bbox = _is_bbox(g["name"])
             if is_bbox:
                 color = BBOX_COLOR
             else:
@@ -2355,7 +2362,7 @@ class MaterialPanel(QWidget):
         self._tbl.blockSignals(True)
         self._tbl.setRowCount(0)
         for name in layer_names:
-            if "boundary" in name.lower():
+            if _is_bbox(name):
                 continue
             vals, soft = self._load_mat_values(name)
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
@@ -3427,8 +3434,8 @@ class MainWindow(QMainWindow):
 
         bbox_row = QHBoxLayout()
         self._bbox_chk = QCheckBox("Show bounding box")
-        self._bbox_chk.setChecked(False)
         self._bbox_chk.toggled.connect(self._gl.set_bbox_visible)
+        self._bbox_chk.setChecked(True)   # on by default; set after connect so GL syncs
         bbox_row.addWidget(self._bbox_chk); bbox_row.addStretch()
         lay.addLayout(bbox_row)
 
@@ -3692,7 +3699,7 @@ class MainWindow(QMainWindow):
         # must NOT be absolutized against the project, where it does not exist.
         binary   = self._bin_le.text() if hasattr(self, "_bin_le") else ""
         layers   = " ".join(g["name"] for g in self._groups
-                            if "boundary" not in g["name"].lower())
+                            if not _is_bbox(g["name"]))
         dmax     = getattr(self._gl, "_domain_max", None)
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -3864,7 +3871,7 @@ class MainWindow(QMainWindow):
         for g in groups:
             name = g["name"]
             item = QListWidgetItem(name)
-            if "boundary" in name.lower():
+            if _is_bbox(name):
                 item.setForeground(QColor(PAL["subtext"]))
             self._layer_list.addItem(item)
         self._mat_panel.set_project(self._proj_root)
@@ -3896,7 +3903,7 @@ class MainWindow(QMainWindow):
             return
         name = self._groups[row]["name"]
         self._gl.select_layer(name)
-        if "boundary" in name.lower():
+        if _is_bbox(name):
             self._mat_panel._tbl.clearSelection()
             self._mat_panel._tbl.setCurrentCell(-1, -1)
             return

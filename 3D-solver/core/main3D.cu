@@ -519,6 +519,13 @@ int main(int argc, char *argv[]){
 
     
     for (int m = 0; m < nMat; ++m) {
+    	// scene_layer_names_3d always prepends a synthetic BoundingBox at names[0]; if the OBJ
+    	// also draws one it duplicates into names[m+1]. It is the reserved PML-covered shell,
+    	// carries no material -> no .fit. ("ounding"/"oundary" match is case-insensitive on the
+    	// first letter without needing <cctype>.)
+    	const std::string& nm = names[m+1];
+    	if (nm.find("ounding") != std::string::npos || nm.find("oundary") != std::string::npos)
+    		continue;
     	std::string filename = (fit_dir / (names[m+1] + ".fit")).string(); // names[0] = BoundingBox
     	read_fit_file(filename, m, K_m, L_m, Rinf, Ak, zeta, Bl, Cl, alpha, beta);
 	}
@@ -694,14 +701,15 @@ int main(int argc, char *argv[]){
 	const size_t px_n = (size_t)(2*PML_CELLS)*Ny*Nz;
 	const size_t py_n = (size_t)Nx*(2*PML_CELLS)*Nz;
 	const size_t pz_n = (size_t)Nx*Ny*(2*PML_CELLS);
+	/*
 	cudaMalloc(&d_px, px_n*sizeof(float)); cudaMemset(d_px, 0, px_n*sizeof(float));
 	cudaMalloc(&d_py, py_n*sizeof(float)); cudaMemset(d_py, 0, py_n*sizeof(float));
 	cudaMalloc(&d_pz, pz_n*sizeof(float)); cudaMemset(d_pz, 0, pz_n*sizeof(float));
-
+	*/
 	// PML mode: 0 = split sPML (Bérenger, tiles above); 1 = unsplit recursive CFS-CPML.
 	// CPML uses 6 psi band-tiles (p<-x,y,z and u<-x,v<-y,w<-z), same tiling as px/py/pz.
 	// Allocated only when selected; passed as nullptr otherwise (kernel branch never reads them).
-	int pml_mode = 1;   // <-- flip to 1 for CFS-CPML (set kappa_max/alpha_max in cpml())
+	int pml_mode = (U_PML || D_PML || R_PML || L_PML || F_PML || B_PML) ? 1 : 0;
 	float *d_psi_px=nullptr, *d_psi_py=nullptr, *d_psi_pz=nullptr;
 	float *d_psi_ux=nullptr, *d_psi_vy=nullptr, *d_psi_wz=nullptr;
 	if (pml_mode == 1){
