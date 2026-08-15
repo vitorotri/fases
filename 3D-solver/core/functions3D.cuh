@@ -1112,11 +1112,12 @@ __global__ void kernel_WENO_stage0(int Nx, int Ny, int Nz, float *__restrict__ p
 		// other BCs
 		// split PML (mode 0) runs once per step in step2. cPML (mode 1) is RK-consistent:
 		// stretch the field this stage (weight 1.0), do NOT advance psi yet.
-		if (pml_mode == 1)
+		if (pml_mode == 1){
 			cPML(p1, u1, v1, w1, psi_px, psi_py, psi_pz, psi_ux, psi_vy, psi_wz,
 			     (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
 			     (-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
 			     i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0f, false);
+		}
 	}
 }
 
@@ -1191,11 +1192,12 @@ __global__ void kernel_WENO_stage1(int Nx, int Ny, int Nz, float *__restrict__ p
 		
 		// other BCs
 		// cPML (mode 1): stretch the field this stage (weight 0.25), do NOT advance psi yet.
-		if (pml_mode == 1)
+		if (pml_mode == 1){
 			cPML(p2, u2, v2, w2, psi_px, psi_py, psi_pz, psi_ux, psi_vy, psi_wz,
 			     (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
 			     (-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
 			     i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 0.25f, false);
+		}
 	}
 }
 
@@ -1273,14 +1275,12 @@ __global__ void kernel_WENO_stage2(int Nx, int Ny, int Nz, float *__restrict__ p
 		
 		// PML: mode 0 = split sPML (Bérenger, once/step). mode 1 = RK-consistent cPML:
 		// final stage (weight 2/3), and advance psi ONCE here (advance=true, full dt).
-		if (pml_mode == 0)
-			sPML(p1, px, py, pz, (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h, u1, v1, w1, i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 1.0);
-		else
+		if (pml_mode == 1){
 			cPML(p1, u1, v1, w1, psi_px, psi_py, psi_pz, psi_ux, psi_vy, psi_wz,
 			     (-F_pP + F_pM)/h, (-G_pP + G_pM)/h, (-H_pP + H_pM)/h,
 			     (-F_uP + F_uM)/h, (-G_vP + G_vM)/h, (-H_wP + H_wM)/h,
 			     i, j, k, Nx, Ny, Nz, h, dt, c, U_PML, D_PML, F_PML, B_PML, R_PML, L_PML, 2.0f/3.0f, true);
-		
+		}
 	}
 }
 
