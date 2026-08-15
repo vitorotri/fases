@@ -686,7 +686,7 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
     const int   ng   = PARSE3D_GHOST;   // absorbing band lives on UPDATED cells, i in [ng, ng+d)
     const int   Cijk = flat3(i, j, k, Nx, Ny);
     const float R0 = 1e-7, lnR0 = logf(1.0/R0), m = 2.0;
-    const float kappa_max = 5.0; // knob: [1,15] -> causes wave to be 'squared' fixing grazing incidence
+    const float kappa_max = 10.0; // knob: [1,15] -> causes wave to be 'squared' fixing grazing incidence
     const float alpha_max = M_PI * 20.0; // knob: >0 = CFS shift [rad/s ~ pi*f_min]; 0 = plain PML
 
     // depth anchored at the interior edge ng (not the grid edge): peak sigma sits on the
