@@ -473,12 +473,6 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	float Cy = (j + 0.5f) * h;
     	float Cz = (k + 0.5f) * h;
     	
-    	/*
-    	// cell center
-    	float Cx = i * h;
-    	float Cy = j * h;
-    	float Cz = k * h;
-		*/
     	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid) 
     	float Wx = Cx + s * nx;
     	float Wy = Cy + s * ny;
@@ -538,18 +532,6 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	w[Cijk] = (1.0f - chi) * w[Cijk] + chi * w_b;
     	p[Cijk] = (1.0f - chi) * p[Cijk] + chi * p_b;
     	
-    	/*
-    	// immersed boundary smoothing / blending (Brinkman penalization): tuned to different resolutions (?)
-    	float kappa = 0.5f; // once tuned for a test case, no more need to change (for a given tol and chi)
-    	float eta = kappa * h / c;
-    	float lam = 1.0f - expf(-chi * dt / eta); // dimensionless
-		lam = fminf(lam, 1.0f); // clamp for explicit stability + no overshoot
-		
-		u[Cijk] = (1.0f - lam) * u[Cijk] + lam * u_b;
-    	v[Cijk] = (1.0f - lam) * v[Cijk] + lam * v_b;
-    	w[Cijk] = (1.0f - lam) * w[Cijk] + lam * w_b;
-    	p[Cijk] = (1.0f - lam) * p[Cijk] + lam * p_b;
-    	*/
     	/*
     	// no blending
 		u[Cijk] = u_b;
@@ -686,7 +668,7 @@ void cPML(float *__restrict__ p, float *__restrict__ u, float *__restrict__ v, f
     const int   ng   = PARSE3D_GHOST;   // absorbing band lives on UPDATED cells, i in [ng, ng+d)
     const int   Cijk = flat3(i, j, k, Nx, Ny);
     const float R0 = 1e-7, lnR0 = logf(1.0/R0), m = 2.0;
-    const float kappa_max = 10.0; // knob: [1,15] -> causes wave to be 'squared' fixing grazing incidence
+    const float kappa_max = 5.0; // knob: [1,15] -> causes waves to be 'squared' fixing grazing incidence
     const float alpha_max = M_PI * 20.0; // knob: >0 = CFS shift [rad/s ~ pi*f_min]; 0 = plain PML
 
     // depth anchored at the interior edge ng (not the grid edge): peak sigma sits on the
@@ -824,7 +806,6 @@ __device__ float compute_beta_z(float *__restrict__ u, int r, int i, int j, int 
 // compute alpha[r]
 // if S = 0, compute alpha, if 1, compute alpha~
 __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta, float eps, int r, int SS){
-	//if (beta[r] != 0.0) printf("beta = %.17f\n", beta[r]);
 	float aux = beta[r] + eps;
 	int rr = SS*3 - SS*1 - r;
 	return dd[(int)abs(rr)]/(aux*aux);
