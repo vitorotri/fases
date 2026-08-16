@@ -229,7 +229,9 @@ def hornikx_cotte_constrained_fit(
     max_outer=8,
     eps_reduction=0.5,
     eps_floor=1e-12,
-    maxiter=4000
+    maxiter=4000,
+    passivity_margin=1e-3,   # keep |R_model| <= 1 - margin (Re Z >= 0)
+    passivity_weight=1e3     # penalty weight; large enough to dominate overshoot
 ):
     '''
     Bounded refinement of the ADE coefficients.
@@ -268,11 +270,21 @@ def hornikx_cotte_constrained_fit(
 
     x0 = _pack_params(Rinf0, A0, B0, C0, uzeta0, ualpha0, ubeta0)
 
+    # Passivity is a GLOBAL property (all omega>=0), but the fit grid `w` starts at
+    # 20 Hz. Overshoot lives below that and between grid points, so check on a
+    # denser grid from 1 Hz up to the fit band edge. |R|<=1 <=> Re(Z)>=0 for a
+    # locally-reacting surface, so penalising |R|>1-margin removes the non-passivity.
+    f_hi_chk = float(np.max(w)) / (2*np.pi)
+    w_chk = 2*np.pi*np.logspace(np.log10(1.0), np.log10(max(f_hi_chk, 2.0)), 512)
+
     def total_sse(x):
         Rinf, A, B, C, zeta, alpha, beta, *_ = _unpack_params(
             x, K, L, zeta_max, alpha_max, beta_max)
         e = R_expected(Rinf, A, B, C, alpha, beta, zeta, w) - R_tgt
-        return float(np.sum(e.real**2 + e.imag**2))
+        data = float(np.sum(e.real**2 + e.imag**2))
+        Rc = R_expected(Rinf, A, B, C, alpha, beta, zeta, w_chk)
+        ov = np.maximum(np.abs(Rc) - (1.0 - passivity_margin), 0.0)
+        return data + passivity_weight * float(np.sum(ov**2))
 
     sse0 = total_sse(x0)
     if os.environ.get("VFIT_VERBOSE", "0") == "1":
@@ -737,6 +749,13 @@ def fit_material(read_file, coefs_path, soft=False):
         np.any(zeta  > 2.5127 / dt) or
         np.any(beta  > min(1.732 / dt, omega_cutoff))):
         print(f"\n[!] [{name}] alpha/beta/zeta are above expected values, may cause innacuracies / instability\n")
+
+    # passivity check: |R_model| must stay <= 1 for all omega (Re Z >= 0), else the
+    # boundary can add energy on reflection -> slow growth / blow-up.
+    w_chk = 2*np.pi*np.logspace(0.0, np.log10(max(f_cutoff, 2.0)), 1024)
+    Rmax = float(np.max(np.abs(R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w_chk))))
+    if Rmax > 1.0 + 1e-6:
+        print(f"\n[!] [{name}] max|R_model| = {Rmax:.5f} > 1 : non-passive, may cause instability\n")
 
     # ------------------------------------------------------------
     # SAVE IN C++ FORMAT
