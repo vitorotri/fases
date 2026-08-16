@@ -88,9 +88,23 @@ def min_phase_octave_hilbert(freq_hz, R_oct,
 def min_phase_octave_cepstrum(freq_hz, R_oct,
                              fc=np.array([63,125,250,500,1000,2000,4000,8000], float),
                              n_w=2048, ext_oct=2,
-                             mag_floor=1e-8, mag_ceil=1-1e-12):
+                             mag_floor=1e-2, mag_ceil=1-1e-12):
     freq_hz = np.asarray(freq_hz, float)
     R_oct = np.clip(np.asarray(R_oct, float), mag_floor, mag_ceil)
+
+    # Data-driven one-octave extension below the lowest given band (31.5 Hz). The
+    # user only supplies 63..8000 Hz, but the FVM solver needs the reflection below
+    # 63 Hz, where a flat hold is physically wrong. Extrapolate ln|R| along the slope
+    # of the two lowest bands (63,125) -> 31.5 Hz follows the material's OWN trend
+    # (absorbers rise toward rigid, resonant ones can fall). Below 31.5 Hz the curve
+    # then holds flat, but only after one honest octave of slope.
+    fc = np.asarray(fc, float)
+    slope = (np.log(R_oct[1]) - np.log(R_oct[0])) / (np.log(fc[1]) - np.log(fc[0]))
+    f_ext = fc[0] / 2.0                                    # 31.5 Hz
+    R_ext = np.clip(np.exp(np.log(R_oct[0]) + slope*(np.log(f_ext) - np.log(fc[0]))),
+                    mag_floor, mag_ceil)
+    fc    = np.r_[f_ext, fc]
+    R_oct = np.r_[R_ext, R_oct]
 
     f0, f1 = float(freq_hz[0]), float(freq_hz[-1])
     f_lo = max(1e-6, f0 / (2.0**ext_oct))
@@ -639,102 +653,58 @@ def fit_material(read_file, coefs_path, soft=False):
             # are untouched; the fit absorbs the sign.
             R_tgt = -R_tgt
             print(f"[{name}] soft material: R sign inverted")
-        # proceed with VF as usual
 
-        Zs_to_fit = Z_from_R(R_tgt, z0)   # optional; only if needed Z later
+        w = 2.0 * np.pi * freq
+        w_chk = 2*np.pi*np.logspace(0.0, np.log10(max(f_cutoff, 2.0)), 512)
 
-        # --------------------------------------------------------------------------------
-        # Block 2: Vector fit reflection coefficient with scikit-rf
-        # --------------------------------------------------------------------------------
+        def _vf_refine(n_poles):
+            """One VF (scikit-rf) + Option-A refinement at a given real starting-pole
+            count. Returns (coeffs, vf_rms, refined_rms, max|R|)."""
+            frequency = rf.Frequency.from_f(freq, unit="Hz")
+            nw = rf.Network(frequency=frequency)
+            nw.s = R_tgt.reshape(-1, 1, 1)
+            nw.name = savename
+            vf = VectorFitting(nw)
+            vf.max_iterations = int(Niter)
+            # custom initial poles (rad/s), s = j*2*pi*f
+            vf.poles = (-2.0*np.pi*np.linspace(freq[0], freq[-1], n_poles)).astype(complex)
+            vf.vector_fit(n_poles_real=0, n_poles_cmplx=0, init_pole_spacing="custom",
+                          parameter_type="s", fit_constant=True, fit_proportional=False)
+            vf_rms = float(vf.get_rms_error(i=0, j=0))
+            poles = np.array(vf.poles, dtype=complex)
+            res   = np.array(vf.residues[0], dtype=complex)
+            Rc = float(vf.constant_coeff[0]) if vf.constant_coeff is not None else 0.0
+            rm = np.isclose(np.imag(poles), 0.0)             # real vs complex split
+            zt = -poles[rm].real;  Aa = res[rm].real         # real poles  -> A_k, zeta_k
+            al = -poles[~rm].real; be = poles[~rm].imag       # complex pairs -> alpha,beta
+            Bb = 2.0*res[~rm].real; Cc = -2.0*res[~rm].imag
+            # Option A (Hornikx/Cotte) refinement: bounded, passivity-penalised
+            Rc,Aa,Bb,Cc,zt,al,be = hornikx_cotte_constrained_fit(
+                R_tgt=R_tgt, w=w, Rinf0=Rc, A0=Aa, B0=Bb, C0=Cc,
+                zeta0=zt, alpha0=al, beta0=be, dt=dt, omega_cutoff=omega_cutoff)
+            R_hat = R_expected(Rc, Aa, Bb, Cc, al, be, zt, w)
+            r_rms = float(np.sqrt(np.mean(np.abs(R_hat - R_tgt)**2)))
+            maxR  = float(np.max(np.abs(R_expected(Rc,Aa,Bb,Cc,al,be,zt,w_chk))))
+            return (Rc,Aa,Bb,Cc,zt,al,be), vf_rms, r_rms, maxR
 
-        # Build a 1-port skrf Network with S11 = R_tgt
-        frequency = rf.Frequency.from_f(freq, unit="Hz")
-        nw = rf.Network(frequency=frequency)
-        nw.s = R_tgt.reshape(-1, 1, 1)  # shape: (n_freq, n_ports, n_ports)
-        nw.name = savename
-
-        vf = VectorFitting(nw)
-        vf.max_iterations = int(Niter)
-
-        # Provide custom initial poles (rad/s), matching s = j*2*pi*f.
-        # MATLAB used: poles = -linspace(freq(1),freq(end),N)  (but s is rad/s)
-        # Here we do it consistently in rad/s:
-        poles_init = -2.0 * np.pi * np.linspace(freq[0], freq[-1], N).astype(float)
-        vf.poles = poles_init.astype(complex)
-
-        print(f"[{name}] vector fitting (scikit-rf)...")
-        vf.vector_fit(
-            n_poles_real=0,             # ignored for custom spacing
-            n_poles_cmplx=0,            # ignored for custom spacing
-            init_pole_spacing="custom", # uses vf.poles as initial poles
-            parameter_type="s",         # fit directly S11
-            fit_constant=True,          # if False -> no constant term R_inf
-            fit_proportional=False,     # no proportional term
-        )
-
-        # Final RMS error (scalar response i=j=0)
-        rmserr = float(vf.get_rms_error(i=0, j=0))
-        print(f"[{name}] RMS error (VF): {rmserr:.6e}")
-
-        # Fitted model parameters
-        poles = np.array(vf.poles, dtype=complex)              # shape (K,) ; complex poles stored with +imag only
-        residues = np.array(vf.residues[0], dtype=complex)     # shape (K,) ; because 1-port => M=1 response
-
-        # ------------------------------------------------------------
-        # Block 3: Extract coefficients in ADE form and save to file
-        # ------------------------------------------------------------
-
-        poles = np.array(vf.poles, dtype=complex)
-        residues = np.array(vf.residues[0], dtype=complex)
-
-        # Constant term (R_inf)
-        Rinf = float(vf.constant_coeff[0]) if vf.constant_coeff is not None else 0.0
-
-        # Separate real and complex poles
-        real_mask = np.isclose(np.imag(poles), 0.0)
-        cmplx_mask = ~real_mask
-
-        poles_real = poles[real_mask]
-        res_real = residues[real_mask]
-
-        poles_cmplx = poles[cmplx_mask]
-        res_cmplx = residues[cmplx_mask]
-
-        # -----------------------------
-        # REAL POLES  ->  A_k, zeta_k
-        # -----------------------------
-        zeta = (-poles_real.real)        # because pole = -zeta
-        Acoef = res_real.real            # residue
-
-        K = len(zeta)
-
-        # -------------------------------------------
-        # COMPLEX POLES -> B_l C_l alpha_l beta_l
-        # -------------------------------------------
-        # scikit-rf stores only ONE pole per complex pair (positive imag part)
-
-        alpha = (-poles_cmplx.real)
-        beta  = (poles_cmplx.imag)
-
-        Bcoef = 2.0 * res_cmplx.real
-        Ccoef = -2.0 * res_cmplx.imag
-
-        L = len(alpha)
-
-    # ------------------------------------------------------------
-    # OPTION A refinement (Hornikx/Cotte style)
-    # - minimize real-part error
-    # - constrain imag-part error via epsilon continuation
-    # - enforce alpha/beta/zeta bounds DURING the fit
-    # ------------------------------------------------------------
-    print(f"\n[{name}] Option A refinement (Hornikx/Cotte constrained continuation)...")
-    w = 2.0 * np.pi * freq
-    Rinf, Acoef, Bcoef, Ccoef, zeta, alpha, beta = hornikx_cotte_constrained_fit(
-        R_tgt=R_tgt, w=w,
-        Rinf0=Rinf, A0=Acoef, B0=Bcoef, C0=Ccoef,
-        zeta0=zeta, alpha0=alpha, beta0=beta,
-        dt=dt, omega_cutoff=omega_cutoff
-    )
+        # A steep target (a band at alpha=1 -> |R| floored to 1e-2) can drop VF in a bad
+        # basin, and the real/complex pole split is BLAS-noise sensitive, so a fit can come
+        # out non-passive at random. Retry with a few more starting poles, keep the best
+        # (passive first, then lowest rms). Break on the first passive fit -> good materials
+        # pay for exactly one VF+refine, no slowdown.
+        best = None
+        for i, n_poles in enumerate((N, N+2, N+4)):
+            print(f"[{name}] vector fitting (scikit-rf), {n_poles} start poles"
+                  + (f"  [retry {i}]" if i else "") + "...")
+            coeffs, rmserr, r_rms, maxR = _vf_refine(n_poles)
+            score = (maxR > 1.0 + 1e-6, r_rms)   # False (passive) sorts before True
+            if best is None or score < best[0]:
+                best = (score, coeffs, rmserr, r_rms, maxR)
+            if maxR <= 1.0 + 1e-6:
+                break
+        _, coeffs, rmserr, r_rms, maxR = best
+        Rinf, Acoef, Bcoef, Ccoef, zeta, alpha, beta = coeffs
+        print(f"[{name}] RMS (VF) {rmserr:.6e}  refined rms {r_rms:.3e}  max|R| {maxR:.4f}")
 
     # ------------------------------------------------------------
     # Causality and reality test
