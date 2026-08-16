@@ -388,7 +388,7 @@ class GLViewer(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # camera
-        self._yaw   =  35.0       # normal orbit: around OBJ/world Z
+        self._yaw   =  215.0      # normal orbit: around OBJ/world Z (x lower-left, y lower-right)
         self._pitch = -22.0       # normal orbit: tilt
         self._free_x = 0.0        # Alt+LMB free tumble around screen X
         self._free_y = 0.0        # Alt+LMB free tumble around screen Y
@@ -478,7 +478,7 @@ class GLViewer(QOpenGLWidget):
             self._domain_max = mx.copy()
             self._pan        = np.zeros(3, np.float32)
             self._dist       = span * 1.8 if span > 0 else 6.0
-            self._yaw   = 35.0
+            self._yaw   = 215.0
             self._pitch = -22.0
             self._free_x = 0.0
             self._free_y = 0.0
@@ -2040,6 +2040,7 @@ class MaterialPanel(QWidget):
     rowSelected = Signal(str)   # emitted with layer name when a row is selected
     fitBegan = Signal(str)      # a fit run started; payload = command header line
     fitLog   = Signal(str)      # one line of fitter output -> Run tab Output log
+    fitAllDone = Signal(int)    # fit-all finished; payload = return code
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2629,11 +2630,14 @@ class MaterialPanel(QWidget):
         if not (self._mat_dir and self._fit_dir) or not self._tbl.rowCount():
             return []
         try:
-            v = [float(x) for x in open(config_path).read().split()]
+            # config.txt = one value per line with a trailing '# comment' -> strip it,
+            # take the first token per line (same as _load_config), else float() chokes.
+            v = [float(l.split("#")[0].split()[0])
+                 for l in open(config_path) if l.split("#")[0].strip()]
             tail = f"|h={v[0]:.10g}|cfl={v[4]:.10g}|fc={v[2]:.10g}|T={v[3]:.10g}|N={int(v[5])}"
         except Exception:
             return []                      # no config -> can't judge, don't block
-        soft = self._read_soft()
+        soft = self._read_all_soft()
         stale = []
         for r in range(self._tbl.rowCount()):
             it = self._tbl.item(r, 0)
@@ -2765,6 +2769,7 @@ class MaterialPanel(QWidget):
             self._status.setText(f"Fit all done → {self._fit_dir}")
         else:
             self._status.setText(f"Fit all failed (rc={rc}): {tail[:160]}")
+        self.fitAllDone.emit(rc)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -3488,6 +3493,8 @@ class MainWindow(QMainWindow):
         self._mat_panel.rowSelected.connect(self._on_material_row_selected)
         self._mat_panel.fitBegan.connect(self._begin_fit_log)
         self._mat_panel.fitLog.connect(self._append_fit_log)
+        self._mat_panel.fitAllDone.connect(self._on_fit_all_finished)
+        self._pending_sim = False   # set when user chose "Fit first" before Simulate
         lay.addWidget(self._mat_panel, 1)
         return w
 
@@ -4200,16 +4207,25 @@ class MainWindow(QMainWindow):
         self._mat_panel.save_all()
         # material values changed since last fit -> .fit (and its ADE poles) are stale.
         # Running now would simulate with old impedances. Warn, offer to refit first.
-        stale = self._mat_panel.stale_fits(cfg_path)
+        try:
+            stale = self._mat_panel.stale_fits(cfg_path)
+        except Exception:
+            stale = []              # a stale-check bug must never block Simulate
         if stale:
-            if QMessageBox.warning(self, "Impedances out of date",
+            B = QMessageBox.StandardButton
+            ans = QMessageBox.warning(self, "Impedances out of date",
                     "These materials changed since their last fit:\n\n  • "
                     + "\n  • ".join(stale)
-                    + "\n\nRe-fit impedances before simulating (Run tab → Fit impedances)."
-                      "\n\nSimulate anyway with the old fits?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                    + "\n\nFit impedances first, then simulate?",
+                    B.Yes | B.No | B.Cancel, B.Yes)
+            if ans == B.Cancel:
                 return
+            if ans == B.Yes:
+                # fit now; _on_fit_all_finished relaunches the run when it completes
+                self._pending_sim = True
+                self._fit_impedances()
+                return
+            # B.No -> fall through and simulate with the old fits
         # pre-flight checks. MEMORY over-budget is a HARD STOP -- it would exhaust RAM and
         # freeze/crash the machine, so the run is refused outright (no override). Resolution /
         # sampling only make the result inaccurate (the run still completes), so they warn with
@@ -4262,6 +4278,18 @@ class MainWindow(QMainWindow):
         if not self._proj_root:
             self._sb.showMessage("Open a project folder first."); return
         self._mat_panel.run_fit_all()
+
+    def _on_fit_all_finished(self, rc):
+        """If the user picked 'Fit first' on Simulate, relaunch the run once the
+        fit finishes cleanly. On failure, drop the pending run."""
+        if not self._pending_sim:
+            return
+        self._pending_sim = False
+        if rc == 0:
+            self._run_solver()   # fits now fresh -> stale check passes, runs
+        else:
+            QMessageBox.warning(self, "Fit failed",
+                                "Impedance fit failed — simulation not started.")
 
     def _toggle_run(self):
         """The single Run/Stop button: launch if idle, stop if running."""
