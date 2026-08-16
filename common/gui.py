@@ -2377,7 +2377,12 @@ class MaterialPanel(QWidget):
                               QTableWidgetItem(f"{self._load_sctr_value(name):.2f}"))  # Scatter col
             self._set_row_soft(r, soft)   # after the cells exist
         self._tbl.blockSignals(False)
-        self._clear_plot()
+        # always land on a selected material so value edits attribute to a row
+        # (an unselected table silently dropped edits -> stale-check missed them).
+        if self._tbl.rowCount() > 0:
+            self._tbl.selectRow(0)
+        else:
+            self._clear_plot()
 
     # ── ALL.mat : central hard/soft registry ─────────────────
     # One file, one line per material: "<name>  <flag>" (0=hard, 1=soft).
@@ -2489,9 +2494,18 @@ class MaterialPanel(QWidget):
 
     def _on_row_selected(self):
         # selection changed: replot, sync the hard/soft toggle, notify viewport
+        r = self._current_row()
+        if r < 0 and self._tbl.rowCount() > 0 and not getattr(self, "_reselecting", False):
+            # a stray clear left no row selected -> reselect so edits keep a target
+            self._reselecting = True
+            self._tbl.selectRow(min(max(getattr(self, "_last_row", 0), 0),
+                                    self._tbl.rowCount() - 1))
+            self._reselecting = False
+            return
         name = self._replot_current()
         r = self._current_row()
         if r >= 0:
+            self._last_row = r
             self._soft_btn.blockSignals(True)
             soft = self._row_soft(r)
             self._soft_btn.setChecked(soft)
@@ -3914,9 +3928,9 @@ class MainWindow(QMainWindow):
         self._mat_panel.populate([g["name"] for g in groups])
 
     def _show_no_layer_selected(self):
-        # clear the material table selection -> plot resets to placeholder
-        self._mat_panel._tbl.clearSelection()
-        self._mat_panel._tbl.setCurrentCell(-1, -1)
+        # Leave the material table selection intact: it must always keep one row
+        # selected so value edits attribute to a material. Nothing to do here.
+        pass
 
     def _on_layer_picked(self, name):
         """Sync list selection when user clicks in the GL viewport."""
@@ -3940,8 +3954,7 @@ class MainWindow(QMainWindow):
         name = self._groups[row]["name"]
         self._gl.select_layer(name)
         if _is_bbox(name):
-            self._mat_panel._tbl.clearSelection()
-            self._mat_panel._tbl.setCurrentCell(-1, -1)
+            # bbox has no material row; leave the material table selection as-is
             return
         # select the matching row in the material table -> triggers plot
         if not getattr(self, "_sync_guard", False):
