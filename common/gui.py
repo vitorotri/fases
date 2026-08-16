@@ -2621,6 +2621,35 @@ class MaterialPanel(QWidget):
         self._write_all_soft()      # one central hard/soft registry
         self._status.setText(f"Saved {n} material file(s) → {self._mat_dir}")
 
+    def stale_fits(self, config_path):
+        """Material names whose current values no longer match their .fit — recomputes
+        the same signature fminconFIT stamps as '# sig <hex>' (alphas + soft + the config
+        values that change the fit) and compares. Missing .fit = stale."""
+        import hashlib
+        if not (self._mat_dir and self._fit_dir) or not self._tbl.rowCount():
+            return []
+        try:
+            v = [float(x) for x in open(config_path).read().split()]
+            tail = f"|h={v[0]:.10g}|cfl={v[4]:.10g}|fc={v[2]:.10g}|T={v[3]:.10g}|N={int(v[5])}"
+        except Exception:
+            return []                      # no config -> can't judge, don't block
+        soft = self._read_soft()
+        stale = []
+        for r in range(self._tbl.rowCount()):
+            it = self._tbl.item(r, 0)
+            if it is None or _is_bbox(it.text()):   # reserved shell never fitted
+                continue
+            name = it.text()
+            a = "|".join(f"{round(float(x),8):.8g}" for x in self._row_values(r)[:8])
+            want = hashlib.sha1((a + f"|soft={int(bool(soft.get(name,False)))}" + tail)
+                                .encode()).hexdigest()[:16]
+            fit = os.path.join(self._fit_dir, name + ".fit")
+            got = next((l.split()[-1] for l in open(fit)
+                        if l.lower().startswith("# sig")), None) if os.path.exists(fit) else None
+            if got != want:
+                stale.append(name)
+        return stale
+
     def run_fit_selected(self):
         r = self._tbl.currentRow()
         if r < 0:
@@ -3522,7 +3551,7 @@ class MainWindow(QMainWindow):
         grid = QGridLayout(); self._pml = {}
         # labels: Right=x+, Front=y+, Up=z+ / Left=x-, Back=y-, Down=z- (keys unchanged)
         for idx, (k, lbl) in enumerate([("R_PML","x+"),("F_PML","y+"),("U_PML","z+"),
-                                         ("L_PML","x -"),("B_PML","y -"),("D_PML","z -")]):
+                                         ("L_PML","x-"),("B_PML","y-"),("D_PML","z-")]):
             chk = QCheckBox(lbl); chk.setChecked(True)
             self._pml[k] = chk; grid.addWidget(chk, idx//3, idx%3)
         lay.addRow(grid)
@@ -4164,10 +4193,23 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self,"No project","Open project first."); return
         if not self._obj_path:
             QMessageBox.warning(self,"No scene","Load an OBJ first."); return
-        self._write_config(os.path.join(self._proj_root,"config","config.txt"))
+        cfg_path = os.path.join(self._proj_root,"config","config.txt")
+        self._write_config(cfg_path)
         self._src_tbl.save_file(os.path.join(self._proj_root,"input","src","src.txt"))
         self._rec_tbl.save_file(os.path.join(self._proj_root,"input","rec","rec.txt"))
         self._mat_panel.save_all()
+        # material values changed since last fit -> .fit (and its ADE poles) are stale.
+        # Running now would simulate with old impedances. Warn, offer to refit first.
+        stale = self._mat_panel.stale_fits(cfg_path)
+        if stale:
+            if QMessageBox.warning(self, "Impedances out of date",
+                    "These materials changed since their last fit:\n\n  • "
+                    + "\n  • ".join(stale)
+                    + "\n\nRe-fit impedances before simulating (Run tab → Fit impedances)."
+                      "\n\nSimulate anyway with the old fits?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
         # pre-flight checks. MEMORY over-budget is a HARD STOP -- it would exhaust RAM and
         # freeze/crash the machine, so the run is refused outright (no override). Resolution /
         # sampling only make the result inaccurate (the run still completes), so they warn with
