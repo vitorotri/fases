@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QScrollArea, QAbstractItemView, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar, QSlider, QMenu, QProgressBar, QDialog,
-    QStyledItemDelegate, QStyle
+    QStyledItemDelegate, QStyle, QRadioButton, QButtonGroup
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
@@ -2811,6 +2811,49 @@ def make_pm_icon(sign, size=18, color=None):
     return QIcon(pm)
 
 
+def make_pulse_icon(kind, w=46, h=28, color=None):
+    """Tiny didactic curve of each source pulse shape (just the waveform, no axis), for
+    the source-type radio buttons. kind: 'pcs' | 'ricker' | 'sinusoid'."""
+    col = QColor(color) if color else QColor(PAL["text"])
+    pm = QPixmap(w, h)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    mid = h / 2.0
+    # sample the analytical shape over x in [-3,3]
+    N = 48
+    ys = []
+    for i in range(N):
+        s = i / (N - 1)                                           # 0..1 across the icon
+        x = -3.0 + 6.0 * s
+        if kind == "sinusoid":
+            y = math.sin(math.pi * x)                              # steady sine (3 cycles)
+        elif kind == "ricker":
+            y = (1.0 - x * x) * math.exp(-0.5 * x * x)             # mexican hat: peak + 2 dips
+        else:  # pcs: causal damped oscillation -> +peak, smaller -peak, tiny +peak, flat
+            s0 = 0.12                                              # short flat lead-in
+            if s < s0:
+                y = 0.0
+            else:
+                tau = (s - s0) / (1.0 - s0)
+                y = math.exp(-3.2 * tau) * math.sin(2.0 * math.pi * 1.35 * tau)
+        ys.append(y)
+    ymax = max(abs(v) for v in ys) or 1.0
+    amp = (h / 2.0 - 3.0)
+    pen = QPen(col); pen.setWidthF(1.6)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    prev = None
+    for i, y in enumerate(ys):
+        X = 2.0 + (w - 4.0) * i / (N - 1)
+        Y = mid - (y / ymax) * amp
+        if prev is not None:
+            p.drawLine(QPointF(*prev), QPointF(X, Y))
+        prev = (X, Y)
+    p.end()
+    return QIcon(pm)
+
+
 class PointTable(QWidget):
     changed = Signal()
 
@@ -3568,6 +3611,37 @@ class MainWindow(QMainWindow):
         self._nrays.setValue(20000); self._nrays.setMinimumWidth(130)
         lay.addRow("Number of rays:", self._nrays)
 
+        # Source excitation, shared by all sources (line 16 of config.txt; main3D reads
+        # v[15] as src_opt). Exclusive radios; ids match the solver: 0=PCS,1=Ricker,2=Sinusoid.
+        # Each carries a small didactic icon of its pulse shape.
+        self._src_group = QButtonGroup(self)
+        src_row = QHBoxLayout(); src_row.setContentsMargins(0, 0, 0, 0)
+        for sid, label in [(0, "PCS"), (1, "Ricker"), (2, "Sinusoid")]:
+            rb = QRadioButton(label)
+            rb.setIcon(make_pulse_icon(label.lower()))
+            rb.setIconSize(QSize(46, 28))
+            self._src_group.addButton(rb, sid)
+            src_row.addWidget(rb)
+        src_row.addStretch(1)
+        self._src_group.button(0).setChecked(True)
+        _src_w = QWidget(); _src_w.setLayout(src_row)
+        lay.addRow("Source type:", _src_w)
+
+        # Global sinusoid frequency (line 17 of config.txt; main3D reads v[16] for src_opt==2).
+        # Row shown only when Sinusoid is selected. Hard-clamped below f_cutoff (above the
+        # resolved band = dispersion). Accelerated so holding the button ramps up fast.
+        self._sin_freq = QSpinBox(); self._sin_freq.setRange(1, max(1, int(self._cfg['f_cutoff'].value())))
+        self._sin_freq.setValue(min(950, self._sin_freq.maximum())); self._sin_freq.setSuffix(" Hz")
+        self._sin_freq.setMinimumWidth(130); self._sin_freq.setAccelerated(True)
+        _sin_row = QWidget(); _sr = QHBoxLayout(_sin_row); _sr.setContentsMargins(0, 0, 0, 0)
+        _sr.addWidget(QLabel("Sinusoid freq:")); _sr.addWidget(self._sin_freq); _sr.addStretch(1)
+        _sin_row.setVisible(False)
+        lay.addRow(_sin_row)
+        self._src_group.buttonToggled.connect(
+            lambda *_: _sin_row.setVisible(self._src_group.checkedId() == 2))
+        self._cfg['f_cutoff'].valueChanged.connect(
+            lambda fc: self._sin_freq.setMaximum(max(1, int(fc))))
+
         lay.addRow(QLabel("PML faces  (check = active):"))
         grid = QGridLayout(); self._pml = {}
         # labels: Right=x+, Front=y+, Up=z+ / Left=x-, Back=y-, Down=z- (keys unchanged)
@@ -4024,6 +4098,8 @@ class MainWindow(QMainWindow):
             f.write(f"{self._ism_order.value()}                               # ISM max reflection order\n")
             f.write(f"{self._cfg['altitude'].value():.6g}      # altitude [m]\n")
             f.write(f"{self._nrays.value()}                               # number of rays (ray-traced tail)\n")
+            f.write(f"{max(0, self._src_group.checkedId())}                               # source type (0=PCS,1=Ricker,2=Sinusoid)\n")
+            f.write(f"{self._sin_freq.value()}                               # sinusoid frequency [Hz] (used when source type = Sinusoid)\n")
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -4051,6 +4127,11 @@ class MainWindow(QMainWindow):
             self._cfg["altitude"].setValue(vals[13])  # altitude [m]
         if len(vals) > 14:
             self._nrays.setValue(int(vals[14]))  # number of rays (ray-traced tail)
+        if len(vals) > 15:
+            btn = self._src_group.button(max(0, min(2, int(vals[15]))))  # 0=PCS,1=Ricker,2=Sinusoid
+            if btn: btn.setChecked(True)
+        if len(vals) > 16:
+            self._sin_freq.setValue(int(vals[16]))  # sinusoid frequency [Hz]
 
     def _save_src(self):
         if not self._proj_root: return

@@ -852,7 +852,7 @@ int main(int argc, char *argv[]){
 	double A_s = 6.0 * h*h; // equivalent surface area of single node sphere [m^2]
 	double dt_half  = 0.5 * dt; // half time-step for arrays [s]
 	
-	int src_opt = 2; // source option flag
+	int src_opt = (conf_arr.size() > 15) ? (int)conf_arr[15] : 0; // 0=PCS,1=Ricker,2=Gaussian (config line 16); PCS if absent
 	if (src_opt == 0){
 		// ------------ Pre-compute PCS (Physically Constrained Source) sphere's surface velocity -------------
 		
@@ -902,7 +902,6 @@ int main(int argc, char *argv[]){
 		sigma_s = 0.425 / f_cutoff;
 		ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
 		
-		//printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 130.9/f_cutoff); //  for current constants above
 		printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 2.0 / f_0);
 		
 		// unique sphere's surface driving force
@@ -942,7 +941,7 @@ int main(int argc, char *argv[]){
 	}
 	else if (src_opt == 2){
 		// ---------------------------- Pre-compute Monochromatic Sinusoid ------------------------------------
-		double f_0 = 950.0; // [Hz]
+		double f_0 = (conf_arr.size() > 16) ? conf_arr[16] : 950.0; // [Hz] (config line 17); 950 if absent
 			
 		for (int t = 0; t <= 2*Nt; t++){
 			u_s[t] = sin(2*M_PI*f_0*t*dt_half);
