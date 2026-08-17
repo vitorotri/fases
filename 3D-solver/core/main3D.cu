@@ -852,7 +852,7 @@ int main(int argc, char *argv[]){
 	double A_s = 6.0 * h*h; // equivalent surface area of single node sphere [m^2]
 	double dt_half  = 0.5 * dt; // half time-step for arrays [s]
 	
-	int src_opt = 1; // source option flag
+	int src_opt = 2; // source option flag
 	if (src_opt == 0){
 		// ------------ Pre-compute PCS (Physically Constrained Source) sphere's surface velocity -------------
 		
@@ -938,8 +938,16 @@ int main(int argc, char *argv[]){
 		for (int t = 0; t <= 2*Nt; t++){
 			x_s = (t - ts_) * dt_half/ sigma_s;
 			u_s[t] = x_s * exp(-0.5 * x_s * x_s); // normalized
-			//u_s[t] /= A_s;
 		}
+	}
+	else if (src_opt == 2){
+		// ---------------------------- Pre-compute Monochromatic Sinusoid ------------------------------------
+		double f_0 = 950.0; // [Hz]
+			
+		for (int t = 0; t <= 2*Nt; t++){
+			u_s[t] = sin(2*M_PI*f_0*t*dt_half);
+		}
+	
 	}
 	
 	// -------------------------------- Compute dqhat and scale sources ---------------------------------------
