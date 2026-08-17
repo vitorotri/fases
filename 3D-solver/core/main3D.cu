@@ -661,7 +661,7 @@ int main(int argc, char *argv[]){
 	
 	
 	//float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well
-	float eps = 1e-20; // WENO-Z
+	float eps = 1e-10; // WENO-Z
 	
 	try {
 		p1 = new float[N](); // sound pressure
@@ -772,7 +772,7 @@ int main(int argc, char *argv[]){
         		
         		// map point source(s) as intial condition(s) / source injection, no delay(s)
         		// comment 2 lines below if injecting PCS
-            	p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
+            	//p0[flat3(i_src, j_src, k_src, Nx, Ny)] = val_s;
             	//p1[flat3(i_src, j_src, k_src, Nx, Ny)] = -val_s;
             	
             	// push positions into source array
@@ -846,76 +846,103 @@ int main(int argc, char *argv[]){
 	file.close();
 	file.clear();
 	
+	// ----------------------------------- Pre-compute timed sources ------------------------------------------
 	
-	// ------------- Pre-compute PCS (Physically Constrained Source) sphere's surface velocity ----------------
-	
-	// Ref. Sheaffer, Van Walstijn, Fazenda (2012)
-	// "A Physically Constrained Source Model for FDTD Acoustic Simulation"
-	
-	std::vector<double> F_s(2*Nt + 1, 0.0); // source's driving force
 	std::vector<double> u_s(2*Nt + 1, 0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
+	double A_s = 6.0 * h*h; // equivalent surface area of single node sphere [m^2]
+	double dt_half  = 0.5 * dt; // half time-step for arrays [s]
 	
-	double Q_s, A_s, f_0; // source's quality factor, sphere's surface and natural resonance frequency
-	double w_0, sigma_s; // system's undamped resonant frequency and variance
-	double beta_s; // bilinear operator
-	double M_s, R_s, K_s; // system's mass, damping and elasticity constants
-	double b0, b2, a1, a2, den_s; // H(z) filter coefficients and common denominator
-	double dt_half  = 0.5 * dt; // half time-step for arrays
-	int ts_; // driving force's discrete samples delay (time delay)
+	int src_opt = 1; // source option flag
+	if (src_opt == 0){
+		// ------------ Pre-compute PCS (Physically Constrained Source) sphere's surface velocity -------------
+		
+		// Ref. Sheaffer, Van Walstijn, Fazenda (2012)
+		// "A Physically Constrained Source Model for FDTD Acoustic Simulation"
+		
+		std::vector<double> F_s(2*Nt + 1, 0.0); // source's driving force
+		
+		double Q_s, f_0; // source's quality factor, sphere's surface and natural resonance frequency
+		double w_0, sigma_s; // system's undamped resonant frequency and variance
+		double beta_s; // bilinear operator
+		double M_s, R_s, K_s; // system's mass, damping and elasticity constants
+		double b0, b2, a1, a2, den_s; // H(z) filter coefficients and common denominator
+		int ts_; // driving force's discrete samples delay (time delay)
+		
+		Q_s = 1.0;
+		f_0 = 25.0; // [Hz]
+		w_0 = 2.0 * M_PI * f_0; // [rad/s]
+		beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
+		
+		M_s = 0.025; // [kg]
+		R_s = w_0 * M_s / Q_s; // [rad * kg / s]
+		K_s = M_s * w_0*w_0; // [kg * rad^2 / s^2]
+		
+		den_s = M_s*beta_s*beta_s + R_s*beta_s + K_s;
+		
+		b0 = beta_s/den_s;
+		b2 = -b0;
+		a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
+		a2 = 1.0 - 2.0*R_s*beta_s/den_s;
+		
+		/*						
+		For a Gaussian force F(t) = exp(−t²/2σ²), the spectrum is exp(−ω²σ²/2). Setting it to a level L in dB and
+		solving:
 	
-	Q_s = 1.0;
-	A_s = 6.0 * h*h; // [m^2]
-	//f_0 = 0.05 * f_cutoff; // [Hz]
-	f_0 = 25.0; // [Hz]
-	w_0 = 2.0 * M_PI * f_0; // [rad/s]
-	beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
-	
-	M_s = 0.025; // [kg]
-	R_s = w_0 * M_s / Q_s; // [rad * kg / s]
-	K_s = M_s * w_0*w_0; // [kg * rad^2 / s^2]
-	
-	den_s = M_s*beta_s*beta_s + R_s*beta_s + K_s;
-	
-	b0 = beta_s/den_s;
-	b2 = -b0;
-	a1 = 2.0*(K_s - M_s*beta_s*beta_s)/den_s;
-	a2 = 1.0 - 2.0*R_s*beta_s/den_s;
-	
-	/*						
-	For a Gaussian force F(t) = exp(−t²/2σ²), the spectrum is exp(−ω²σ²/2). Setting it to a level L in dB and
-	solving:
+		f·σ = √(−(L/10)·ln10) / 2π
+		
+		level	f·σ		meaning
+		−1 dB	0.0764	end of the flat band
+		−3 dB	0.1323	
+		−6 dB	0.1871	
+		−10 dB	0.2415	
+		−20 dB	0.3415	
+		−40 dB	0.4830	conservative alternative
+		*/
+		
+		sigma_s = 0.425 / f_cutoff;
+		ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
+		
+		//printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 130.9/f_cutoff); //  for current constants above
+		printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 2.0 / f_0);
+		
+		// unique sphere's surface driving force
+		for (int t = 0; t <= 2*Nt; t++){
+			//src_pressure[] is the specific source amplitude, pass this to kernel as well and exclude it from F
+			double td = (t - ts_) * dt_half;
+			F_s[t] = std::exp(-td*td / (2.0*sigma_s*sigma_s));
+			// comment below if using u above)
+		}
+		
+		// unique sphere's surface velocity - F(t) filtered with H(z)
+		for (int t = 2; t <= 2*Nt; t++){
+			u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
+		}
+	}
+	else if (src_opt == 1){
+		// -------------------------------- Pre-compute Ricker Wavelet ----------------------------------------
+		
+		/*Radiated p ∝ d(u_s)/dt. So u_s must hold the antiderivative of a Ricker. It's closed-form:
+  		the integral of a Ricker (1−x²)e^{−x²/2} is the Gaussian first-derivative x·e^{−x²/2}. Its
+  		time-derivative is exactly the Ricker.*/
+		
+		double sigma_s, ts_, x_s;
 
-	f·σ = √(−(L/10)·ln10) / 2π
-	
-	level	f·σ		meaning
-	−1 dB	0.0764	end of the flat band
-	−3 dB	0.1323	
-	−6 dB	0.1871	
-	−10 dB	0.2415	
-	−20 dB	0.3415	
-	−40 dB	0.4830	conservative alternative
-	*/
-	
-	//sigma_s = 8.5 * dt; // 6*dt covers almost the full distribution (delta distr)
-	sigma_s = 0.425 / f_cutoff;
-	ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
-	
-	//printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 130.9/f_cutoff); //  for current constants above
-	printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 3.0 * f_0); //  for current constants above
-	
-	// unique sphere's surface driving force
-	for (int t = 0; t <= 2*Nt; t++){
-		//src_pressure[] is the specific source amplitude, pass this to kernel as well and exclude it from F
-		double td = (t - ts_) * dt_half;
-		F_s[t] = std::exp(-td*td / (2.0*sigma_s*sigma_s));
-		//u_s[t] = std::exp(-td*td / (sigma_s*sigma_s)) / (sigma_s * sqrtf(M_PI)); // delta distr
-		// comment below if using u above)
+		// Radiated Ricker spectrum: |P(f)| ∝ f^2 * exp(-2 pi^2 sigma^2 f^2), peak at
+		// f_p = 1/(sqrt(2)*pi*sigma). Put the peak at 0.3*f_cutoff so the Gaussian tail
+		// sits below cutoff. NB: sigma is a TIME [s] = 1/(sqrt(2)*pi*f_p), NOT a fraction
+		// of f_cutoff -- assigning 0.3*f_cutoff makes sigma ~600 s and blows up p_peak.
+		double f_peak = 0.45 * f_cutoff;                 // [Hz]
+		sigma_s = 1.0 / (sqrt(2.0) * M_PI * f_peak);    // [s]
+		ts_ = (int)ceil(5.0 * sigma_s / dt_half);
+				
+		for (int t = 0; t <= 2*Nt; t++){
+			x_s = (t - ts_) * dt_half/ sigma_s;
+			u_s[t] = x_s * exp(-0.5 * x_s * x_s); // normalized
+			//u_s[t] /= A_s;
+		}
 	}
 	
-	// unique sphere's surface velocity - F(t) filtered with H(z) - comment if using delta distr TST
-	for (int t = 2; t <= 2*Nt; t++){
-		u_s[t] = b0*F_s[t] + b2*F_s[t-2] - a1*u_s[t-1] - a2*u_s[t-2];
-	}
+	// -------------------------------- Compute dqhat and scale sources ---------------------------------------
 	
 	// compute dq_hat to retrieve analytical peak for PCS and scale sources
 	double dqhat;
@@ -934,8 +961,6 @@ int main(int argc, char *argv[]){
 	}
 	
 	// write p_ref of single tst src/rec to file (comment session below)
-	/*
-	{
     std::filesystem::path cdir = config_path.parent_path();
     std::vector<double> tmp(p_ref.size());
     for (size_t t = 0; t < p_ref.size(); t++){
@@ -946,8 +971,7 @@ int main(int argc, char *argv[]){
     fclose(fpr);
     printf("[OK] p_ref.bin: %zu samples, dt/2 = %.9e s, peak = %.6f Pa\n",
            tmp.size(), dt_half, *std::max_element(tmp.begin(), tmp.end()));
-	}
-	*/
+	
 	// copy scaled arrays of sound source pressures
 	float *d_sval;
 	
@@ -963,7 +987,6 @@ int main(int argc, char *argv[]){
 	cudaMemcpy(d_us, u_s_f.data(), u_s_f.size() * sizeof(float), cudaMemcpyHostToDevice);
 	
 	
-	// --------------------------------- Pre-compute Ricker Wavelet ----------------------------------------
 	
 	// ----------------------- Define kernel parameters and copy sources to device ----------------------------
 	
@@ -1093,7 +1116,7 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_stage0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 			
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0, 1.0, 1.0, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
@@ -1101,7 +1124,7 @@ int main(int argc, char *argv[]){
 			
 		kernel_WENO_stage1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0, 1.0, 4.0, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
@@ -1109,7 +1132,7 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_stage2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 			
-		//kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
+		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0, 2.0, 3.0, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 
