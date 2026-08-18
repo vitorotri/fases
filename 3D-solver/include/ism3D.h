@@ -714,7 +714,7 @@ void estimate_T60s(std::vector<float>& T60, float V, float c, float A_tot, const
 		}
 		alpha_m /= A_tot;
 		if (alpha_m < 1e-6f){ T60[b] = 1e9f; continue; } // rigid room: no absorption, no decay
-		den = c * A_tot * std::log(1.0 - alpha_m) + 4.0*m_air[b]*V;
-		T60[b] = -num / den;
+		den = -c * A_tot * std::log(1.0 - alpha_m) + 4.0*m_air[b]*V*c;
+		T60[b] = num / den;
 	}
 }
