@@ -91,7 +91,7 @@ int main(int argc, char *argv[]){
     };
 
 	float t_max, dt, h, f_cutoff; // max time, time-step, grid spacing, max frequency
-	float *p0, *u0, *v0, *w0, *p1, *u1, *v1, *w1;// *p2, *u2, *v2, *w2; // host field arrays
+	float *p0, *u0, *v0, *w0;// *p1, *u1, *v1, *w1;// *p2, *u2, *v2, *w2; // host field arrays
 	float *d_p0, *d_u0, *d_v0, *d_w0, *d_p1, *d_u1, *d_v1, *d_w1, *d_p2, *d_u2, *d_v2, *d_w2; // device arrays
 	float *c_rl, *dd, *beta_rl; // WENO5 arrays
 	float rho, c, Temp; // density, speed of sound, temperature
@@ -460,9 +460,9 @@ int main(int argc, char *argv[]){
     air_dims(Nx, Ny, Nz, &Nx_air, &Ny_air, &Nz_air);
     float Lx_air = Lx - 2*PARSE3D_GHOST*h, Ly_air = Ly - 2*PARSE3D_GHOST*h, Lz_air = Lz - 2*PARSE3D_GHOST*h;
 
-    printf("\n\n[OK] grid  Nx = %d  Ny = %d  Nz = %d   (room %d x %d x %d + %d-cell ghost)\n",
+    printf("\n\n[OK] grid  Nx = %d  Ny = %d  Nz = %d\n    (room %d x %d x %d + %d-cell ghost)\n",
            Nx, Ny, Nz, Nx_air, Ny_air, Nz_air, 2*PARSE3D_GHOST);
-    printf("\n[Ok] room  Lx = %f  Ly = %f  Lz = %f   (padded domain %f x %f x %f)\n",
+    printf("\n[Ok] room  Lx = %f  Ly = %f  Lz = %f\n    (padded domain %f x %f x %f)\n",
            Lx_air, Ly_air, Lz_air, Lx, Ly, Lz);
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
@@ -605,7 +605,7 @@ int main(int argc, char *argv[]){
 	cudaMemset(psi_1_nu, 0, nB * L_m * sizeof(float));
 	cudaMemset(psi_2_nu, 0, nB * L_m * sizeof(float));
     
-    // ---------------------------------------------------------------------------------------------------------
+    // ------------------------------- Allocate pressures and velocities --------------------------------------
 
     // Allocate main host memory arrays and initilize to 0.0f
     // (budget already verified by the upfront check after N was computed)
@@ -659,10 +659,9 @@ int main(int argc, char *argv[]){
 	
 	// ---------------------------------- kernel options and extra arrays --------------------------------
 	
-	
 	//float eps = 1e-7; // the smaller the eps, the more precise the BCs work, but cannot be the smallest otherwise have inf. In C, floats can go up to 1e-38. With 1e-5 workd really bad, with 1e-10 works well
 	float eps = 1e-10; // WENO-Z
-	
+	/*
 	try {
 		p1 = new float[N](); // sound pressure
     	u1 = new float[N](); // x component of particle velocity 
@@ -672,7 +671,7 @@ int main(int argc, char *argv[]){
     	fprintf(stderr, "\n[!] Allocation for remaining host arrays failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n");
     	return -1;
     }
-	
+	*/
 	cudaMalloc(&d_p1, N*sizeof(float));
 	cudaMalloc(&d_u1, N*sizeof(float));
 	cudaMalloc(&d_v1, N*sizeof(float));
@@ -1029,6 +1028,7 @@ int main(int argc, char *argv[]){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
+    /*
     if (cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
     	|| cudaMemcpy(d_v1, v1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -1036,7 +1036,7 @@ int main(int argc, char *argv[]){
     		printf("[!] CUDA error allocating device memory\n");
     	return -1;
     }
-	
+	*/
 	
 	// --------------------------------------- Memory assessment ----------------------------------------------
 	
@@ -1259,7 +1259,7 @@ int main(int argc, char *argv[]){
 		
     // Free host memory
     delete[] p0; delete[] u0; delete[] v0; delete[] w0;
-    delete[] p1; delete[] u1; delete[] v1; delete[] w1;
+    //delete[] p1; delete[] u1; delete[] v1; delete[] w1;
     	
     // Free device memory
     cudaFree(d_p0); cudaFree(d_u0); cudaFree(d_v0); cudaFree(d_w0);
@@ -1308,6 +1308,10 @@ int main(int argc, char *argv[]){
     
     cudaFree(d_src_freq);
     
+	cudaFree(d_psi_px); cudaFree(d_psi_py); cudaFree(d_psi_pz); 
+	cudaFree(d_psi_ux); cudaFree(d_psi_vy); cudaFree(d_psi_wz);
+	
+	
     printf("\n[OK] Freed wave-based arrays\n");  
     
     // --------------------------------------------- ISM Section -----------------------------------------------
