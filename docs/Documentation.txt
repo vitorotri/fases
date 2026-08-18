@@ -2,3 +2,10 @@
 
 The 'BoundingBox' layer is reserved for the, guess... bounding box of the domain. So if PMLs are desired, a wall
 cannot be activated in front of the BoundingBox layer for the desired side.
+
+--- Sources
+
+f_0 for the sources is:
+
+	PCS: resonance frequency
+	Ricker: central frequency
