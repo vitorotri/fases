@@ -749,6 +749,7 @@ int main(int argc, char *argv[]){
     std::vector<float> src_arr; // source array positions (for GA)
     std::vector<float> src_pressure; // host values for sources
     std::vector<int> src_flat; // source array indexes on host (for wave-based on GPU)
+    std::vector<float> src_freq; // sources frequencies
     
     file.open(src_path);
 	if (!file.is_open()){
@@ -758,10 +759,11 @@ int main(int argc, char *argv[]){
 	while (std::getline(file, line)){
     	if (line.empty() || line[0] == '#') continue;
     	
-    	float val_x, val_y, val_z, val_s;
+    	float val_x, val_y, val_z, val_s, val_f0;
     	std::istringstream iss(line);
     	
     	if (iss >> val_x >> val_y >> val_z >> val_s){
+    		if (!(iss >> val_f0)) val_f0 = 0.45f * f_cutoff;   // old 4-col src.txt: default f0
         	i_src = (int)(val_x / h) + 3;
         	j_src = (int)(val_y / h) + 3;
         	k_src = (int)(val_z / h) + 3;
@@ -785,6 +787,8 @@ int main(int argc, char *argv[]){
         		
         		// sound pressure values into host array, computed from L_p,1m input by user
         		src_pressure.push_back(2e-5 * powf(10.0, val_s / 20.0));
+        		
+        		src_freq.push_back(val_f0);
         	}
     	}
 	}
@@ -851,8 +855,11 @@ int main(int argc, char *argv[]){
 	std::vector<double> u_s(2*Nt + 1, 0.0); // 2 times so half-step in SSP-RK3 doesn't need interpolation
 	double A_s = 6.0 * h*h; // equivalent surface area of single node sphere [m^2]
 	double dt_half  = 0.5 * dt; // half time-step for arrays [s]
+	float *d_src_freq;
 	
-	int src_opt = (conf_arr.size() > 15) ? (int)conf_arr[15] : 0; // 0=PCS,1=Ricker,2=Gaussian (config line 16); PCS if absent
+	int src_opt = (conf_arr.size() > 15) ? (int)conf_arr[15] : 0; // 0=PCS,1=Ricker,2=Sinusoid (config line 16); PCS if absent
+	float glob_f = (conf_arr.size() > 16) ? (float)conf_arr[16] : (src_opt == 0 ? 25.0f : 0.45f*f_cutoff);
+	
 	if (src_opt == 0){
 		// ------------ Pre-compute PCS (Physically Constrained Source) sphere's surface velocity -------------
 		
@@ -927,10 +934,10 @@ int main(int argc, char *argv[]){
 		double sigma_s, ts_, x_s;
 
 		// Radiated Ricker spectrum: |P(f)| ∝ f^2 * exp(-2 pi^2 sigma^2 f^2), peak at
-		// f_p = 1/(sqrt(2)*pi*sigma). Put the peak at 0.3*f_cutoff so the Gaussian tail
+		// f_p = 1/(sqrt(2)*pi*sigma). Put tFor the BUt he peak at 0.3*f_cutoff so the Gaussian tail
 		// sits below cutoff. NB: sigma is a TIME [s] = 1/(sqrt(2)*pi*f_p), NOT a fraction
 		// of f_cutoff -- assigning 0.3*f_cutoff makes sigma ~600 s and blows up p_peak.
-		double f_peak = 0.45 * f_cutoff;                 // [Hz]
+		double f_peak = 0.45 * f_cutoff;                // [Hz] max is 0.5 * f_cutoff
 		sigma_s = 1.0 / (sqrt(2.0) * M_PI * f_peak);    // [s]
 		ts_ = (int)ceil(5.0 * sigma_s / dt_half);
 				
@@ -940,44 +947,56 @@ int main(int argc, char *argv[]){
 		}
 	}
 	else if (src_opt == 2){
-		// ---------------------------- Pre-compute Monochromatic Sinusoid ------------------------------------
-		double f_0 = (conf_arr.size() > 16) ? conf_arr[16] : 950.0; // [Hz] (config line 17); 950 if absent
-			
-		for (int t = 0; t <= 2*Nt; t++){
-			u_s[t] = sin(2*M_PI*f_0*t*dt_half);
-		}
-	
+		// --------------------- Allocate frequencies for monochromatic Sinusoid ------------------------------
+		
+		cudaMalloc(&d_src_freq, src_freq.size() * sizeof(float));
+		cudaMemcpy(d_src_freq, src_freq.data(), src_freq.size() * sizeof(float), cudaMemcpyHostToDevice);
+		
 	}
 	
 	// -------------------------------- Compute dqhat and scale sources ---------------------------------------
 	
-	// compute dq_hat to retrieve analytical peak for PCS and scale sources
-	double dqhat;
-	double p_peak = 0.0;
-	double r_ref = 1.0;
-	std::vector<double> p_ref(2*Nt + 1, 0.0);   // [Pa per N] at 1 m
-	for (int t = 1; t < 2*Nt; t++){
-		dqhat    = A_s * (u_s[t+1] - u_s[t-1]) / (2.0*dt_half);
-		p_ref[t] = rho * dqhat / (4.0 * M_PI); // reference for this is always at 1m from source (Lp,1m)
-		p_peak   = std::fmax(p_peak, std::fabs(p_ref[t]));
-	}
-	
-	// scale sources
-	for (int s = 0; s < N_src; s++){
-		src_pressure[s] /= (float)p_peak;   // [Pa] at 1 m -> driving force [N]
-	}
-	
-	// write p_ref of single tst src/rec to file (comment session below)
-    std::filesystem::path cdir = config_path.parent_path();
-    std::vector<double> tmp(p_ref.size());
-    for (size_t t = 0; t < p_ref.size(); t++){
-        tmp[t] = p_ref[t] * (double)src_pressure[0] / r_ref; // [Pa] at 1 m, source 0
-    }
-    FILE* fpr = fopen((cdir / "p_ref.bin").string().c_str(), "wb");
-    fwrite(tmp.data(), sizeof(double), tmp.size(), fpr);
-    fclose(fpr);
-    printf("[OK] p_ref.bin: %zu samples, dt/2 = %.9e s, peak = %.6f Pa\n",
-           tmp.size(), dt_half, *std::max_element(tmp.begin(), tmp.end()));
+	// compute dq_hat to retrieve analytical peak and scale sources to Lp,1m
+	if (src_opt == 2){
+		// Sinusoid: u_s is empty (the sine is computed in-kernel per source), so the
+		// shared-u_s peak below would be 0 -> divide-by-zero. The radiated peak is
+		// closed-form: dqhat_peak = A_s*2*pi*f_s -> p_peak_s = rho*A_s*f_s/2.
+		for (int s = 0; s < N_src; s++){
+			double p_peak_s = rho * A_s * (double)src_freq[s] / 2.0;
+			if (p_peak_s > 0.0) src_pressure[s] /= (float)p_peak_s;   // [Pa] at 1 m -> driving force [N]
+		}
+	} else {
+		// PCS/Ricker: shared u_s -> single analytical peak.
+		double dqhat;
+		double p_peak = 0.0;
+		double r_ref = 1.0;
+		std::vector<double> p_ref(2*Nt + 1, 0.0);   // [Pa per N] at 1 m
+		for (int t = 1; t < 2*Nt; t++){
+			dqhat    = A_s * (u_s[t+1] - u_s[t-1]) / (2.0*dt_half);
+			p_ref[t] = rho * dqhat / (4.0 * M_PI); // reference for this is always at 1m from source (Lp,1m)
+			p_peak   = std::fmax(p_peak, std::fabs(p_ref[t]));
+		}
+
+		// scale sources
+		for (int s = 0; s < N_src; s++){
+			src_pressure[s] /= (float)p_peak;   // [Pa] at 1 m -> driving force [N]
+		}
+
+		// write p_ref of single tst src/rec to file (comment session below)
+		{
+		std::filesystem::path cdir = config_path.parent_path();
+		std::vector<double> tmp(p_ref.size());
+		for (size_t t = 0; t < p_ref.size(); t++){
+			tmp[t] = p_ref[t] * (double)src_pressure[0] / r_ref; // [Pa] at 1 m, source 0
+		}
+		FILE* fpr = fopen((cdir / "p_ref.bin").string().c_str(), "wb");
+		fwrite(tmp.data(), sizeof(double), tmp.size(), fpr);
+		fclose(fpr);
+		printf("[OK] p_ref.bin: %zu samples, dt/2 = %.9e s, peak = %.6f Pa\n",
+		       tmp.size(), dt_half, *std::max_element(tmp.begin(), tmp.end()));
+		}
+		
+	}	
 	
 	// copy scaled arrays of sound source pressures
 	float *d_sval;
@@ -1123,7 +1142,7 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_stage0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 			
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n);
+		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n, src_opt, d_src_freq);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0, 1.0, 1.0, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
 			
@@ -1131,7 +1150,7 @@ int main(int argc, char *argv[]){
 			
 		kernel_WENO_stage1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2);
+		kernel_inject_src_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2, src_opt, d_src_freq);
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0, 1.0, 4.0, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
 			
@@ -1139,7 +1158,7 @@ int main(int argc, char *argv[]){
 		
 		kernel_WENO_stage2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
 			
-		kernel_inject_PCS_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1);
+		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1, src_opt, d_src_freq);
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0, 2.0, 3.0, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
 
@@ -1286,6 +1305,8 @@ int main(int argc, char *argv[]){
     
     cudaFree(d_S);
     cudaFree(d_oid);
+    
+    cudaFree(d_src_freq);
     
     printf("\n[OK] Freed wave-based arrays\n");  
     

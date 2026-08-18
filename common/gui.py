@@ -2857,14 +2857,19 @@ def make_pulse_icon(kind, w=46, h=28, color=None):
 class PointTable(QWidget):
     changed = Signal()
 
-    def __init__(self, has_amplitude=False, parent=None):
+    def __init__(self, has_amplitude=False, has_freq=False, parent=None):
         super().__init__(parent)
         self._has_amp = has_amplitude
+        self._has_freq = has_freq         # per-source characteristic frequency f0 (sources only)
+        self._freq_max = None             # optional clamp on the f0 column (set to f_cutoff)
         # Column 0 is an editable Name (defaults to the row number). The numeric
         # columns follow; get_points()/save_file deliberately skip the name so
-        # the solver file format (x y z [p0]) is unchanged.
+        # the solver file format (x y z [p0] [f0]) is unchanged.
         # Unicode subscripts (QTableWidget headers are plain text, no HTML): L_p,1m
-        cols = ["Name", "x (m)", "y (m)", "z (m)"] + (["Lₚ,₁ₘ (dB)"] if has_amplitude else [])
+        cols = (["Name", "x (m)", "y (m)", "z (m)"]
+                + (["Lₚ,₁ₘ (dB)"] if has_amplitude else [])
+                + (["f₀ (Hz)"] if has_freq else []))
+        self._freq_col = (len(cols) - 1) if has_freq else None   # last column when present
         self._coff = 1            # numeric coordinates start at this column
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
         self._tbl = QTableWidget(0, len(cols))
@@ -2891,7 +2896,7 @@ class PointTable(QWidget):
             QHeaderView::section {{background:{PAL['panel']};color:{PAL['subtext']};
                 border:1px solid {PAL['border']};}}
         """)
-        self._tbl.itemChanged.connect(lambda: self.changed.emit())
+        self._tbl.itemChanged.connect(self._on_item_changed)
         # Right-click a cell -> fill the same value into rows above/below in
         # that column (handy for setting a common amplitude or coordinate).
         self._tbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2908,12 +2913,12 @@ class PointTable(QWidget):
             btn_row.addWidget(b)
         lay.addLayout(btn_row)
 
-    def _add(self, x=1.0, y=1.0, z=1.0, amp=1.0, name=None):
+    def _add(self, x=1.0, y=1.0, z=1.0, amp=1.0, freq=100.0, name=None):
         self._tbl.blockSignals(True)
         r = self._tbl.rowCount(); self._tbl.insertRow(r)
         # column 0: editable name, default to the 1-based row number
         self._tbl.setItem(r, 0, QTableWidgetItem(name if name else str(r + 1)))
-        vals = [x, y, z] + ([amp] if self._has_amp else [])
+        vals = [x, y, z] + ([amp] if self._has_amp else []) + ([freq] if self._has_freq else [])
         for c, v in enumerate(vals):
             self._tbl.setItem(r, self._coff + c, QTableWidgetItem(f"{v:.4g}"))
         self._tbl.blockSignals(False)
@@ -2979,6 +2984,45 @@ class PointTable(QWidget):
         for r in rows: self._tbl.removeRow(r)
         self.changed.emit()
 
+    def _on_item_changed(self, item):
+        # Clamp the f0 column to [1, freq_max] (freq_max = f_cutoff) if a max is set.
+        if (self._freq_col is not None and self._freq_max is not None
+                and item.column() == self._freq_col):
+            try:
+                v = float(item.text())
+            except ValueError:
+                self.changed.emit(); return
+            cl = min(max(v, 1.0), float(self._freq_max))
+            if cl != v:
+                self._tbl.blockSignals(True)
+                item.setText(f"{cl:.4g}")
+                self._tbl.blockSignals(False)
+        self.changed.emit()
+
+    def set_freq_max(self, fmax):
+        """Upper clamp for the f0 column (call with f_cutoff). Also re-clamps existing rows."""
+        self._freq_max = fmax
+        if self._freq_col is None or fmax is None:
+            return
+        self._tbl.blockSignals(True)
+        for r in range(self._tbl.rowCount()):
+            it = self._tbl.item(r, self._freq_col)
+            if it is None:
+                continue
+            try:
+                v = float(it.text())
+            except ValueError:
+                continue
+            cl = min(max(v, 1.0), float(fmax))
+            if cl != v:
+                it.setText(f"{cl:.4g}")
+        self._tbl.blockSignals(False)
+
+    def set_freq_column_visible(self, visible):
+        """Show/hide the f0 column (shown only for the Sinusoid source type)."""
+        if self._freq_col is not None:
+            self._tbl.setColumnHidden(self._freq_col, not visible)
+
     def get_points(self):
         """Return numeric rows (x, y, z[, p0]); the Name column is skipped so
         the 3D view, undo, and saved solver files stay purely numeric."""
@@ -3004,12 +3048,14 @@ class PointTable(QWidget):
         """Replace all rows from numeric tuples (x, y, z[, p0]). Names reset to
         the row number. Used by Ctrl+Z point undo."""
         ncoord = self._tbl.columnCount() - self._coff   # numeric columns
+        # trailing numeric-column defaults, in order: [x y z] [amp?] [f0?]
+        full_def = [0.0, 0.0, 0.0] + ([1.0] if self._has_amp else []) + ([100.0] if self._has_freq else [])
         self._tbl.blockSignals(True)
         self._tbl.setRowCount(0)
         for pt in pts:
             vals = list(pt[:ncoord])
             if len(vals) < ncoord:
-                vals += [1.0 if self._has_amp else 0.0] * (ncoord - len(vals))
+                vals += full_def[len(vals):ncoord]
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
             self._tbl.setItem(r, 0, QTableWidgetItem(str(r + 1)))
             for c, v in enumerate(vals[:ncoord]):
@@ -3035,7 +3081,8 @@ class PointTable(QWidget):
     def save_file(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
-            f.write("# " + ("x y z p0" if self._has_amp else "x y z") + "\n")
+            hdr = "x y z" + (" p0" if self._has_amp else "") + (" f0" if self._has_freq else "")
+            f.write("# " + hdr + "\n")
             for pt in self.get_points():
                 f.write("  ".join(f"{v:.6g}" for v in pt) + "\n")
 
@@ -3611,36 +3658,15 @@ class MainWindow(QMainWindow):
         self._nrays.setValue(20000); self._nrays.setMinimumWidth(130)
         lay.addRow("Number of rays:", self._nrays)
 
-        # Source excitation, shared by all sources (line 16 of config.txt; main3D reads
-        # v[15] as src_opt). Exclusive radios; ids match the solver: 0=PCS,1=Ricker,2=Sinusoid.
-        # Each carries a small didactic icon of its pulse shape.
-        self._src_group = QButtonGroup(self)
-        src_row = QHBoxLayout(); src_row.setContentsMargins(0, 0, 0, 0)
-        for sid, label in [(0, "PCS"), (1, "Ricker"), (2, "Sinusoid")]:
-            rb = QRadioButton(label)
-            rb.setIcon(make_pulse_icon(label.lower()))
-            rb.setIconSize(QSize(46, 28))
-            self._src_group.addButton(rb, sid)
-            src_row.addWidget(rb)
-        src_row.addStretch(1)
-        self._src_group.button(0).setChecked(True)
-        _src_w = QWidget(); _src_w.setLayout(src_row)
-        lay.addRow("Source type:", _src_w)
-
-        # Global sinusoid frequency (line 17 of config.txt; main3D reads v[16] for src_opt==2).
-        # Row shown only when Sinusoid is selected. Hard-clamped below f_cutoff (above the
-        # resolved band = dispersion). Accelerated so holding the button ramps up fast.
-        self._sin_freq = QSpinBox(); self._sin_freq.setRange(1, max(1, int(self._cfg['f_cutoff'].value())))
-        self._sin_freq.setValue(min(950, self._sin_freq.maximum())); self._sin_freq.setSuffix(" Hz")
-        self._sin_freq.setMinimumWidth(130); self._sin_freq.setAccelerated(True)
-        _sin_row = QWidget(); _sr = QHBoxLayout(_sin_row); _sr.setContentsMargins(0, 0, 0, 0)
-        _sr.addWidget(QLabel("Sinusoid freq:")); _sr.addWidget(self._sin_freq); _sr.addStretch(1)
-        _sin_row.setVisible(False)
-        lay.addRow(_sin_row)
-        self._src_group.buttonToggled.connect(
-            lambda *_: _sin_row.setVisible(self._src_group.checkedId() == 2))
-        self._cfg['f_cutoff'].valueChanged.connect(
-            lambda fc: self._sin_freq.setMaximum(max(1, int(fc))))
+        # Source type + frequency now live under the source table (Sources tab), built
+        # before this tab. Wire the f_cutoff-dependent clamps here, where _cfg exists:
+        #   PCS/Ricker global spinbox -> 0.5*f_cutoff (their spectrum is wider than f0),
+        #   Sinusoid per-source f0 column -> f_cutoff (a single resolvable line).
+        def _apply_src_freq_clamps(fc):
+            self._src_freq.setMaximum(max(1, int(0.5 * fc)))
+            self._src_tbl.set_freq_max(int(fc))
+        self._cfg['f_cutoff'].valueChanged.connect(_apply_src_freq_clamps)
+        _apply_src_freq_clamps(self._cfg['f_cutoff'].value())
 
         lay.addRow(QLabel("PML faces  (check = active):"))
         grid = QGridLayout(); self._pml = {}
@@ -3670,11 +3696,47 @@ class MainWindow(QMainWindow):
                       "Or add rows manually below.")
         info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         info.setWordWrap(True); lay.addWidget(info)
-        self._src_tbl = PointTable(has_amplitude=True)
+        self._src_tbl = PointTable(has_amplitude=True, has_freq=True)
         self._src_tbl.changed.connect(self._refresh_gl_points)
         self._src_tbl._tbl.itemSelectionChanged.connect(
             lambda: self._on_table_row_selected("source"))
+
+        # Source excitation type (global; config line 16, main3D reads v[15] as src_opt).
+        # Placed ABOVE the table -- the Add/Remove buttons live inside the table widget.
+        # Exclusive radios with a didactic pulse-shape icon; ids match the solver:
+        # 0=PCS, 1=Ricker, 2=Sinusoid.
+        self._src_group = QButtonGroup(self)
+        type_row = QHBoxLayout(); type_row.setContentsMargins(0, 0, 0, 0)
+        type_row.addWidget(QLabel("Source type:"))
+        for sid, label in [(0, "PCS"), (1, "Ricker"), (2, "Sinusoid")]:
+            rb = QRadioButton(label)
+            rb.setIcon(make_pulse_icon(label.lower())); rb.setIconSize(QSize(46, 28))
+            self._src_group.addButton(rb, sid)
+            type_row.addWidget(rb)
+        type_row.addStretch(1)
+        lay.addLayout(type_row)
+
+        # Global frequency for PCS/Ricker, on its own line under the type row (config line
+        # 17). Sinusoid uses the per-source f0 column instead; only one shows at a time.
+        freq_row = QHBoxLayout(); freq_row.setContentsMargins(0, 0, 0, 0)
+        self._src_freq = QSpinBox(); self._src_freq.setRange(1, 1_000_000)
+        self._src_freq.setValue(100); self._src_freq.setSuffix(" Hz")
+        self._src_freq.setAccelerated(True); self._src_freq.setMinimumWidth(120)
+        self._src_freq_lbl = QLabel("Frequency:")
+        freq_row.addWidget(self._src_freq_lbl); freq_row.addWidget(self._src_freq); freq_row.addStretch(1)
+        lay.addLayout(freq_row)
+
         lay.addWidget(self._src_tbl)
+
+        def _on_src_type(*_):
+            is_sin = (self._src_group.checkedId() == 2)
+            self._src_tbl.set_freq_column_visible(is_sin)   # f0 column only for Sinusoid
+            self._src_freq_lbl.setVisible(not is_sin)       # global freq only for PCS/Ricker
+            self._src_freq.setVisible(not is_sin)
+        self._src_group.buttonToggled.connect(_on_src_type)
+        self._src_group.button(0).setChecked(True)
+        _on_src_type()
+
         br = QHBoxLayout()
         for lbl, fn in [("🗁\uFE0E  Load src.txt", self._load_src),
                         ("🖫\uFE0E  Save src.txt", self._save_src)]:
@@ -4099,7 +4161,7 @@ class MainWindow(QMainWindow):
             f.write(f"{self._cfg['altitude'].value():.6g}      # altitude [m]\n")
             f.write(f"{self._nrays.value()}                               # number of rays (ray-traced tail)\n")
             f.write(f"{max(0, self._src_group.checkedId())}                               # source type (0=PCS,1=Ricker,2=Sinusoid)\n")
-            f.write(f"{self._sin_freq.value()}                               # sinusoid frequency [Hz] (used when source type = Sinusoid)\n")
+            f.write(f"{self._src_freq.value()}                               # global source frequency [Hz] (PCS/Ricker; sinusoid uses per-source f0)\n")
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -4131,7 +4193,7 @@ class MainWindow(QMainWindow):
             btn = self._src_group.button(max(0, min(2, int(vals[15]))))  # 0=PCS,1=Ricker,2=Sinusoid
             if btn: btn.setChecked(True)
         if len(vals) > 16:
-            self._sin_freq.setValue(int(vals[16]))  # sinusoid frequency [Hz]
+            self._src_freq.setValue(int(vals[16]))  # global source frequency [Hz] (PCS/Ricker)
 
     def _save_src(self):
         if not self._proj_root: return

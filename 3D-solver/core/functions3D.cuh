@@ -1014,11 +1014,14 @@ __global__ void kernel_test_BCs_no_parsing(int Nx, int Ny, int Nz, float *p, flo
     }
 }
 
-__global__ void kernel_inject_PCS_SSP(float *p, float *u_s, int *sidx, float *sval, float SSP3w, float c, float h, float dt, float rho0, float A_s, int Nx, int Ny, int N_src, int nn){
+__global__ void kernel_inject_src_SSP(float *p, float *u_s, int *sidx, float *sval, float SSP3w, float c, float h, float dt, float rho0, float A_s, int Nx, int Ny, int N_src, int nn, int src_opt, float *src_freq){
 
-	int s = blockIdx.x*blockDim.x + threadIdx.x;
+	int s = blockIdx.x*blockDim.x + threadIdx.x; // sources
 	if (s >= N_src) return;
-	p[sidx[s]] += SSP3w * dt * c*c * sval[s] * u_s[nn] * rho0 * A_s / (h*h*h);
+	float s_amp = (src_opt == 2)
+             ? sinf(2.0f*M_PI*src_freq[s]*nn*(0.5f*dt)) // sinusoid: per-source freq, t = nn*dt_half
+             : u_s[nn];                                 // PCS/Ricker: shared precomputed waveform
+	p[sidx[s]] += SSP3w * dt * c*c * sval[s] * s_amp * rho0 * A_s / (h*h*h);
 }
 
 // WENO5 SSP-RK3 step 0
