@@ -5,20 +5,27 @@
 import glob, numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
+from fractions import Fraction
+from scipy.signal import resample_poly
 
-# Read all text files from the specified directory
-low_files = glob.glob('IR*.bin') # IR<source>_<receiver>.bin
-low_arrays = [np.fromfile(file, np.float32) for file in low_files]
-
-high_files = glob.glob('HIR*.bin') # HIR<source>_<receiver>_<octave_band>.bin
-high_arrays = [np.fromfile(file, np.float32) for file in high_files]
 
 octave_bands = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 
+dt = 0.000050986
+fs_fv = 1/dt
 fs = 44100 # Hz
 f_cutoff = 1000 # Hz
 src = 0 # source index
 rec = 0 # rec index
+
+# Read only the files for THIS source-receiver pair
+low_files = sorted(f for f in glob.glob('IR*.bin')   # IR<source>_<receiver>.bin
+                   if f[2:].split('.')[0].split('_')[:2] == [str(src), str(rec)])
+low_arrays = [np.fromfile(file, np.float32) for file in low_files]
+
+high_files = sorted(f for f in glob.glob('HIR*.bin') # HIR<source>_<receiver>_<band>.bin
+                    if f[3:].split('.')[0].split('_')[:2] == [str(src), str(rec)])
+high_arrays = [np.fromfile(file, np.float32) for file in high_files]
 
 H_IRs = []
 
@@ -56,8 +63,11 @@ for h in range(len(high_arrays)):
 
 # sum filtered high-frequency arrays
 HIR = np.sum(H_IRs, axis=0)
-# define low frequencies array
+
+# low IR is at fs_fv; resample to 44100 BEFORE filtering (filters designed at fs)
 LIR = low_arrays[0]
+r = Fraction(fs/fs_fv).limit_denominator(2000)
+LIR = resample_poly(LIR, r.numerator, r.denominator)   # anti-aliased
 
 # Butterworth filters (digital, zero-phase) for low- and high-pass
 sos_lp = signal.butter(8, f_cutoff, 'low', fs=fs, output='sos')
@@ -77,7 +87,10 @@ for sos, name in [(sos_lp, 'low'), (sos_hp, 'high')]:
 	plt.grid(which='both', axis='both')
 	plt.axvline(f_cutoff, color='green') # cutoff frequency
 
-plt.figure()
-plt.plot(LIR)
+N = max(LIR.size, HIR.size)
+IR_ = np.pad(LIR, (0, N-LIR.size)) + np.pad(HIR, (0, N-HIR.size))
 
+plt.figure()
+plt.plot(IR_)
 plt.show()
+
