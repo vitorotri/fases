@@ -3726,6 +3726,11 @@ class MainWindow(QMainWindow):
         freq_row.addWidget(self._src_freq_lbl); freq_row.addWidget(self._src_freq); freq_row.addStretch(1)
         lay.addLayout(freq_row)
 
+        # Auralization: run one simulation per source (separable per-source IRs) instead
+        # of firing all sources together. Sets config line 18 (src index) per run.
+        self._aural = QCheckBox("Auralization mode (one run per source)")
+        lay.addWidget(self._aural)
+
         lay.addWidget(self._src_tbl)
 
         def _on_src_type(*_):
@@ -3822,6 +3827,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._log, 1)
 
         self._solver_thread = None
+        self._aural_queue = []      # remaining source indices to run (auralization mode)
+        self._aural_cmd = None
         return w
 
     # ── fit output -> Run-tab Output log ─────────────────────
@@ -4145,7 +4152,7 @@ class MainWindow(QMainWindow):
         self._write_config(p)
         self._sb.showMessage(f"Saved config → {p}")
 
-    def _write_config(self, path):
+    def _write_config(self, path, src_idx=0):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         pml = {k: (1.0 if c.isChecked() else 0.0) for k,c in self._pml.items()}
         with open(path, "w") as f:
@@ -4162,6 +4169,7 @@ class MainWindow(QMainWindow):
             f.write(f"{self._nrays.value()}                               # number of rays (ray-traced tail)\n")
             f.write(f"{max(0, self._src_group.checkedId())}                               # source type (0=PCS,1=Ricker,2=Sinusoid)\n")
             f.write(f"{self._src_freq.value()}                               # global source frequency [Hz] (PCS/Ricker; sinusoid uses per-source f0)\n")
+            f.write(f"{int(src_idx)}                               # source index (auralization: one run per source; 0 otherwise)\n")
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -4412,20 +4420,42 @@ class MainWindow(QMainWindow):
         binary = self._bin_le.text()
         # absolute binary paths are used as-is; only bare relative ones get ./
         bin_cmd = binary if os.path.isabs(binary) else f"./{binary}"
-        cmd = [bin_cmd, scene,
+        self._aural_cmd = [bin_cmd, scene,
                "config/config.txt","input/src/src.txt","input/rec/rec.txt",
                "config/poles.txt"]
         self._log.clear()
+        self._tabs.setCurrentIndex(4)
+
+        n_src = len(self._src_tbl.get_points())
+        if self._aural.isChecked() and n_src > 1:
+            # one run per source; _on_solver_done chains the rest
+            self._aural_queue = list(range(1, n_src))
+            self._log.append(f"Auralization: {n_src} sources, one run each")
+            self._run_source(0)
+        else:
+            self._aural_queue = []
+            self._write_config(os.path.join(self._proj_root,"config","config.txt"), 0)
+            self._launch_solver(self._aural_cmd)
+
+    def _launch_solver(self, cmd):
         self._log.append(f"$ cd {self._proj_root}\n$ " + " ".join(cmd))
         self._log.append("-"*60)
-        # switch the button to Stop, reveal + reset the progress bar
         self._set_running(True)
-        self._tabs.setCurrentIndex(4)
         self._solver_thread = SolverThread(cmd, self._proj_root)
         self._solver_thread.output.connect(self._log.append)
         self._solver_thread.progress.connect(self._on_solver_progress)
         self._solver_thread.done.connect(self._on_solver_done)
         self._solver_thread.start()
+
+    def _run_source(self, i):
+        """Auralization: write config (src index = i) + a 1-source src.txt, then launch."""
+        self._write_config(os.path.join(self._proj_root,"config","config.txt"), i)
+        pt = self._src_tbl.get_points()[i]
+        with open(os.path.join(self._proj_root,"input","src","src.txt"), "w") as f:
+            f.write("# x y z p0 f0\n")
+            f.write("  ".join(f"{v:.6g}" for v in pt) + "\n")
+        self._log.append(f'<span style="color:{PAL["subtext"]};">— source {i} —</span>')
+        self._launch_solver(self._aural_cmd)
 
     def _fit_impedances(self):
         """Run vectFIT over ALL materials (was the Scene tab's 'Fit all').
@@ -4718,6 +4748,11 @@ class MainWindow(QMainWindow):
             self._ray_dock.hide()
 
     def _on_solver_done(self, rc):
+        # Auralization: if more sources queued and this one succeeded, run the next.
+        if rc == 0 and self._aural_queue:
+            self._run_source(self._aural_queue.pop(0))
+            return
+        self._aural_queue = []      # done or aborted on failure
         # Re-enable launching, fill/hide the progress bar, report status.
         self._set_running(False)
         if rc == 0:

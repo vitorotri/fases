@@ -379,6 +379,8 @@ int main(int argc, char *argv[]){
 	// near-zero-absorption band): a hard-walled 500 Hz band has no diffuse regime, so
 	// f_Schroeder runs to infinity -> emit 0.0f and let the GUI skip it (fS > 0 check).
 	float f_Schroeder = (T60[3] < 1e6f) ? 2000.0f * std::sqrt(T60[3] / V) : 0.0f;
+	
+	printf("\n[OK] f_Schroeder = %f\n", f_Schroeder);
 
 	// Single-value binaries in the config dir for the GUI Setup tab: Vol.bin drives
 	// the recommended ray count, f_Schroeder.bin the recommended cutoff frequency.
@@ -395,7 +397,7 @@ int main(int argc, char *argv[]){
 
 	}
 	printf("\n[OK] estimated T60s\n\n");
-	for (int b = 0; b < 8; b++) printf("%.3f", T60[b]);
+	for (int b = 0; b < 8; b++) printf("%.3f  ", T60[b]);
 
 	// --estimate fast path: stop before the heavy solver stages.
 	
@@ -462,7 +464,7 @@ int main(int argc, char *argv[]){
 
     printf("\n\n[OK] grid  Nx = %d  Ny = %d  Nz = %d\n    (room %d x %d x %d + %d-cell ghost)\n",
            Nx, Ny, Nz, Nx_air, Ny_air, Nz_air, 2*PARSE3D_GHOST);
-    printf("\n[Ok] room  Lx = %f  Ly = %f  Lz = %f\n    (padded domain %f x %f x %f)\n",
+    printf("\n[Ok] room  Lx = %f  Ly = %f  Lz = %f [m]\n    (padded domain %f x %f x %f)\n",
            Lx_air, Ly_air, Lz_air, Lx, Ly, Lz);
     
     // ----------------------- LOAD filter coefficiets for materials ------------------------------------
@@ -1012,7 +1014,6 @@ int main(int argc, char *argv[]){
 	cudaMemcpy(d_us, u_s_f.data(), u_s_f.size() * sizeof(float), cudaMemcpyHostToDevice);
 	
 	
-	
 	// ----------------------- Define kernel parameters and copy sources to device ----------------------------
 	
 	
@@ -1108,11 +1109,13 @@ int main(int argc, char *argv[]){
 		printf("[!] Error opening Poynting I*_*.bin file(s)!\n"); exit(1);
 	}
 
+	int src_idx = (conf_arr.size() > 17) ? conf_arr[17] : 0; // source index to save on files
+
 	// open BIN files for writing pressure at multiple receivers
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
 	for (int ct = 0; ct < i_recV.size(); ct++){
-    	std::string str = out_file("IR" + std::to_string(ct) + ".bin");
+    	std::string str = out_file("IR" + std::to_string(ct) + "_" + std::to_string(src_idx) + ".bin");
     	files_rec[ct].open(str, std::ios::out | std::ios::binary);
 	}
 	
@@ -1131,9 +1134,11 @@ int main(int argc, char *argv[]){
 	 *
 	 */
 	
-	printf("\n[OK] Simulation start\n\n");
+	printf("\n[OK] Will now start %d iterations\n", Nt);
+	printf("\n[OK] Simulation start...\n\n");
 	tic = clock();
 
+	// if auralization mode is on, gui side does one simulation per source
 	while(n < Nt){
 				
 		// Launch WENO5 kernel + SSP-RK3
@@ -1517,7 +1522,7 @@ int main(int argc, char *argv[]){
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
-        	std::string fname = out_file("RIR" + std::to_string(r) + "_"
+        	std::string fname = out_file("IR" + std::to_string(r) + "_" + std::to_string(src_idx) + "_"
                                     		+ std::to_string((int)octave_bands[b]) + ".bin");
         	FILE* f = std::fopen(fname.c_str(), "wb");
         	if (f){
