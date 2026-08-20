@@ -2102,7 +2102,7 @@ class MaterialPanel(QWidget):
                 border:1px solid {PAL['border']};font-size:11px;}}
         """)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tbl.itemSelectionChanged.connect(self._on_row_selected)
         self._tbl.itemChanged.connect(lambda *_: self._on_edit())
         # RMB on a layer row: optional predefined-material lookup. Existing
@@ -2560,10 +2560,28 @@ class MaterialPanel(QWidget):
 
     # ── Ctrl+V paste (Excel / spaces / tabs) ──
     def keyPressEvent(self, e):
+        if e.matches(QKeySequence.StandardKey.Copy):
+            self._copy_selection()
+            e.accept(); return
         if e.matches(QKeySequence.StandardKey.Paste):
             self._paste_clipboard()
             e.accept(); return
         super().keyPressEvent(e)
+
+    def _copy_selection(self):
+        # selected cell rectangle -> TSV (names + values), pastes here or into Excel
+        rngs = self._tbl.selectedRanges()
+        if not rngs:
+            return
+        r0 = min(x.topRow() for x in rngs);     r1 = max(x.bottomRow() for x in rngs)
+        c0 = min(x.leftColumn() for x in rngs); c1 = max(x.rightColumn() for x in rngs)
+        rows = []
+        for r in range(r0, r1 + 1):
+            cells = [(self._tbl.item(r, c).text()
+                      if self._tbl.item(r, c) and self._tbl.item(r, c).isSelected() else "")
+                     for c in range(c0, c1 + 1)]
+            rows.append("\t".join(cells))
+        QApplication.clipboard().setText("\n".join(rows))
 
     def _paste_clipboard(self):
         text = QApplication.clipboard().text()
