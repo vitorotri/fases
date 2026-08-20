@@ -78,12 +78,14 @@ PAL = {
 }
 
 LAYER_COLORS = [
+	(15/255,  240/255, 145/255)] #, aqua-cyan
+'''
     (45/255,   2/255, 249/255),   # blue-violet
     (100/255, 249/255,  2/255),   # green
     (240/255,  25/255,  2/255),   # red
     (249/255, 225/255,  2/255),   # yellow
+    (15/255,  240/255, 150/255),  # cyan
     (249/255,   2/255, 237/255),  # magenta
-    (2/255,   249/255, 230/255),  # cyan
     (249/255, 130/255,   2/255),  # orange
     (160/255,  2/255,  249/255),  # purple
     (2/255,   130/255, 249/255),  # azure
@@ -91,6 +93,7 @@ LAYER_COLORS = [
     (249/255,   2/255, 120/255),  # pink
     (249/255, 160/255, 200/255),  # rose
 ]
+'''
 BBOX_COLOR = (0.35, 0.65, 1.0)
 SRC_COLOR  = (138/255, 130/255, 255/255)
 REC_COLOR  = (252/255, 118/255, 78/255)
@@ -642,11 +645,12 @@ class GLViewer(QOpenGLWidget):
             # show the same axis guide + coordinate readout while moving a point
             self._draw_drag_guide()
         self._draw_hud()
-        # source/receiver glyphs are drawn last, as a QPainter text overlay
+        # origin marker + source/receiver glyphs, drawn last as a QPainter overlay
+        gp = QPainter(self)
+        self._paint_origin(gp)
         if self._glyph_queue:
-            gp = QPainter(self)
             self._paint_point_glyphs(gp)
-            gp.end()
+        gp.end()
 
     # ── drawing helpers ──────────────────────────────────────
     def _draw_gizmo(self):
@@ -930,6 +934,36 @@ class GLViewer(QOpenGLWidget):
         # GL y is bottom-up; QPainter y is top-down
         self._glyph_queue.append((float(sx), float(H - sy), tuple(color),
                                   kind, bool(hl)))
+
+    def _paint_origin(self, painter):
+        """Origin marker at world (0,0,0): three positive-axis lines, each 0.1 of the
+        domain length on its axis (world size, scales with zoom), thicker than the
+        wireframe, white in Dark / black in Light, with an 'o' at the origin."""
+        W, H = self.width(), self.height()
+        vp = [0, 0, int(W), int(H)]
+        Lx, Ly, Lz = (float(self._domain_max[0]),
+                      float(self._domain_max[1]),
+                      float(self._domain_max[2]))
+        try:
+            x0, y0, z0 = gluProject(0.0, 0.0, 0.0, self._mv, self._proj, vp)
+        except Exception:
+            return
+        if z0 < 0.0 or z0 > 1.0:      # origin behind camera / clipped
+            return
+        col = QColor(0, 0, 0) if SCENE_LIGHT_MODE else QColor(255, 255, 255)
+        pen = QPen(col); pen.setWidthF(5.0); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        p0 = QPointF(x0, H - y0)
+        for end in ((0.1*Lx, 0, 0), (0, 0.1*Ly, 0), (0, 0, 0.1*Lz)):
+            try:
+                sx, sy, sz = gluProject(end[0], end[1], end[2], self._mv, self._proj, vp)
+            except Exception:
+                continue
+            if sz < 0.0 or sz > 1.0:
+                continue
+            painter.drawLine(p0, QPointF(sx, H - sy))
+        painter.setFont(QFont("Sans", 11))
+        painter.drawText(QPointF(x0 + 6, H - y0 - 6), "o")
 
     def _paint_point_glyphs(self, painter):
         """Render all queued source/receiver glyphs with QPainter."""
@@ -2666,7 +2700,9 @@ class MaterialPanel(QWidget):
             # take the first token per line (same as _load_config), else float() chokes.
             v = [float(l.split("#")[0].split()[0])
                  for l in open(config_path) if l.split("#")[0].strip()]
-            tail = f"|h={v[0]:.10g}|cfl={v[4]:.10g}|fc={v[2]:.10g}|T={v[3]:.10g}|N={int(v[5])}"
+            csnd = (1.4 * 287.05 * v[3]) ** 0.5     # matches fitter c0 (Celsius, no +273.15)
+            dt   = v[4] * v[0] / csnd
+            tail = f"|dt={dt:.10g}|fc={v[2]:.10g}|N={int(v[5])}"
         except Exception:
             return []                      # no config -> can't judge, don't block
         soft = self._read_all_soft()
@@ -2676,7 +2712,15 @@ class MaterialPanel(QWidget):
             if it is None or _is_bbox(it.text()):   # reserved shell never fitted
                 continue
             name = it.text()
-            a = "|".join(f"{round(float(x),8):.8g}" for x in self._row_values(r)[:8])
+            # hash the .mat (what the fitter fits, :.4f) not the table (:.2f display) -> match
+            mp = os.path.join(self._mat_dir, name + ".mat")
+            try:
+                with open(mp) as f:
+                    nums = [x for ln in f if not ln.lstrip().startswith("#") for x in ln.split()]
+                alphas = [float(x) for x in nums[:8]]
+            except Exception:
+                stale.append(name); continue        # no .mat -> must fit
+            a = "|".join(f"{round(v,8):.8g}" for v in alphas)
             want = hashlib.sha1((a + f"|soft={int(bool(soft.get(name,False)))}" + tail)
                                 .encode()).hexdigest()[:16]
             fit = os.path.join(self._fit_dir, name + ".fit")
@@ -4396,7 +4440,7 @@ class MainWindow(QMainWindow):
         if stale:
             B = QMessageBox.StandardButton
             ans = QMessageBox.warning(self, "Impedances out of date",
-                    "These materials changed since their last fit:\n\n  • "
+                    "Materials or resolution changed since the last fit:\n\n  • "
                     + "\n  • ".join(stale)
                     + "\n\nFit impedances first, then simulate?",
                     B.Yes | B.No | B.Cancel, B.Yes)
@@ -4481,6 +4525,11 @@ class MainWindow(QMainWindow):
         which the solver needs before a run — hence it lives here on the Run tab."""
         if not self._proj_root:
             self._sb.showMessage("Open a project folder first."); return
+        # Flush the current GUI state to disk BEFORE fitting, so the fit stamps the same
+        # dt/fc/N/alphas the next Simulate checks against. Otherwise the fitter reads a
+        # stale config.txt/.mat and the just-made fit still reads as out of date.
+        self._write_config(os.path.join(self._proj_root, "config", "config.txt"))
+        self._mat_panel.save_all()
         self._mat_panel.run_fit_all()
 
     def _on_fit_all_finished(self, rc):
