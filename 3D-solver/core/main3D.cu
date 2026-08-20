@@ -749,6 +749,7 @@ int main(int argc, char *argv[]){
     
     std::vector<float> src_arr; // source array positions (for GA)
     std::vector<float> src_pressure; // host values for sources
+    std::vector<float> src_pressure_Pa; // auxiliar for ISM/RT
     std::vector<int> src_flat; // source array indexes on host (for wave-based on GPU)
     std::vector<float> src_freq; // sources frequencies
     
@@ -788,6 +789,7 @@ int main(int argc, char *argv[]){
         		
         		// sound pressure values into host array, computed from L_p,1m input by user
         		src_pressure.push_back(2e-5 * powf(10.0, val_s / 20.0));
+        		src_pressure_Pa.push_back(2e-5 * powf(10.0, val_s / 20.0));
         		
         		src_freq.push_back(val_f0);
         	}
@@ -911,6 +913,7 @@ int main(int argc, char *argv[]){
 		ts_ = (int)ceil(8.5 * sigma_s / dt_half); // samples of delay - number of σ's needed for the Gaussian tail to drop below double-precision roundoff
 		
 		printf("\n\n[*] Recommended t_min for PCS ≥ %f\n\n", 2.0 / f_0);
+		printf("\n\nts_ . dt_half = %d\n\n", (int)(ts_ * dt_half * 44100.0));
 		
 		// unique sphere's surface driving force
 		for (int t = 0; t <= 2*Nt; t++){
@@ -941,6 +944,8 @@ int main(int argc, char *argv[]){
 		double f_peak = 0.45 * f_cutoff;                // [Hz] max is 0.5 * f_cutoff
 		sigma_s = 1.0 / (sqrt(2.0) * M_PI * f_peak);    // [s]
 		ts_ = (int)ceil(5.0 * sigma_s / dt_half);
+				
+		printf("\n\nts_ . dt_half = %d\n\n", (int)(ts_ * dt_half * 44100.0));
 				
 		for (int t = 0; t <= 2*Nt; t++){
 			x_s = (t - ts_) * dt_half/ sigma_s;
@@ -978,7 +983,7 @@ int main(int argc, char *argv[]){
 			p_peak   = std::fmax(p_peak, std::fabs(p_ref[t]));
 		}
 
-		// scale sources
+		// scale sources for wave-based part
 		for (int s = 0; s < N_src; s++){
 			src_pressure[s] /= (float)p_peak;   // [Pa] at 1 m -> driving force [N]
 		}
@@ -1327,7 +1332,7 @@ int main(int argc, char *argv[]){
 	int max_order = (conf_arr.size() > 12) ? (int)conf_arr[12] : 3;
 	if (max_order < 0) max_order = 0;
 	printf("\n[OK] ISM max_order = %d\n", max_order);
-	ISMResult Q = ism_solve(sc, src_arr, rec_arr, {}, Z, max_order, src_pressure, cfg); // gets main values for IRs
+	ISMResult Q = ism_solve(sc, src_arr, rec_arr, {}, Z, max_order, src_pressure_Pa, cfg); // gets main values for IRs
 
 	// Ray-traced late tail: build BVH scene ONCE (before the mesh is freed); the
 	// tracer continues the ISM past max_order into the reverberant tail.
@@ -1352,6 +1357,7 @@ int main(int argc, char *argv[]){
 	               // timing, and its short support stops nearby arrivals' sinc tails from piling up.
 	
 	// ----- ray-traced late reverberant tail (continues the ISM past max_order) -----
+	
 	// Flat absorption table for the BVH tracer: alpha_gb[gid*8 + band]. Z is indexed
 	// by material == group_id (names[gid+1]), exactly like the .fit loop above.
 	std::vector<float> alpha_gb((size_t)rtS.ngroups * 8, 0.0f);
@@ -1402,7 +1408,7 @@ int main(int argc, char *argv[]){
 
 	// RT late field: two ENERGY buffers (specular / diffuse), rooted per bin at deposit.
 	std::vector<float> e_spec, e_diff;
-	rt_trace_late(rtS, src_arr, src_pressure, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(),
+	rt_trace_late(rtS, src_arr, src_pressure_Pa, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(),
 			  sctr_g.data(), c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, e_spec, e_diff);
 	
 	//int t_cross = (int)Nt; // ISM amplitude validation
@@ -1413,6 +1419,8 @@ int main(int argc, char *argv[]){
 	if (t_cross >= (int)Nt) t_cross = (int)Nt - 1;
 	
 	printf("\n[OK] t_cross = %f ms\n", (float)t_cross * 1000.0f / fs);
+
+	// --------------------------------------------------------------------------
 
 	// compute IRs ISM fraction
 	// for each band
@@ -1449,7 +1457,7 @@ int main(int argc, char *argv[]){
 			// shoebox and more numerous at higher order) must get INDEPENDENT random signs so
 			// they add incoherently (sqrt(K)), not coherently (K -> the spurious 2x-direct peak).
 			// Keying on tau shared one sign across them; key on aid instead.
-			unsigned aid = 0;
+			//unsigned aid = 0;
 			// Antithetic sign: consecutive arrivals pair up as (+base,-base) so the count is
 			// exactly 50/50 (+-1) -> kills the low-order positive lean, without an ordering/comb
 			// pattern (base is random per pair). Coincident arrivals land in different pairs, so
@@ -1471,7 +1479,8 @@ int main(int argc, char *argv[]){
         				// no fractional delay (amplitude validation)
             			//e_ism[t_0] += (float)gS_0 * gS_0;
             			// fractional delay
-            			deposit(tau_0, asign(aid++)*gS_0, r, d_0);
+            			//deposit(tau_0, asign(aid++)*gS_0, r, d_0);
+            			deposit(tau_0, gS_0, r, d_0); // coherent early reflections
         			}
     			}
 				// image sources loop
@@ -1498,7 +1507,8 @@ int main(int argc, char *argv[]){
 					// no fractional delay (amplitude validation)
 					//e_ism[t] += (float)gS * gS;
 					// fractional delay
-					deposit(tau, asign(aid++)*gS, r, d);
+					//deposit(tau, asign(aid++)*gS, r, d);
+					deposit(tau, gS, r, d); // coherent early reflections
 				}
 			}
 
@@ -1522,7 +1532,8 @@ int main(int argc, char *argv[]){
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
-        	std::string fname = out_file("IR" + std::to_string(r) + "_" + std::to_string(src_idx) + "_"
+			// 'H' stands for high (high-frequency bands)
+        	std::string fname = out_file("HIR" + std::to_string(r) + "_" + std::to_string(src_idx) + "_"
                                     		+ std::to_string((int)octave_bands[b]) + ".bin");
         	FILE* f = std::fopen(fname.c_str(), "wb");
         	if (f){
