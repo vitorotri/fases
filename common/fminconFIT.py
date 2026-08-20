@@ -558,9 +558,11 @@ import hashlib
 def _fit_sig(alpha_oct, soft):
     """Stable content hash. Uses hashlib (NOT hash(), which is per-process salted)."""
     a = np.round(np.atleast_1d(alpha_oct).ravel()[:8], 8)
+    # key on dt (= what the pole bounds actually depend on) not h/cfl/T separately, so a
+    # resolution change that leaves dt unchanged does not invalidate the fit.
     canon = ("|".join(f"{x:.8g}" for x in a)
-             + f"|soft={int(bool(soft))}|h={h:.10g}|cfl={C_CFL:.10g}"
-             + f"|fc={float(f_cutoff):.10g}|T={float(Temp):.10g}|N={int(N)}")
+             + f"|soft={int(bool(soft))}|dt={dt:.10g}"
+             + f"|fc={float(f_cutoff):.10g}|N={int(N)}")
     return hashlib.sha1(canon.encode()).hexdigest()[:16]
 
 def _read_fit_sig(path):

@@ -879,7 +879,7 @@ int main(int argc, char *argv[]){
 		int ts_; // driving force's discrete samples delay (time delay)
 		
 		Q_s = 1.0;
-		f_0 = 25.0; // [Hz]
+		f_0 = glob_f; // [Hz]
 		w_0 = 2.0 * M_PI * f_0; // [rad/s]
 		beta_s = w_0 / tan(0.5 * w_0 * dt_half); // [rad/s]
 		
@@ -941,7 +941,7 @@ int main(int argc, char *argv[]){
 		// f_p = 1/(sqrt(2)*pi*sigma). Put tFor the BUt he peak at 0.3*f_cutoff so the Gaussian tail
 		// sits below cutoff. NB: sigma is a TIME [s] = 1/(sqrt(2)*pi*f_p), NOT a fraction
 		// of f_cutoff -- assigning 0.3*f_cutoff makes sigma ~600 s and blows up p_peak.
-		double f_peak = 0.45 * f_cutoff;                // [Hz] max is 0.5 * f_cutoff
+		double f_peak = glob_f;                // [Hz] max is 0.5 * f_cutoff
 		sigma_s = 1.0 / (sqrt(2.0) * M_PI * f_peak);    // [s]
 		ts_ = (int)ceil(5.0 * sigma_s / dt_half);
 				
@@ -1128,7 +1128,8 @@ int main(int argc, char *argv[]){
 	int TS = 256;                    // threads per block; 64–256 all fine at this scale
 	int BS = (N_src + TS - 1) / TS;  // enough blocks to cover N_src
 	
-	size_t pbin_size = 0; // for plotting animation correctly
+	// for plotting animation correctly
+	size_t pbin_size = 0; 
 	
 	// --------------------------------------------------------------------------------------------------------
 	/*
