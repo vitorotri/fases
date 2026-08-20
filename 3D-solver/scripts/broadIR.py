@@ -8,15 +8,24 @@ from scipy import signal
 from fractions import Fraction
 from scipy.signal import resample_poly
 
+def first_peak(x, thr=0.05, win=50):
+    a = np.abs(x)
+    i0 = np.argmax(a > thr * a.max())        # onset: first sample above threshold
+    return a[i0:i0+win].max()                # peak within the arrival
+
 
 octave_bands = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 
 dt = 0.000050986
+dt_half = 0.5 * dt
+#ts_ = ...
+#lag = ts_ * dt_half * 44100
 fs_fv = 1/dt
 fs = 44100 # Hz
 f_cutoff = 1000 # Hz
 src = 0 # source index
 rec = 0 # rec index
+
 
 # Read only the files for THIS source-receiver pair
 low_files = sorted(f for f in glob.glob('IR*.bin')   # IR<source>_<receiver>.bin
@@ -30,7 +39,7 @@ high_arrays = [np.fromfile(file, np.float32) for file in high_files]
 H_IRs = []
 
 plt.figure()
-plt.plot(high_arrays[0])
+plt.plot(low_arrays[0])
 
 # filter each array on high-frequency bands
 for h in range(len(high_arrays)):
@@ -76,6 +85,11 @@ sos_hp = signal.butter(8, f_cutoff, 'high', fs=fs, output='sos')
 LIR = signal.sosfiltfilt(sos_lp, LIR)
 HIR = signal.sosfiltfilt(sos_hp, HIR)
 
+# Re-scale to correct convention
+HIR *= 4*np.pi
+#g = first_peak(LIR) / first_peak(HIR) # if materials are the same only (comparison below on frequency domain)
+#HIR *= g
+
 for sos, name in [(sos_lp, 'low'), (sos_hp, 'high')]:
 	w, h = signal.sosfreqz(sos, worN=2048, fs=fs)
 	plt.figure()
@@ -87,10 +101,38 @@ for sos, name in [(sos_lp, 'low'), (sos_hp, 'high')]:
 	plt.grid(which='both', axis='both')
 	plt.axvline(f_cutoff, color='green') # cutoff frequency
 
+lag = 159 # ts_ * dt_half * 44100
+HIR = np.roll(HIR, lag)
+
+plt.figure()
+plt.plot(LIR,'b')
+plt.plot(HIR,'g')
+
 N = max(LIR.size, HIR.size)
 IR_ = np.pad(LIR, (0, N-LIR.size)) + np.pad(HIR, (0, N-HIR.size))
 
 plt.figure()
 plt.plot(IR_)
-plt.show()
 
+# --- TEST: wave-based vs GA-based, both LP-filtered to f_cutoff for fair shape ---
+# Use more ISM than RT here
+# Make IRs long enough for good representation in the spectral domain
+
+ga_t   = signal.sosfiltfilt(sos_lp, high_arrays[0])   # GA IR low-passed to f_cutoff (same band as FVM)
+wave_t = LIR                                          # FVM, already resampled + LP
+
+Nt   = max(wave_t.size, ga_t.size)
+wave_t = np.pad(wave_t, (0, Nt-wave_t.size))
+ga_t   = np.pad(ga_t,   (0, Nt-ga_t.size))
+ga_t  *= first_peak(wave_t) / first_peak(ga_t)        # match level on the direct peak
+ft     = np.fft.rfftfreq(Nt, 1/fs)
+
+spl = lambda x: 20*np.log10(np.abs(np.fft.rfft(x))/2e-5 + 1e-30)
+
+plt.figure()
+plt.semilogx(ft, spl(wave_t), 'b', label='wave-based (FVM)')
+plt.semilogx(ft, spl(ga_t),   'g', label='GA-based (ISM/RT)')
+plt.axvline(f_cutoff, color='r'); plt.xlim(20, f_cutoff)
+plt.xlabel('Hz'); plt.ylabel('SPL [dB]'); plt.legend(); plt.grid(which='both')
+
+plt.show()
