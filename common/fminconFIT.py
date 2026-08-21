@@ -754,6 +754,26 @@ def fit_material(read_file, coefs_path, soft=False):
 
     print(f"[{name}] Saved coefficients to {coefs_path}")
 
+    # .imp: normalized octave-band impedance zeta = (1+R)/(1-R) at the 8 band centres,
+    # for the ISM's angle-dependent complex reflection (R_oblique reads Z directly).
+    # Built from the material's OWN octave |R| (min-phase), NOT the ADE model -- the fit is
+    # only valid up to f_cutoff, so evaluating it at higher octaves would extrapolate garbage
+    # exactly in the bands the ISM uses. Two rows: Re[8] then Im[8].
+    octs = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], float)
+    Rmag_oct = np.clip(R_from_alpha(alpha_oct), 1e-6, 1 - 1e-6)   # clip: keeps zeta finite (rigid)
+    if is_near_one(Rmag_oct):
+        R_oct = Rmag_oct.astype(complex)
+    else:
+        R_oct, _, _ = min_phase_octave_cepstrum(octs, Rmag_oct)
+    if soft:
+        R_oct = -R_oct
+    zeta_oct = (1.0 + R_oct) / (1.0 - R_oct)
+    imp_path = os.path.splitext(coefs_path)[0] + ".imp"
+    with open(imp_path, "w") as f:
+        f.write(" ".join(f"{v:.8g}" for v in np.real(zeta_oct)) + "\n")
+        f.write(" ".join(f"{v:.8g}" for v in np.imag(zeta_oct)) + "\n")
+    print(f"[{name}] Saved impedance to {imp_path}")
+
     # Model response for summary plot / final RMS
     w = 2 * np.pi * freq
     R_hat = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w)
@@ -810,6 +830,9 @@ for m in mat_files:
         print(f"[{base}] alphas identical to '{src_name}' — copying .fit")
         os.makedirs(os.path.dirname(coefs_path), exist_ok=True)
         shutil.copy2(src_fit, coefs_path)
+        _si = os.path.splitext(src_fit)[0] + ".imp"          # copy the .imp too
+        if os.path.exists(_si):
+            shutil.copy2(_si, os.path.splitext(coefs_path)[0] + ".imp")
         _cached_name, R_tgt, R_hat, rms = cached_result
         results.append((base, R_tgt, R_hat, rms))
     else:
@@ -914,6 +937,6 @@ def _grid(extract, fit_color, ylabel, suptitle, ylim=None):
     return fig
 
 _grid(np.abs,  'r',    "|R|",   "fminconFIT — target vs fitted |R| per material",   (0, 1.05))
-_grid(np.real, 'b',    "Re(R)", "fminconFIT — target vs fitted Re(R) per material", None)
-_grid(np.imag, 'lime', "Im(R)", "fminconFIT — target vs fitted Im(R) per material", None)
+_grid(np.real, 'b',    "Re(R)", "fminconFIT — target vs fitted Re(R) per material", (-1.05, 1.05))
+_grid(np.imag, 'lime', "Im(R)", "fminconFIT — target vs fitted Im(R) per material", (-1.05, 1.05))
 plt.show()
