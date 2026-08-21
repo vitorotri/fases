@@ -148,6 +148,18 @@ int main(int argc, char *argv[]){
                            "header.txt", "pre_header.txt"}) {
         std::remove(out_file(fn).c_str());
     }
+    // Purge stale IR/HIR bins: filenames vary by rec/src/band, and a changed cutoff or
+    // dt leaves old ones behind (skipped bands never overwritten) -> mismatched lengths.
+    {
+        std::error_code pec;
+        for (auto& e : std::filesystem::directory_iterator(output_dir, pec)) {
+            std::string n = e.path().filename().string();
+            bool is_hir = n.rfind("HIR", 0) == 0;
+            bool is_ir  = n.rfind("IR", 0) == 0;
+            if ((is_hir || is_ir) && n.size() > 4 && n.substr(n.size() - 4) == ".bin")
+                std::remove(e.path().string().c_str());
+        }
+    }
         
     std::string scene_str = scene_path.string();
     const char *path = scene_str.c_str();
