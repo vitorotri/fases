@@ -962,9 +962,6 @@ class GLViewer(QOpenGLWidget):
             return
         W, H = self.width(), self.height()
         vp = [0, 0, int(W), int(H)]
-        Lx, Ly, Lz = (float(self._domain_max[0]),
-                      float(self._domain_max[1]),
-                      float(self._domain_max[2]))
         try:
             x0, y0, z0 = gluProject(0.0, 0.0, 0.0, self._mv, self._proj, vp)
         except Exception:
