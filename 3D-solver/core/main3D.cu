@@ -1487,7 +1487,8 @@ int main(int argc, char *argv[]){
         			float tau_0 = fs * d_0 / c; int t_0 = (int)tau_0;
         			if (t_0 < Nt && t_0 <= t_cross){
         				// comment exp term below for amplitude validation
-        				float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0) * std::exp(-m_air[b]*d_0);
+        				float gS_0 = Q.src_pressure[s] / d_0 * std::exp(-m_air[b]*d_0); // calibrated
+        				//float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0) * std::exp(-m_air[b]*d_0);
         				// INCOHERENT (GA) energy deposit at the integer sample (validation path).
         				// no fractional delay (amplitude validation)
             			//e_ism[t_0] += (float)gS_0 * gS_0;
@@ -1513,7 +1514,8 @@ int main(int argc, char *argv[]){
 						P *= R;
 					}
 					// iS.amp in [0,1] handles curved surfaces (parser heuristic)
-					float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d) * std::exp(-m_air[b]*d);
+					float gS = Q.src_pressure[s] * iS.amp * P / d * std::exp(-m_air[b]*d); // calibrated
+					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d) * std::exp(-m_air[b]*d);
 					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d); // amplitude validation
 					
 					// INCOHERENT (GA) energy deposit at the integer sample (validation path).
