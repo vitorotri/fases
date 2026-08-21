@@ -397,6 +397,7 @@ class GLViewer(QOpenGLWidget):
         self._free_y = 0.0        # Alt+LMB free tumble around screen Y
         self._roll  =  0.0        # Ctrl+LMB roll around view axis
         self._dist  =   6.0
+        self._axes_visible = True   # grey infinite axes + origin 'o' (RMB menu toggles)
         self._pan   = np.zeros(3, np.float32)
         self._last_pos  = None
         self._mouse_btn = None
@@ -636,6 +637,7 @@ class GLViewer(QOpenGLWidget):
         self._glyph_queue = []            # collected by _draw_sources/_receivers
         self._draw_gizmo()   # replaces grid + world axes
         self._draw_mesh()
+        self._draw_axes()
         self._draw_rays()
         self._draw_sources()
         self._draw_receivers()
@@ -906,6 +908,23 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
+    def _draw_axes(self):
+        """Thin grey positive x/y/z axes running from the origin to ~infinity.
+        Thinner than the wireframe, mid-grey so it reads in Dark and Light. The
+        parser keeps the scene on the positive side, so axes are positive-only."""
+        if not self._axes_visible:
+            return
+        BIG = self._dist * 1.0e4         # beyond the far plane (dist*500) -> end always clipped, never seen
+        glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE)
+        glLineWidth(1.0)                 # thinner than the 1.3/1.6 wireframe
+        glColor4f(0.5, 0.5, 0.5, 1.0)    # mid-grey, scheme-independent
+        glBegin(GL_LINES)
+        glVertex3f(0, 0, 0); glVertex3f(BIG, 0,   0)
+        glVertex3f(0, 0, 0); glVertex3f(0,   BIG, 0)
+        glVertex3f(0, 0, 0); glVertex3f(0,   0,   BIG)
+        glEnd()
+        glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
+
     def _outside_domain(self, x, y, z):
         """Return True if (x,y,z) lies outside the scene bounding box."""
         p = np.array([x, y, z], np.float32)
@@ -939,6 +958,8 @@ class GLViewer(QOpenGLWidget):
         """Origin marker at world (0,0,0): three positive-axis lines, each 0.1 of the
         domain length on its axis (world size, scales with zoom), thicker than the
         wireframe, white in Dark / black in Light, with an 'o' at the origin."""
+        if not self._axes_visible:
+            return
         W, H = self.width(), self.height()
         vp = [0, 0, int(W), int(H)]
         Lx, Ly, Lz = (float(self._domain_max[0]),
@@ -954,7 +975,8 @@ class GLViewer(QOpenGLWidget):
         pen = QPen(col); pen.setWidthF(5.0); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         p0 = QPointF(x0, H - y0)
-        for end in ((0.1*Lx, 0, 0), (0, 0.1*Ly, 0), (0, 0, 0.1*Lz)):
+        g = 0.15   # fixed gizmo length [m] on all 3 axes
+        for end in ((g, 0, 0), (0, g, 0), (0, 0, g)):
             try:
                 sx, sy, sz = gluProject(end[0], end[1], end[2], self._mv, self._proj, vp)
             except Exception:
@@ -1364,7 +1386,8 @@ class GLViewer(QOpenGLWidget):
         if not moved and e.button() == Qt.MouseButton.LeftButton:
             self._do_ray_pick(e.position())
         if not moved and e.button() == Qt.MouseButton.RightButton:
-            self._do_point_remove(e.position())
+            if not self._do_point_remove(e.position()):   # empty space -> scene menu
+                self._scene_menu(e.position())
 
     def wheelEvent(self, e):
         steps = e.angleDelta().y() / 120.0   # 1 notch = 120 units
@@ -1507,6 +1530,16 @@ class GLViewer(QOpenGLWidget):
         if best_list is not None and best_idx >= 0:
             best_list.pop(best_idx)
             self.pointRemoved.emit(best_kind, best_idx)
+            self.update()
+            return True
+        return False
+
+    def _scene_menu(self, qpos):
+        """RMB on empty space -> scene options."""
+        m = QMenu(self)
+        act = m.addAction("Hide axes" if self._axes_visible else "Show axes")
+        if m.exec(self.mapToGlobal(QPoint(int(qpos.x()), int(qpos.y())))) is act:
+            self._axes_visible = not self._axes_visible
             self.update()
 
     def _find_nearest_point(self, qpos, radius=30.0):
@@ -2135,7 +2168,7 @@ class MaterialPanel(QWidget):
             QHeaderView::section {{background:{PAL['panel']};color:{PAL['subtext']};
                 border:1px solid {PAL['border']};font-size:11px;}}
         """)
-        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tbl.itemSelectionChanged.connect(self._on_row_selected)
         self._tbl.itemChanged.connect(lambda *_: self._on_edit())
@@ -2603,19 +2636,7 @@ class MaterialPanel(QWidget):
         super().keyPressEvent(e)
 
     def _copy_selection(self):
-        # selected cell rectangle -> TSV (names + values), pastes here or into Excel
-        rngs = self._tbl.selectedRanges()
-        if not rngs:
-            return
-        r0 = min(x.topRow() for x in rngs);     r1 = max(x.bottomRow() for x in rngs)
-        c0 = min(x.leftColumn() for x in rngs); c1 = max(x.rightColumn() for x in rngs)
-        rows = []
-        for r in range(r0, r1 + 1):
-            cells = [(self._tbl.item(r, c).text()
-                      if self._tbl.item(r, c) and self._tbl.item(r, c).isSelected() else "")
-                     for c in range(c0, c1 + 1)]
-            rows.append("\t".join(cells))
-        QApplication.clipboard().setText("\n".join(rows))
+        _tsv_copy_selection(self._tbl)
 
     def _paste_clipboard(self):
         text = QApplication.clipboard().text()
@@ -2916,6 +2937,21 @@ def make_pulse_icon(kind, w=46, h=28, color=None):
     return QIcon(pm)
 
 
+def _tsv_copy_selection(tbl):
+    """Selected cells -> TSV on the clipboard (blank for unselected within the rect)."""
+    rngs = tbl.selectedRanges()
+    if not rngs:
+        return
+    r0 = min(x.topRow() for x in rngs);     r1 = max(x.bottomRow() for x in rngs)
+    c0 = min(x.leftColumn() for x in rngs); c1 = max(x.rightColumn() for x in rngs)
+    rows = []
+    for r in range(r0, r1 + 1):
+        rows.append("\t".join(
+            tbl.item(r, c).text() if tbl.item(r, c) and tbl.item(r, c).isSelected() else ""
+            for c in range(c0, c1 + 1)))
+    QApplication.clipboard().setText("\n".join(rows))
+
+
 class PointTable(QWidget):
     changed = Signal()
 
@@ -2944,7 +2980,8 @@ class PointTable(QWidget):
         self._tbl.setColumnWidth(0, 90)
         for c in range(self._coff, len(cols)):   # centre the numeric columns (Name stays left)
             self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True))
-        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # Cells are edited ONLY by a deliberate double-click (or clicking an
         # already-selected cell). Keyboard triggers are excluded so stray
         # keystrokes — e.g. while moving a point in edit mode — can never
@@ -3045,6 +3082,43 @@ class PointTable(QWidget):
         rows = sorted({i.row() for i in self._tbl.selectedItems()}, reverse=True)
         for r in rows: self._tbl.removeRow(r)
         self.changed.emit()
+
+    # ── copy / paste (spreadsheet + whitespace txt, both ways) ──
+    def keyPressEvent(self, e):
+        if e.matches(QKeySequence.StandardKey.Copy):
+            _tsv_copy_selection(self._tbl); e.accept(); return
+        if e.matches(QKeySequence.StandardKey.Paste):
+            self._paste_clipboard(); e.accept(); return
+        super().keyPressEvent(e)
+
+    def _paste_clipboard(self):
+        text = QApplication.clipboard().text()
+        if not text.strip():
+            return
+        start_row = max(self._tbl.currentRow(), 0)
+        start_col = max(self._tbl.currentColumn(), self._coff)   # never the Name col
+        ncol = self._tbl.columnCount()
+        # numeric-column defaults for rows added beyond the current count
+        defs = [0.0, 0.0, 0.0] + ([1.0] if self._has_amp else []) + ([100.0] if self._has_freq else [])
+        self._tbl.blockSignals(True)
+        for dr, line in enumerate(l for l in text.splitlines() if l.strip()):
+            parts = line.split("\t") if "\t" in line else line.split()   # txt -> whitespace cols
+            rr = start_row + dr
+            if rr >= self._tbl.rowCount():                    # grow: extra rows -> scene + table
+                self._tbl.insertRow(rr)
+                self._tbl.setItem(rr, 0, QTableWidgetItem(str(rr + 1)))
+                for c, dv in enumerate(defs):
+                    self._tbl.setItem(rr, self._coff + c, QTableWidgetItem(f"{dv:.4g}"))
+            for dc, val in enumerate(parts):
+                cc = start_col + dc
+                if cc >= ncol:
+                    break
+                val = val.strip()
+                try: float(val)
+                except ValueError: continue                   # names / non-numeric -> unchanged
+                self._tbl.setItem(rr, cc, QTableWidgetItem(val))
+        self._tbl.blockSignals(False)
+        self.changed.emit()                                   # -> _refresh_gl_points (scene) + save
 
     def _on_item_changed(self, item):
         # Clamp the f0 column to [1, freq_max] (freq_max = f_cutoff) if a max is set.
@@ -4087,6 +4161,19 @@ class MainWindow(QMainWindow):
         self._mat_panel.save_all()
         self._write_manifest()
         self._sb.showMessage(f"Saved project → {self._proj_root}")
+
+    def closeEvent(self, e):
+        # Offer to save before quitting. Always ask when a project is open — a dirty
+        # flag that misses a change would lose work silently; one dialog never does.
+        if self._proj_root:
+            B = QMessageBox.StandardButton
+            ans = QMessageBox.question(self, "Save project?",
+                    "Save the project before closing?", B.Save | B.Discard | B.Cancel, B.Save)
+            if ans == B.Cancel:
+                e.ignore(); return
+            if ans == B.Save:
+                self._save_project()
+        e.accept()
 
     def _load_obj(self):
         # input/scene/ is no longer auto-created (the scene can live anywhere and
