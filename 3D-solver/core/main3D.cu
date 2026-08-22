@@ -1435,7 +1435,8 @@ int main(int argc, char *argv[]){
 
 	// --------------------------------------------------------------------------
 
-	// compute IRs ISM fraction
+	// --- compute IRs ISM fraction ---
+	
 	// for each band
 	for (int b = 0; b < 8; b++){
 		if (f_cutoff > octave_bands[b]) continue; // skip band
@@ -1470,7 +1471,7 @@ int main(int argc, char *argv[]){
 			// shoebox and more numerous at higher order) must get INDEPENDENT random signs so
 			// they add incoherently (sqrt(K)), not coherently (K -> the spurious 2x-direct peak).
 			// Keying on tau shared one sign across them; key on aid instead.
-			//unsigned aid = 0;
+			unsigned aid = 0;
 			// Antithetic sign: consecutive arrivals pair up as (+base,-base) so the count is
 			// exactly 50/50 (+-1) -> kills the low-order positive lean, without an ordering/comb
 			// pattern (base is random per pair). Coincident arrivals land in different pairs, so
@@ -1487,14 +1488,29 @@ int main(int argc, char *argv[]){
         			float tau_0 = fs * d_0 / c; int t_0 = (int)tau_0;
         			if (t_0 < Nt && t_0 <= t_cross){
         				// comment exp term below for amplitude validation
-        				float gS_0 = Q.src_pressure[s] / d_0 * std::exp(-m_air[b]*d_0); // calibrated
+        				/*
+        				p(r) = ρ·Q̇ / (4π r)          [exact free-field monopole magnitude]
+
+  						Anchor at r = 1 m, call it the reference pressure:
+  						p(1) ≡ ρ·Q̇ / (4π·1) = src_pressure_Pa      (= Lp,1m)
+							
+  						Now the pressure at any d, divide the two (everything but r cancels):
+  						p(d)     ρ·Q̇/(4π d)      1/d
+  						────  =  ───────────  =  ───  =  1/d
+  						p(1)     ρ·Q̇/(4π·1)      1/1
+						
+  						So:
+  						p(d) = p(1)·(1/d) = src_pressure_Pa / d.
+  						*/
+        				float gS_0 = Q.src_pressure[s] / d_0 * std::exp(-m_air[b]*d_0); // tied to Lp,1m
         				//float gS_0 = Q.src_pressure[s] / (4.0*M_PI*d_0) * std::exp(-m_air[b]*d_0);
         				// INCOHERENT (GA) energy deposit at the integer sample (validation path).
         				// no fractional delay (amplitude validation)
             			//e_ism[t_0] += (float)gS_0 * gS_0;
+            			// no fractional delay
+            			//p_hf[flat(t_0, r, Nt)] += gS_0;
             			// fractional delay
-            			//deposit(tau_0, asign(aid++)*gS_0, r, d_0);
-            			deposit(tau_0, gS_0, r, d_0); // coherent early reflections
+            			deposit(tau_0, gS_0, r, d_0); // direct ray (coherent)
         			}
     			}
 				// image sources loop
@@ -1514,20 +1530,23 @@ int main(int argc, char *argv[]){
 						P *= R;
 					}
 					// iS.amp in [0,1] handles curved surfaces (parser heuristic)
-					float gS = Q.src_pressure[s] * iS.amp * P / d * std::exp(-m_air[b]*d); // calibrated
+					float gS = Q.src_pressure[s] * iS.amp * P / d * std::exp(-m_air[b]*d); // tied to Lp,1m
 					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d) * std::exp(-m_air[b]*d);
 					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d); // amplitude validation
 					
 					// INCOHERENT (GA) energy deposit at the integer sample (validation path).
 					// no fractional delay (amplitude validation)
 					//e_ism[t] += (float)gS * gS;
+					// no fractional delay
+            		//p_hf[flat(t, r, Nt)] += gS;
 					// fractional delay
-					//deposit(tau, asign(aid++)*gS, r, d);
-					deposit(tau, gS, r, d); // coherent early reflections
+					//deposit(tau, asign(aid++)*gS, r, d); // centered balanced early reflections (incoherent)
+					deposit(tau, gS, r, d); // unbalanced early reflections (coherent)
 				}
 			}
 
-			// ray-tracer late field. e_diff (scattered) enters at ALL times -- it is energy
+			// --- ray-tracer late field. e_diff (scattered) enters at ALL times -- it is energy ---
+
 			// the specular ISM lacks; e_spec (specular) only AFTER the ISM crossover, to
 			// avoid duplicating the ISM early reflections. Sum the energies per bin, root
 			// -> pressure, deposit as incoherent noise (random phase / sign).
@@ -1536,6 +1555,7 @@ int main(int argc, char *argv[]){
 			// coinciding arrivals add in energy (sqrt(sum a^2)), matching the ray-tracer and
 			// the incoherent rir_ism.py. Random sign for the audible IR (comment for
 			// amplitude validation).
+			
 			unsigned rid = 0; // antithetic pairing over non-zero bins: caps same-sign runs at 2, independent of t_cross/order
 			for (int t = 1; t < (int)Nt; t++){
 				//float e = e_ism[t]; // amplitude validation (comment below)
@@ -1543,7 +1563,8 @@ int main(int argc, char *argv[]){
 				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;
 				//p_hf[flat(t, r, Nt)] += (float)std::sqrt(e); // amplitude validation
-				p_hf[flat(t, r, Nt)] += asign(rid++) * (float)std::sqrt(e);		
+				p_hf[flat(t, r, Nt)] += asign(rid++) * (float)std::sqrt(e);
+				p_hf[flat(t, r, Nt)] *= 4.0*M_PI; // tied to Lp,1m
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
