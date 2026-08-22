@@ -427,7 +427,7 @@ inline static void rt_trace_late(const RTScene& S,
     for(int s = 0; s < Ns; s++){
         const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]); // source in solver space
         const float ps = (s<(int)src_pressure.size()) ? src_pressure[(size_t)s] : 1.f;                    // this source's pressure
-        const float Kdiff = ps*ps/(4.f*M_PI*(float)Nrays);   // w_ray = ps^2/(4 pi Nrays): energy carried by one ray
+        const float Kdiff = ps*ps/(4.f*M_PI*(float)Nrays); // w_ray = ps^2/(4 pi Nrays): energy carried by one ray
         const float Kspec = Kdiff*RT_INVPI/R2;               // w_ray/(pi R^2): energy per specular detection-sphere crossing
 
         #ifdef _OPENMP
