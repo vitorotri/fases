@@ -3780,7 +3780,7 @@ class MainWindow(QMainWindow):
         lay.addRow("ADE poles:", self._npoles)
 
         # Max reflection order for the ISM (line 13 of config.txt; main3D reads v[12])
-        self._ism_order = QSpinBox(); self._ism_order.setRange(0, 8)
+        self._ism_order = QSpinBox(); self._ism_order.setRange(0, 20)
         self._ism_order.setValue(3); self._ism_order.setMinimumWidth(130)
         lay.addRow("ISM max order:", self._ism_order)
 
