@@ -199,6 +199,70 @@ def _is_bbox(name: str) -> bool:
     return "bounding" in n or "boundary" in n
 
 
+def triangulate_face(face, vertices):
+    """Triangulate a planar polygon face (indices into `vertices`) by ear
+    clipping. Handles concave faces (e.g. an L-shaped floor) that a naive
+    triangle fan would tear across reflex corners.
+    ponytail: O(n^2) ear clip; faces here are a handful of verts, fine.
+    Falls back to a fan if the polygon is degenerate/self-touching."""
+    n = len(face)
+    if n == 3:
+        return [(face[0], face[1], face[2])]
+    P = [vertices[i] for i in face]
+    # Newell normal -> pick projection plane by dominant component
+    nx = ny = nz = 0.0
+    for i in range(n):
+        a, b = P[i], P[(i+1) % n]
+        nx += (a[1]-b[1])*(a[2]+b[2])
+        ny += (a[2]-b[2])*(a[0]+b[0])
+        nz += (a[0]-b[0])*(a[1]+b[1])
+    ax, ay, az = abs(nx), abs(ny), abs(nz)
+    if ax >= ay and ax >= az:
+        pts = [(p[1], p[2]) for p in P]
+    elif ay >= az:
+        pts = [(p[2], p[0]) for p in P]
+    else:
+        pts = [(p[0], p[1]) for p in P]
+
+    def cross(o, a, b):
+        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+
+    def in_tri(p, a, b, c):
+        d1 = cross(a, b, p); d2 = cross(b, c, p); d3 = cross(c, a, p)
+        neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+        pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+        return not (neg and pos)
+
+    # signed area -> orient CCW so ears have positive cross
+    area = sum(pts[i][0]*pts[(i+1) % n][1] - pts[(i+1) % n][0]*pts[i][1]
+               for i in range(n))
+    order = list(range(n))
+    if area < 0:
+        order.reverse()
+
+    tris, V, guard = [], order[:], 0
+    while len(V) > 3 and guard < 10*n:
+        guard += 1
+        m = len(V); clipped = False
+        for k in range(m):
+            i0, i1, i2 = V[(k-1) % m], V[k], V[(k+1) % m]
+            a, b, c = pts[i0], pts[i1], pts[i2]
+            if cross(a, b, c) <= 0:            # reflex/degenerate: not an ear
+                continue
+            if any(j not in (i0, i1, i2) and in_tri(pts[j], a, b, c) for j in V):
+                continue
+            tris.append((face[i0], face[i1], face[i2]))
+            V.pop(k); clipped = True; break
+        if not clipped:
+            break                              # degenerate: bail to fan below
+    if len(V) == 3:
+        tris.append((face[V[0]], face[V[1]], face[V[2]]))
+    elif len(V) > 3:                            # fallback fan on leftovers
+        for i in range(1, len(V)-1):
+            tris.append((face[V[0]], face[V[i]], face[V[i+1]]))
+    return tris
+
+
 def parse_obj(path: str):
     """
     Parse vertices and grouped faces from an OBJ file.
@@ -253,9 +317,7 @@ def parse_obj(path: str):
                     vi = vi-1 if vi > 0 else len(vertices)+vi
                     face.append(vi)
                 if len(face) < 3: continue
-                v0 = face[0]
-                for i in range(1, len(face)-1):
-                    cur_tris.append((v0, face[i], face[i+1]))
+                cur_tris.extend(triangulate_face(face, vertices))
     flush()
     verts = (np.array(vertices, np.float32) if vertices
              else np.zeros((0,3), np.float32))
@@ -914,14 +976,15 @@ class GLViewer(QOpenGLWidget):
         parser keeps the scene on the positive side, so axes are positive-only."""
         if not self._axes_visible:
             return
-        BIG = self._dist * 1.0e4         # beyond the far plane (dist*500) -> end always clipped, never seen
         glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE)
         glLineWidth(1.0)                 # thinner than the 1.3/1.6 wireframe
         glColor4f(0.5, 0.5, 0.5, 1.0)    # mid-grey, scheme-independent
+        # w=0 endpoint = point at infinity in the axis direction; pipeline clips it at the
+        # frustum, so each axis really reaches the screen edge (no finite length to "end").
         glBegin(GL_LINES)
-        glVertex3f(0, 0, 0); glVertex3f(BIG, 0,   0)
-        glVertex3f(0, 0, 0); glVertex3f(0,   BIG, 0)
-        glVertex3f(0, 0, 0); glVertex3f(0,   0,   BIG)
+        glVertex3f(0, 0, 0); glVertex4f(1, 0, 0, 0)
+        glVertex3f(0, 0, 0); glVertex4f(0, 1, 0, 0)
+        glVertex3f(0, 0, 0); glVertex4f(0, 0, 1, 0)
         glEnd()
         glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
 
@@ -972,7 +1035,7 @@ class GLViewer(QOpenGLWidget):
         pen = QPen(col); pen.setWidthF(5.0); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         p0 = QPointF(x0, H - y0)
-        g = 0.15   # fixed gizmo length [m] on all 3 axes
+        g = 0.2   # fixed gizmo length [m] on all 3 axes
         for end in ((g, 0, 0), (0, g, 0), (0, 0, g)):
             try:
                 sx, sy, sz = gluProject(end[0], end[1], end[2], self._mv, self._proj, vp)
@@ -2979,6 +3042,7 @@ class PointTable(QWidget):
             self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True))
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._tbl.verticalHeader().setVisible(False)   # drop the left row-number gutter
         # Cells are edited ONLY by a deliberate double-click (or clicking an
         # already-selected cell). Keyboard triggers are excluded so stray
         # keystrokes — e.g. while moving a point in edit mode — can never
@@ -3710,11 +3774,11 @@ class MainWindow(QMainWindow):
         bbox_row.addWidget(self._bbox_chk); bbox_row.addStretch()
         lay.addLayout(bbox_row)
 
-        lay.addWidget(QLabel("Layers  — click in viewport or list to select:"))
+        # Layer list kept alive (still populated + synced from the material table selection,
+        # which drives highlight/toggle) but NOT shown -- the material table IS the layer UI.
         self._layer_list = QListWidget()
         self._layer_list.setMaximumHeight(100)
         self._layer_list.currentRowChanged.connect(self._on_layer_row_changed)
-        lay.addWidget(self._layer_list)
 
         vis_row = QHBoxLayout()
         toggle_btn = QPushButton("Toggle")
@@ -4301,21 +4365,22 @@ class MainWindow(QMainWindow):
     def _write_config(self, path, src_idx=0):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         pml = {k: (1.0 if c.isChecked() else 0.0) for k,c in self._pml.items()}
+        ln = lambda v, d: f"{str(v):<10}# {d}\n"   # value padded to col 10, then aligned comment
         with open(path, "w") as f:
-            f.write(f"{self._cfg['h'].value():.6g}       # h  [m]\n")
-            f.write(f"{self._cfg['t_max'].value():.6g}   # t_max [s]\n")
-            f.write(f"{self._cfg['f_cutoff'].value():.4g}  # f_cutoff [Hz]\n")
-            f.write(f"{self._cfg['T_C'].value():.4g}      # temperature [°C]\n")
-            f.write(f"{self._cfg['CFL'].value():.6g}      # CFL\n")
-            f.write(f"{self._npoles.value()}                               # number of poles for the ADE\n")
+            f.write(ln(f"{self._cfg['h'].value():.6g}",        "h [m]"))
+            f.write(ln(f"{self._cfg['t_max'].value():.6g}",    "t_max [s]"))
+            f.write(ln(f"{self._cfg['f_cutoff'].value():.4g}", "f_cutoff [Hz]"))
+            f.write(ln(f"{self._cfg['T_C'].value():.4g}",      "temperature [°C]"))
+            f.write(ln(f"{self._cfg['CFL'].value():.6g}",      "CFL"))
+            f.write(ln(self._npoles.value(),                   "number of poles for the ADE"))
             for k in ["U_PML","D_PML","R_PML","L_PML","F_PML","B_PML"]:
-                f.write(f"{pml[k]:.1f}  # {k}\n")
-            f.write(f"{self._ism_order.value()}                               # ISM max reflection order\n")
-            f.write(f"{self._cfg['altitude'].value():.6g}      # altitude [m]\n")
-            f.write(f"{self._nrays.value()}                               # number of rays (ray-traced tail)\n")
-            f.write(f"{max(0, self._src_group.checkedId())}                               # source type (0=PCS,1=Ricker,2=Sinusoid)\n")
-            f.write(f"{self._src_freq.value()}                               # global source frequency [Hz] (PCS/Ricker; sinusoid uses per-source f0)\n")
-            f.write(f"{int(src_idx)}                               # source index (auralization: one run per source; 0 otherwise)\n")
+                f.write(ln(f"{pml[k]:.1f}", k))
+            f.write(ln(self._ism_order.value(),                "ISM max reflection order"))
+            f.write(ln(f"{self._cfg['altitude'].value():.6g}", "altitude [m]"))
+            f.write(ln(self._nrays.value(),                    "number of rays (ray-traced tail)"))
+            f.write(ln(max(0, self._src_group.checkedId()),    "source type (0=PCS,1=Ricker,2=Sinusoid)"))
+            f.write(ln(self._src_freq.value(),                 "global source frequency [Hz] (PCS/Ricker; sinusoid uses per-source f0)"))
+            f.write(ln(int(src_idx),                           "source index (auralization: one run per source; 0 otherwise)"))
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
