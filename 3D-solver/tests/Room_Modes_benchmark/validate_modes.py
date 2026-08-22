@@ -27,11 +27,9 @@ dt, h      = float(hp[9]), float(hp[11])
 Lx, Ly, Lz = Lx-12*h, Ly-12*h, Lz-12*h  # padded -> real acoustic room: 6h ghost pad + 6h immersed wall inset (~3h/face)
 
 dt_half = 0.5 * dt
-#ts_ = ...
-#lag = ts_ * dt_half * 44100
 fs_fv = 1/dt
 fs = 44100 # Hz
-f_cutoff = 1000 # Hz — script crossover (can be lower than the simulation's f_cutoff_sim)
+f_cutoff = f_cutoff_sim # Hz — script crossover (can be lower than the simulation's f_cutoff_sim)
 src = 0 # source index
 rec = 0 # rec index
 
@@ -47,8 +45,26 @@ high_arrays = [np.fromfile(file, np.float32) for file in high_files]
 
 H_IRs = []
 
+LIR = low_arrays[0]
+r = Fraction(fs/fs_fv).limit_denominator(2000)
+LIR = resample_poly(LIR, r.numerator, r.denominator)   # anti-aliased
+'''
+# Ricker Wavelet lag
+sigma_s = 1/(np.sqrt(2)*np.pi*0.3*f_cutoff_sim)
+ts_ = np.ceil(8.5*sigma_s/dt_half)
+lag = int(round(ts_*dt_half*fs))
+'''
+# PCS lag
+sigma_s = 0.425 / f_cutoff_sim
+ts_ = np.ceil(8.5 * sigma_s / dt_half)
+lag = int(round(ts_ * dt_half * fs)) # ts_ on the dt_half grid -> samples at 44100
+
+# apply lag
+LIR = np.roll(LIR, -lag)
+
 plt.figure()
-plt.plot(low_arrays[0])
+plt.plot(LIR)
+plt.plot(high_arrays[0])
 
 # filter each array on high-frequency bands
 for h in range(len(high_arrays)):
@@ -82,11 +98,6 @@ for h in range(len(high_arrays)):
 # sum filtered high-frequency arrays (all equal length now)
 HIR = np.sum(H_IRs, axis=0)
 
-# low IR is at fs_fv; resample to 44100 BEFORE filtering (filters designed at fs)
-LIR = low_arrays[0]
-r = Fraction(fs/fs_fv).limit_denominator(2000)
-LIR = resample_poly(LIR, r.numerator, r.denominator)   # anti-aliased
-
 # Butterworth filters (digital, zero-phase) for low- and high-pass
 sos_lp = signal.butter(8, f_cutoff, 'low', fs=fs, output='sos')
 sos_hp = signal.butter(8, f_cutoff, 'high', fs=fs, output='sos')
@@ -94,7 +105,7 @@ sos_hp = signal.butter(8, f_cutoff, 'high', fs=fs, output='sos')
 LIR = signal.sosfiltfilt(sos_lp, LIR)
 HIR = signal.sosfiltfilt(sos_hp, HIR)
 
-# Re-scale to correct convention if not calibrated in simulation (it is, keep commented)
+# Re-scale to correct convention if sim not calibrated
 #HIR *= 4*np.pi
 #g = first_peak(LIR) / first_peak(HIR) # if materials are the same only (comparison below on frequency domain)
 #HIR *= g
@@ -109,13 +120,6 @@ for sos, name in [(sos_lp, 'low'), (sos_hp, 'high')]:
 	plt.margins(0, 0.1)
 	plt.grid(which='both', axis='both')
 	plt.axvline(f_cutoff, color='green') # cutoff frequency
-
-# PCS source lead-in (main3D.cu): sigma_s = 0.425/f_cutoff, ts_ = ceil(8.5*sigma_s/dt_half).
-# ISM/RT emit at t=0, so shift HIR right by ts_ to match the FVM's delayed direct.
-sigma_s = 0.425 / f_cutoff_sim
-ts_ = np.ceil(8.5 * sigma_s / dt_half)
-lag = int(round(ts_ * dt_half * fs))      # ts_ on the dt_half grid -> samples at 44100
-HIR = np.roll(HIR, lag)
 
 plt.figure()
 plt.plot(LIR,'b')
@@ -172,4 +176,6 @@ plt.xlabel('Hz'); plt.ylabel('SPL [dB]'); plt.legend(); plt.grid(which='both')
 plt.title('Modal check: IR peaks vs f_lmn (effective room)')
 
 plt.show()
+
+
 
