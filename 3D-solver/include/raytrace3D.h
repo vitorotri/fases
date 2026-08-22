@@ -428,7 +428,18 @@ inline static void rt_trace_late(const RTScene& S,
         const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]); // source in solver space
         const float ps = (s<(int)src_pressure.size()) ? src_pressure[(size_t)s] : 1.f;                    // this source's pressure
         const float Kdiff = ps*ps/(4.f*M_PI*(float)Nrays); // w_ray = ps^2/(4 pi Nrays): energy carried by one ray
-        const float Kspec = Kdiff*RT_INVPI/R2;               // w_ray/(pi R^2): energy per specular detection-sphere crossing
+        // Equivalent to Reuben Thomas's thesis equation (6.5): for small gamma --> gamma approx sin(gamma)
+        // approx R/r, where R is detector's radius, r is distance from src to rec, so, expanding in Taylor
+        // cos(gamma) approx 1 - gamma² / 2 + O(h³), and using that sin(gamma) approx R/r, then using the
+        // expansion,
+        // 1 - cos(gamma) approx gamma² = R²/(2 r²).
+        // Plugging into the denominator of (6.5) ==> 2pi r² N (1 - cos(gamma))) = 2pi r² N R² / (2 r²) =
+        // = pi N R², so
+        // Er = Es / (pi N R²).
+        // Kspec is energy --> ps² / (4 pi² N R²), later we multiply by 4 pi on main, so
+        // Kspec_final = ps² / (pi N R²), showing the same formula as Thomas. Q.E.D.. 
+        
+        const float Kspec = Kdiff*RT_INVPI/R2; // w_ray/(pi R^2): energy per specular detection-sphere crossing
 
         #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic)
