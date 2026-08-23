@@ -24,6 +24,7 @@ Key bindings (GL viewport):
 """
 
 import sys, os, math, glob
+from shift_obj import shift_to_positive
 from pathlib import Path
 from datetime import datetime
 import subprocess
@@ -699,7 +700,6 @@ class GLViewer(QOpenGLWidget):
         self._glyph_queue = []            # collected by _draw_sources/_receivers
         self._draw_gizmo()   # replaces grid + world axes
         self._draw_mesh()
-        self._draw_axes()
         self._draw_rays()
         self._draw_sources()
         self._draw_receivers()
@@ -711,6 +711,7 @@ class GLViewer(QOpenGLWidget):
         self._draw_hud()
         # origin marker + source/receiver glyphs, drawn last as a QPainter overlay
         gp = QPainter(self)
+        self._paint_axes(gp)
         self._paint_origin(gp)
         if self._glyph_queue:
             self._paint_point_glyphs(gp)
@@ -970,23 +971,63 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
-    def _draw_axes(self):
-        """Thin grey positive x/y/z axes running from the origin to ~infinity.
-        Thinner than the wireframe, mid-grey so it reads in Dark and Light. The
-        parser keeps the scene on the positive side, so axes are positive-only."""
+    @staticmethod
+    def _clip_seg(x0, y0, x1, y1, W, H):
+        """Liang-Barsky clip of segment (x0,y0)-(x1,y1) to [0,W]x[0,H].
+        Returns (cx0,cy0,cx1,cy1) or None if the segment misses the viewport."""
+        dx, dy = x1-x0, y1-y0
+        p = (-dx, dx, -dy, dy)
+        q = (x0, W-x0, y0, H-y0)
+        u0, u1 = 0.0, 1.0
+        for pi, qi in zip(p, q):
+            if pi == 0:
+                if qi < 0:
+                    return None            # parallel and outside
+            else:
+                t = qi/pi
+                if pi < 0:
+                    if t > u1: return None
+                    if t > u0: u0 = t
+                else:
+                    if t < u0: return None
+                    if t < u1: u1 = t
+        return (x0+u0*dx, y0+u0*dy, x0+u1*dx, y0+u1*dy)
+
+    def _paint_axes(self, painter):
+        """Thin grey positive x/y/z axes from the origin, drawn in SCREEN space so
+        they truly run to the window edge. A 3D half-axis that recedes converges to
+        an on-screen vanishing point (and a w=0 endpoint dies at the near plane), so
+        no world-space length reaches the edge -- we project the origin + a near
+        sample on each axis, then extend that 2D ray and clip it to the viewport."""
         if not self._axes_visible:
             return
-        glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE)
-        glLineWidth(1.0)                 # thinner than the 1.3/1.6 wireframe
-        glColor4f(0.5, 0.5, 0.5, 1.0)    # mid-grey, scheme-independent
-        # w=0 endpoint = point at infinity in the axis direction; pipeline clips it at the
-        # frustum, so each axis really reaches the screen edge (no finite length to "end").
-        glBegin(GL_LINES)
-        glVertex3f(0, 0, 0); glVertex4f(1, 0, 0, 0)
-        glVertex3f(0, 0, 0); glVertex4f(0, 1, 0, 0)
-        glVertex3f(0, 0, 0); glVertex4f(0, 0, 1, 0)
-        glEnd()
-        glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
+        W, H = self.width(), self.height()
+        vp = [0, 0, int(W), int(H)]
+        try:
+            ox, oy, oz = gluProject(0.0, 0.0, 0.0, self._mv, self._proj, vp)
+        except Exception:
+            return
+        if oz < 0.0 or oz > 1.0:               # origin behind camera
+            return
+        L = max(self._dist, 1e-3) * 0.02       # near sample: same depth, in front
+        diag = 2.0 * (W*W + H*H) ** 0.5
+        painter.setPen(QPen(QColor(128, 128, 128), 1.0))
+        sx0, sy0 = ox, H - oy
+        for dx, dy, dz in ((1, 0, 0), (0, 1, 0), (0, 0, 1)):
+            try:
+                ax, ay, az = gluProject(dx*L, dy*L, dz*L, self._mv, self._proj, vp)
+            except Exception:
+                continue
+            if az < 0.0 or az > 1.0:           # sample crossed the near plane
+                continue                        # ponytail: skip; axis not sanely visible
+            sdx, sdy = ax - ox, oy - ay        # +axis screen direction (y flipped)
+            n = (sdx*sdx + sdy*sdy) ** 0.5
+            if n < 1e-6:                        # axis points straight at camera
+                continue
+            sdx, sdy = sdx/n*diag, sdy/n*diag
+            seg = self._clip_seg(sx0, sy0, sx0+sdx, sy0+sdy, W, H)
+            if seg:
+                painter.drawLine(QPointF(seg[0], seg[1]), QPointF(seg[2], seg[3]))
 
     def _outside_domain(self, x, y, z):
         """Return True if (x,y,z) lies outside the scene bounding box."""
@@ -4253,6 +4294,15 @@ class MainWindow(QMainWindow):
         and (if a project is open) record the scene in the manifest. Shared by
         the Load-OBJ button and project-open restore."""
         try:
+            # Never edit the user's original. If the mesh straddles/negatives the
+            # axes, write a shifted COPY next to it and load that; else load as-is.
+            base, ext = os.path.splitext(path)
+            shifted = base + "_positive" + ext
+            shift = shift_to_positive(path, shifted)   # writes `shifted` only if a shift is needed
+            if shift != (0.0, 0.0, 0.0):
+                print(f"[OBJ] off the positive octant; loading shifted copy "
+                      f"(by {shift}): {os.path.basename(shifted)}")
+                path = shifted
             verts, groups = parse_obj(path)
         except Exception as ex:
             QMessageBox.critical(self, "OBJ error", str(ex)); return
