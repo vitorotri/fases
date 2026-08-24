@@ -1450,6 +1450,7 @@ int main(int argc, char *argv[]){
 		// arrival's magnitude with a random sign, deposit(tau, rt_sign(...)*mag, ...). During the
 		// energy-echogram validation below it is bypassed (arrivals hard-binned as energy), hence
 		// uncomment the deposit() lines to switch the ISM to the timed path.
+		
 		auto deposit = [&](float tau, float g, int rr, float dist){
 			int tt = (int)tau;
 			for (int n0 = -(int)(0.5*Nw); n0 <= (int)(0.5*Nw); n0++){
@@ -1459,6 +1460,7 @@ int main(int argc, char *argv[]){
 				p_hf[flat(nn,rr,Nt)] += g * 0.5 * (1.0 + std::cos(2.0*M_PI*xx/Nw)) * sinc(M_PI*xx);
 			}
 		};
+		
 
 		// for each receiver
 		for (int r = 0; r < Q.Nr; r++){
@@ -1559,12 +1561,13 @@ int main(int argc, char *argv[]){
 			unsigned rid = 0; // antithetic pairing over non-zero bins: caps same-sign runs at 2, independent of t_cross/order
 			for (int t = 1; t < (int)Nt; t++){
 				//float e = e_ism[t]; // amplitude validation (comment below)
-				float e = e_diff[((size_t)b*Q.Nr + r)*Nt + t];
+				float e = 0.0;
+				//if (t > t_cross)
+				e += e_diff[((size_t)b*Q.Nr + r)*Nt + t];
 				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;
 				//p_hf[flat(t, r, Nt)] += (float)std::sqrt(e); // amplitude validation
-				p_hf[flat(t, r, Nt)] += asign(rid++) * (float)std::sqrt(e);
-				p_hf[flat(t, r, Nt)] *= 4.0*M_PI; // tied to Lp,1m
+				p_hf[flat(t, r, Nt)] += 4.0*M_PI * asign(rid++) * (float)std::sqrt(e); // tied to Lp,1m
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
