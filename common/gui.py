@@ -2272,7 +2272,9 @@ class MaterialPanel(QWidget):
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tbl.itemSelectionChanged.connect(self._on_row_selected)
-        self._tbl.itemChanged.connect(lambda *_: self._on_edit())
+        self._undo_stack = []      # Ctrl+Z: full-table snapshots (small table, cheap)
+        self._prev = None          # last settled state, pushed before the next change
+        self._tbl.itemChanged.connect(self._on_item_changed)
         # RMB on a layer row: optional predefined-material lookup. Existing
         # manual typing, paste, plotting, save and fit behaviour stays unchanged.
         self._tbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2349,9 +2351,26 @@ class MaterialPanel(QWidget):
         """)
         choose = menu.addAction("\u26C1  Choose material from predefined list…")
 
+        # Fill actions on a numeric cell: copy this value across rows / bands.
+        col = item.column()
+        bands = len(OCTAVE_BANDS)
+        fills = {}
+        if 1 <= col <= bands + 1:                     # alpha cols or the Scatter col
+            menu.addSeparator()
+            fills["rows_above"] = menu.addAction("Apply value to rows above")
+            fills["rows_below"] = menu.addAction("Apply value to rows below")
+            if 1 <= col <= bands:                     # column fills only across alpha bands
+                fills["cols_behind"] = menu.addAction("Apply value to columns behind")
+                fills["cols_after"]  = menu.addAction("Apply value to columns after")
+
         chosen = menu.exec(self._tbl.viewport().mapToGlobal(pos))
         if chosen == choose:
             self._select_material_from_ref(row)
+        else:
+            for mode, act in fills.items():
+                if chosen == act:
+                    self._apply_fill(row, col, mode)
+                    break
 
     def _read_materials_ref(self):
         """Return [(file_name, display_name, values)] parsed from MATERIALS_FILE.
@@ -2551,6 +2570,8 @@ class MaterialPanel(QWidget):
             self._tbl.selectRow(0)
         else:
             self._clear_plot()
+        self._undo_stack.clear()          # fresh table -> fresh undo history
+        self._prev = self._snapshot()
 
     # ── ALL.mat : central hard/soft registry ─────────────────
     # One file, one line per material: "<name>  <flag>" (0=hard, 1=soft).
@@ -2699,6 +2720,78 @@ class MaterialPanel(QWidget):
         # a value changed: only replot the curve, no reselection signal
         self._replot_current()
 
+    # ── Ctrl+Z undo (full-table snapshots) ──
+    def _snapshot(self):
+        """Text of every cell + per-row soft flag. Small table -> whole-state snapshot."""
+        rows = []
+        for r in range(self._tbl.rowCount()):
+            cells = [self._tbl.item(r, c).text() if self._tbl.item(r, c) else ""
+                     for c in range(self._tbl.columnCount())]
+            rows.append((cells, self._row_soft(r)))
+        return rows
+
+    def _push_undo(self):
+        if self._prev is not None:
+            self._undo_stack.append(self._prev)
+            if len(self._undo_stack) > 50:
+                self._undo_stack.pop(0)
+        self._prev = self._snapshot()
+
+    def _on_item_changed(self, *_):
+        # a single manual/programmatic cell edit: record pre-edit state, then replot
+        self._push_undo()
+        self._on_edit()
+
+    def _restore(self, snap):
+        self._tbl.blockSignals(True)
+        for r, (cells, soft) in enumerate(snap):
+            if r >= self._tbl.rowCount():
+                break
+            for c, txt in enumerate(cells):
+                it = self._tbl.item(r, c)
+                if it is None:
+                    self._tbl.setItem(r, c, QTableWidgetItem(txt))
+                elif it.text() != txt:
+                    it.setText(txt)
+            self._set_row_soft(r, soft)
+        self._tbl.blockSignals(False)
+        self._prev = self._snapshot()
+        self._replot_current()
+
+    def _undo(self):
+        if not self._undo_stack:
+            return
+        self._restore(self._undo_stack.pop())
+
+    def _apply_fill(self, r, c, mode):
+        """RMB fills: copy cell (r,c) value to rows above/below (same col) or
+        columns behind/after (same row, alpha cols only). One undo step."""
+        src = self._tbl.item(r, c)
+        if src is None:
+            return
+        val = src.text()
+        try:
+            float(val)
+        except ValueError:
+            return
+        bands = len(OCTAVE_BANDS)
+        if mode == "rows_above":    rows, cols = range(0, r), [c]
+        elif mode == "rows_below":  rows, cols = range(r + 1, self._tbl.rowCount()), [c]
+        elif mode == "cols_behind": rows, cols = [r], range(1, c)
+        elif mode == "cols_after":  rows, cols = [r], range(c + 1, bands + 1)
+        else:
+            return
+        self._push_undo()
+        self._tbl.blockSignals(True)
+        for rr in rows:
+            if self._tbl.item(rr, 0) is None:
+                continue
+            for cc in cols:
+                self._tbl.setItem(rr, cc, QTableWidgetItem(val))
+        self._tbl.blockSignals(False)
+        self._prev = self._snapshot()
+        self._replot_current()
+
     def _row_values(self, r):
         vals = []
         for c in range(1, len(OCTAVE_BANDS) + 1):
@@ -2734,6 +2827,9 @@ class MaterialPanel(QWidget):
         if e.matches(QKeySequence.StandardKey.Paste):
             self._paste_clipboard()
             e.accept(); return
+        if e.matches(QKeySequence.StandardKey.Undo):
+            self._undo()
+            e.accept(); return
         super().keyPressEvent(e)
 
     def _copy_selection(self):
@@ -2745,6 +2841,7 @@ class MaterialPanel(QWidget):
             return
         start_row = max(self._tbl.currentRow(), 0)
         start_col = max(self._tbl.currentColumn(), 1)  # never overwrite name col by default
+        self._push_undo()                              # paste = one undo step (signals blocked below)
         self._tbl.blockSignals(True)
         for dr, line in enumerate(text.splitlines()):
             if not line.strip():
@@ -2765,6 +2862,7 @@ class MaterialPanel(QWidget):
                     continue
                 self._tbl.setItem(rr, cc, QTableWidgetItem(val))
         self._tbl.blockSignals(False)
+        self._prev = self._snapshot()                  # post-paste is the new settled state
         self._on_row_selected()
         self._status.setText("Pasted values from clipboard.")
 
