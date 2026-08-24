@@ -441,6 +441,7 @@ class GLViewer(QOpenGLWidget):
     pointHovered  = Signal(str, int)                   # kind, index (G-mode hover)
     pointDragStarted = Signal()                        # a grab/drag just began
     coordsChanged = Signal(float, float, float)        # live HUD coords
+    themeToggle   = Signal()                            # RMB "Dark/Light scene" chosen
 
     # placement modes
     MODE_NONE = 0
@@ -498,6 +499,7 @@ class GLViewer(QOpenGLWidget):
         self._hl_rec = -1
         self._glyph_queue = []   # per-frame source/receiver glyph overlay list
         self._corner_widget = None   # optional bottom-left overlay (theme button)
+        self._grid_h = 0.0       # user grid spacing [m]; drives the i,j,k HUD indices
 
         # placement state
         self._mode      = self.MODE_NONE
@@ -1253,7 +1255,9 @@ class GLViewer(QOpenGLWidget):
                                           else "RECEIVER")
                     axis_str = (f"  locked: {self._drag_axis}" if self._drag_axis
                                 else "  (hold X / Y / Z to lock an axis)")
-                    coord_str = f"  x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
+                    ijk = self._ijk_str(p)
+                    coord_str = (f"  x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
+                                 + (f"   [{ijk}]" if ijk else ""))
                     painter = QPainter(self)
                     painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
                     from PySide6.QtCore import QRect
@@ -1276,6 +1280,9 @@ class GLViewer(QOpenGLWidget):
                 # this text has no banner behind it, so flip it with the scheme
                 painter.setPen(QColor(20, 20, 20) if SCENE_LIGHT_MODE
                                else QColor(PAL["subtext"]))
+                ijk = self._ijk_str(p)
+                if ijk:
+                    painter.drawText(10, self.height() - 24, ijk)      # grid indices, stacked above
                 txt = f"x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
                 painter.drawText(10, self.height() - 10, txt)
                 painter.end()
@@ -1284,7 +1291,9 @@ class GLViewer(QOpenGLWidget):
         mode_str = "SOURCE" if self._mode == self.MODE_SRC else "RECEIVER"
         mode_col = SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR
         axis_str = f"  locked: {self._axis_lock}" if self._axis_lock else "  (hold X / Y / Z + drag LMB to lock an axis)"
-        coord_str = f"  x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
+        ijk = self._ijk_str(p)
+        coord_str = (f"  x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
+                     + (f"   [{ijk}]" if ijk else ""))
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
@@ -1594,13 +1603,29 @@ class GLViewer(QOpenGLWidget):
             return True
         return False
 
+    def set_grid_h(self, h):
+        self._grid_h = float(h)
+        self.update()
+
+    def _ijk_str(self, p):
+        """Integer grid indices i,j,k at world point p for the user's grid spacing
+        (origin at 0). '' when no spacing is set yet."""
+        h = self._grid_h
+        if not h or h <= 0.0:
+            return ""
+        return f"i={int(round(p[0]/h))}  j={int(round(p[1]/h))}  k={int(round(p[2]/h))}"
+
     def _scene_menu(self, qpos):
-        """RMB on empty space -> scene options."""
+        """RMB on empty space -> scene options (stacked)."""
         m = QMenu(self)
-        act = m.addAction("Hide axes" if self._axes_visible else "Show axes")
-        if m.exec(self.mapToGlobal(QPoint(int(qpos.x()), int(qpos.y())))) is act:
+        ax = m.addAction("Hide axes" if self._axes_visible else "Show axes")
+        th = m.addAction("Light scene" if not SCENE_LIGHT_MODE else "Dark scene")
+        chosen = m.exec(self.mapToGlobal(QPoint(int(qpos.x()), int(qpos.y()))))
+        if chosen is ax:
             self._axes_visible = not self._axes_visible
             self.update()
+        elif chosen is th:
+            self.themeToggle.emit()
 
     def _find_nearest_point(self, qpos, radius=30.0):
         """Return (kind, idx) of the nearest source/receiver within `radius`
@@ -3147,7 +3172,8 @@ class PointTable(QWidget):
         # overwrite coordinates by accident.
         self._tbl.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked |
-            QAbstractItemView.EditTrigger.SelectedClicked)
+            QAbstractItemView.EditTrigger.SelectedClicked |
+            QAbstractItemView.EditTrigger.CurrentChanged)   # single click -> edit
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
@@ -3660,15 +3686,13 @@ class MainWindow(QMainWindow):
         self._float_prog = DraggableProgress(gl_wrap)
         self._float_prog.move(16, 16)
 
-        # Dark/Light scene toggle, overlaid on the 3D viewport just ABOVE the
-        # bottom-left coordinate readout. Parented to the GL widget so it sits
-        # over the scene; the GL viewer re-anchors it on resize.
-        self._theme_btn = QPushButton("Dark", self._gl)
-        self._theme_btn.setFixedSize(60, 22)
-        self._theme_btn.clicked.connect(self._toggle_scene_theme)
-        self._gl.set_corner_widget(self._theme_btn)   # bottom-left anchoring
-        self._theme_btn.show()
-        self._restyle_scene_theme()        # initial button + hint styling (both now exist)
+        # Dark/Light lives in the RMB scene menu now (stacked with Show/Hide axes);
+        # the viewport emits themeToggle when it's picked. Also feed the grid spacing
+        # to the viewport so the HUD shows i,j,k next to x,y,z.
+        self._gl.themeToggle.connect(self._toggle_scene_theme)
+        self._cfg['h'].valueChanged.connect(self._gl.set_grid_h)
+        self._gl.set_grid_h(self._cfg['h'].value())
+        self._restyle_scene_theme()        # initial hint styling
 
         # status bar
         self._sb = QStatusBar()
@@ -3709,20 +3733,8 @@ class MainWindow(QMainWindow):
         self._gl.update()
 
     def _restyle_scene_theme(self):
-        """Style the Dark/Light button to mirror the scene (background = scene
-        bg, border = wireframe colour, text contrasts) and recolour the
-        placement-hint text so it stays readable in both modes."""
-        def _hex(rgb):
-            return "#%02x%02x%02x" % (int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255))
-        bg_hex   = _hex(SCENE_BG)
-        wire_hex = _hex(WIRE_COLOR)
-        # text contrasts with the background: dark bg -> light text, light bg -> dark
-        txt_hex  = wire_hex                     # wireframe colour already contrasts
-        self._theme_btn.setText("Light" if SCENE_LIGHT_MODE else "Dark")
-        self._theme_btn.setStyleSheet(
-            f"QPushButton{{background:{bg_hex};color:{txt_hex};"
-            f"border:1px solid {wire_hex};border-radius:3px;font-size:10px;}}")
-        # hint text: grey on dark, near-black on light
+        """Recolour the placement-hint text so it stays readable in both scene modes.
+        (The Dark/Light button was replaced by the RMB scene-menu toggle.)"""
         hint_col = "#202020" if SCENE_LIGHT_MODE else PAL["subtext"]
         self._hint_lbl.setStyleSheet(f"color:{hint_col};font-size:9px;")
 
