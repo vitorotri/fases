@@ -535,16 +535,20 @@ z0 = c0 * rho0                              # characteristic impedance of air
 
 dt = C_CFL * h / c0
 
-# Frequency samples (Hz)
+Niter = 30       # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
+N = int(v[5])    # "number of poles" in MATLAB script (here: number of REAL starting poles)
+
+# Frequency samples (Hz). The vector fit places up to N+4 poles; if the grid has fewer
+# points than that the least-squares system is underdetermined -> singular (cond=inf) ->
+# crash. Decouple the count from f_cutoff: keep the old ~5 Hz spacing as a lower bound but
+# FLOOR it well above the pole count, so a low f_cutoff (coarse grid / skipping the
+# wave-based part) still yields a well-conditioned fit.
 f_min = 20.0
 f_max = f_cutoff
 frequency_step = 5.0
 #freq = np.arange(f_min, f_max + 0.5 * frequency_step, frequency_step)  # include f_max robustly
-Npts = int((f_max - f_min)/frequency_step) + 1 # keep about same count as above
+Npts = max(int((f_max - f_min)/frequency_step) + 1, 8*(N + 4) + 1)  # >> pole count, any f_cutoff
 freq = np.logspace(np.log10(f_min), np.log10(f_max), Npts) # log-spaced
-
-Niter = 30       # number of iterations (MATLAB did outer loop; skrf uses max_iterations)
-N = int(v[5])    # "number of poles" in MATLAB script (here: number of REAL starting poles)
 
 # --------------------------------------------------------------------------------
 # Persistent (cross-run) fit cache: a .fit is stamped with a signature of EXACTLY
