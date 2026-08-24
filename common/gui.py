@@ -700,6 +700,7 @@ class GLViewer(QOpenGLWidget):
         self._glyph_queue = []            # collected by _draw_sources/_receivers
         self._draw_gizmo()   # replaces grid + world axes
         self._draw_mesh()
+        self._draw_axes()
         self._draw_rays()
         self._draw_sources()
         self._draw_receivers()
@@ -711,7 +712,6 @@ class GLViewer(QOpenGLWidget):
         self._draw_hud()
         # origin marker + source/receiver glyphs, drawn last as a QPainter overlay
         gp = QPainter(self)
-        self._paint_axes(gp)
         self._paint_origin(gp)
         if self._glyph_queue:
             self._paint_point_glyphs(gp)
@@ -971,63 +971,22 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
-    @staticmethod
-    def _clip_seg(x0, y0, x1, y1, W, H):
-        """Liang-Barsky clip of segment (x0,y0)-(x1,y1) to [0,W]x[0,H].
-        Returns (cx0,cy0,cx1,cy1) or None if the segment misses the viewport."""
-        dx, dy = x1-x0, y1-y0
-        p = (-dx, dx, -dy, dy)
-        q = (x0, W-x0, y0, H-y0)
-        u0, u1 = 0.0, 1.0
-        for pi, qi in zip(p, q):
-            if pi == 0:
-                if qi < 0:
-                    return None            # parallel and outside
-            else:
-                t = qi/pi
-                if pi < 0:
-                    if t > u1: return None
-                    if t > u0: u0 = t
-                else:
-                    if t < u0: return None
-                    if t < u1: u1 = t
-        return (x0+u0*dx, y0+u0*dy, x0+u1*dx, y0+u1*dy)
-
-    def _paint_axes(self, painter):
-        """Thin grey positive x/y/z axes from the origin, drawn in SCREEN space so
-        they truly run to the window edge. A 3D half-axis that recedes converges to
-        an on-screen vanishing point (and a w=0 endpoint dies at the near plane), so
-        no world-space length reaches the edge -- we project the origin + a near
-        sample on each axis, then extend that 2D ray and clip it to the viewport."""
+    def _draw_axes(self):
+        """Thin grey positive x/y/z axes as GL lines from the origin, length scaled by the
+        camera distance so they stay very long and keep expanding as you zoom out. The
+        parser keeps the scene on the positive side, so axes are positive-only."""
         if not self._axes_visible:
             return
-        W, H = self.width(), self.height()
-        vp = [0, 0, int(W), int(H)]
-        try:
-            ox, oy, oz = gluProject(0.0, 0.0, 0.0, self._mv, self._proj, vp)
-        except Exception:
-            return
-        if oz < 0.0 or oz > 1.0:               # origin behind camera
-            return
-        L = max(self._dist, 1e-3) * 0.02       # near sample: same depth, in front
-        diag = 2.0 * (W*W + H*H) ** 0.5
-        painter.setPen(QPen(QColor(128, 128, 128), 1.0))
-        sx0, sy0 = ox, H - oy
-        for dx, dy, dz in ((1, 0, 0), (0, 1, 0), (0, 0, 1)):
-            try:
-                ax, ay, az = gluProject(dx*L, dy*L, dz*L, self._mv, self._proj, vp)
-            except Exception:
-                continue
-            if az < 0.0 or az > 1.0:           # sample crossed the near plane
-                continue                        # ponytail: skip; axis not sanely visible
-            sdx, sdy = ax - ox, oy - ay        # +axis screen direction (y flipped)
-            n = (sdx*sdx + sdy*sdy) ** 0.5
-            if n < 1e-6:                        # axis points straight at camera
-                continue
-            sdx, sdy = sdx/n*diag, sdy/n*diag
-            seg = self._clip_seg(sx0, sy0, sx0+sdx, sy0+sdy, W, H)
-            if seg:
-                painter.drawLine(QPointF(seg[0], seg[1]), QPointF(seg[2], seg[3]))
+        glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE)
+        glLineWidth(1.0)                 # thinner than the wireframe
+        glColor4f(0.5, 0.5, 0.5, 1.0)    # mid-grey, scheme-independent
+        BIG = self._dist * 1e4           # grows with zoom-out -> effectively "very long"
+        glBegin(GL_LINES)
+        glVertex3f(0, 0, 0); glVertex3f(BIG, 0, 0)
+        glVertex3f(0, 0, 0); glVertex3f(0, BIG, 0)
+        glVertex3f(0, 0, 0); glVertex3f(0, 0, BIG)
+        glEnd()
+        glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
 
     def _outside_domain(self, x, y, z):
         """Return True if (x,y,z) lies outside the scene bounding box."""
@@ -4600,6 +4559,99 @@ class MainWindow(QMainWindow):
                 p = os.path.relpath(p, self._proj_root)
             self._bin_le.setText(p)
 
+    # ── GA-only (reuse wave-based) ──────────────────────────────
+    def _wave_sig_path(self):
+        return os.path.join(self._proj_root, "output", ".wave_sig") if self._proj_root else None
+
+    def _wave_fingerprint(self):
+        """{label: sha1} for every input the FVM low-freq IR depends on, hashed on
+        NORMALISED content (comments + surrounding whitespace stripped, blank lines
+        dropped) so the writers' formatting jitter can't cause a false mismatch. Covers
+        config (minus ism_order = index 12 and nrays = index 14, the GA-only knobs),
+        poles.txt, sources (src.txt), receivers (rec.txt), the scene OBJ, and every .mat
+        (layers/surfaces). Scattering (.sctr) is deliberately left out — GA-only.
+        Returns None if config.txt is unreadable."""
+        import hashlib, glob as _glob
+        if not self._proj_root:
+            return None
+        root = self._proj_root
+
+        def norm(path, drop=()):
+            try:
+                out = []
+                for i, raw in enumerate(open(path)):
+                    s = " ".join(raw.split("#")[0].split())   # drop comment, collapse all whitespace
+                    if s and i not in drop:
+                        out.append(s)
+                return "\n".join(out)
+            except Exception:
+                return None
+
+        cfg = norm(os.path.join(root, "config", "config.txt"), drop={12, 14})
+        if cfg is None:
+            return None
+        comps = {
+            "config": cfg,
+            "poles":  norm(os.path.join(root, "config", "poles.txt")) or "",
+            "src":    norm(os.path.join(root, "input", "src", "src.txt")) or "",
+            "rec":    norm(os.path.join(root, "input", "rec", "rec.txt")) or "",
+        }
+        obj = self._obj_path if (self._obj_path and os.path.isfile(self._obj_path)) else None
+        comps["obj"] = (norm(obj) or "") if obj else ""
+        mats = sorted(_glob.glob(os.path.join(root, "input", "mat", "*.mat")))
+        comps["mat"] = "\n".join(f"{os.path.basename(m)}={norm(m)}" for m in mats)
+        return {k: hashlib.sha1(v.encode()).hexdigest()[:12] for k, v in comps.items()}
+
+    def _ir_bins_exist(self):
+        import glob as _glob
+        return bool(self._proj_root and
+                    _glob.glob(os.path.join(self._proj_root, "output", "IR*_*.bin")))
+
+    def _ga_available(self):
+        """True when the current wave fingerprint matches the one stored after the last
+        full run AND the IR*.bin are present. Logs which component differs when it isn't,
+        so a stray full run is never a mystery."""
+        if not self._proj_root:
+            return False
+        fp = self._wave_fingerprint()
+        if fp is None:
+            return False
+        try:
+            stored = dict(l.strip().split("=", 1)
+                          for l in open(self._wave_sig_path()) if "=" in l)
+        except Exception:
+            stored = None
+        if not stored:
+            print(f"[ga] no/empty stored signature at {self._wave_sig_path()} -> full run")
+            return False
+        import glob as _g
+        patt = os.path.join(self._proj_root, "output", "IR*_*.bin")
+        hits = _g.glob(patt)
+        if not hits:
+            print(f"[ga] no IR*_*.bin (glob '{patt}' found 0) -> full run")
+            return False
+        changed = sorted({k for k in fp if fp.get(k) != stored.get(k)} |
+                         {k for k in stored if k not in fp})
+        if changed:
+            print("[ga] wave inputs changed:", ", ".join(changed), "-> full run")
+            return False
+        return True
+
+    def _store_wave_signature(self):
+        """Record the current wave fingerprint (one 'label=hash' line each) after a
+        completed full run — the baseline the next Simulate compares against."""
+        p = self._wave_sig_path()
+        fp = self._wave_fingerprint()
+        if not (p and fp):
+            return
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as f:
+                f.write("\n".join(f"{k}={v}" for k, v in sorted(fp.items())))
+            print(f"[ga] stored wave signature -> {p}")
+        except Exception as e:
+            print(f"[ga] FAILED to store wave signature at {p}: {e}")
+
     def _update_cmd_preview(self):
         if not hasattr(self, '_cmd_preview'): return
         if not self._proj_root:
@@ -4782,7 +4834,16 @@ class MainWindow(QMainWindow):
         self._aural_cmd = [bin_cmd, scene,
                "config/config.txt","input/src/src.txt","input/rec/rec.txt",
                "config/poles.txt"]
+        # DEFAULT to GA-only automatically: if nothing the FVM depends on has changed since
+        # the last full run (and its IR*.bin are present), skip the FVM and reuse them.
+        # Otherwise run the full pipeline (which then re-stamps the wave signature).
+        self._is_ga_only_run = self._ga_available()
+        if self._is_ga_only_run:
+            self._aural_cmd.append("--ga-only")
         self._log.clear()
+        self._log.append("GA-only: wave inputs unchanged — reusing existing IR, skipping the FVM."
+                         if self._is_ga_only_run else
+                         "Full run: wave inputs changed (or no prior IR) — computing the FVM.")
         self._tabs.setCurrentIndex(4)
 
         n_src = len(self._src_tbl.get_points())
@@ -5121,6 +5182,10 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         if rc == 0:
             self._float_prog.setValue(100)
+            # A completed FULL run makes the current wave inputs the reusable baseline,
+            # so the next Simulate with only GA changes will auto-skip the FVM.
+            if not getattr(self, "_is_ga_only_run", False):
+                self._store_wave_signature()
         c = PAL["ok"] if rc == 0 else PAL["err"]
         self._log.append(
             f'<span style="color:{c};">{"[OK]" if rc==0 else "[FAIL]"}  rc={rc}</span>')

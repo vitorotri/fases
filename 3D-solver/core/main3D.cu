@@ -36,11 +36,13 @@ int main(int argc, char *argv[]){
     // single-value binaries for the GUI Setup tab, and exit BEFORE any field
     // allocation / FDTD / ISM. Fast, and needs no poles.txt (T60 uses only .mat alpha).
     bool estimate_only = false;
+    bool ga_only = false;     // --ga-only: skip the FVM time-march, reuse existing IR<rec>_<src>.bin, run ISM/RT only
     bool dump_rays = false;   // --dump-rays [N] [M]: write ray_paths.txt for the GUI overlay and exit
     int  dump_nrays = 0;      // optional ray count after --dump-rays (0 => fall back)
     int  dump_order = 0;      // optional max reflection order after the count (0 => default 5)
     for (int i = 1; i < argc; ++i){
         if (std::strcmp(argv[i], "--estimate")  == 0) estimate_only = true;
+        if (std::strcmp(argv[i], "--ga-only")   == 0) ga_only = true;
         if (std::strcmp(argv[i], "--dump-rays") == 0){
             dump_rays = true;
             if (i+1 < argc) dump_nrays = std::atoi(argv[i+1]);   // 0 if the next token isn't a number
@@ -143,24 +145,36 @@ int main(int argc, char *argv[]){
     
     // Remove stale outputs from the project output directory, not from cwd.
     // S.bin / oid.bin are kept: they double as a cache (see scene_cache.txt below)
+    // --estimate is a read-only query (parse + V + T60) and must NOT touch outputs; the GUI
+    // preflights it before every Simulate, so purging here would delete the IR the GA-only
+    // path means to reuse.
+    if (!estimate_only) {
     for (const char* fn : {"pressureX.bin", "pressureY.bin", "pressureZ.bin",
                            "Iy_X.bin", "Iz_X.bin", "Ix_Y.bin", "Iz_Y.bin", "Ix_Z.bin", "Iy_Z.bin",
                            "header.txt", "pre_header.txt"}) {
+        // --ga-only reuses the prior run's header.txt (broadIR reads it) -> keep it.
+        if (ga_only && (std::strcmp(fn, "header.txt") == 0 ||
+                        std::strcmp(fn, "pre_header.txt") == 0))
+            continue;
         std::remove(out_file(fn).c_str());
     }
     // Purge stale IR/HIR bins: filenames vary by rec/src/band, and a changed cutoff or
     // dt leaves old ones behind (skipped bands never overwritten) -> mismatched lengths.
+    // --ga-only REUSES the FVM IR bins, so purge only the HIR (the GA regenerates those);
+    // deleting IR here would destroy the very low-freq response we mean to reuse.
     {
         std::error_code pec;
         for (auto& e : std::filesystem::directory_iterator(output_dir, pec)) {
             std::string n = e.path().filename().string();
             bool is_hir = n.rfind("HIR", 0) == 0;
             bool is_ir  = n.rfind("IR", 0) == 0;
-            if ((is_hir || is_ir) && n.size() > 4 && n.substr(n.size() - 4) == ".bin")
+            bool purge  = ga_only ? is_hir : (is_hir || is_ir);
+            if (purge && n.size() > 4 && n.substr(n.size() - 4) == ".bin")
                 std::remove(e.path().string().c_str());
         }
     }
-        
+    } // end !estimate_only purge guard
+
     std::string scene_str = scene_path.string();
     const char *path = scene_str.c_str();
     int nObj = 0; // number of objects in the scene (initialization)
@@ -1131,6 +1145,9 @@ int main(int argc, char *argv[]){
 	// open BIN files for writing pressure at multiple receivers
 	std::vector<std::ofstream> files_rec(i_recV.size());
 	// i_recV.size() should be the same as j_recV.size() and k_recV.size()
+	// --ga-only: leave the ofstreams UNOPENED so the existing IR<rec>_<src>.bin are reused,
+	// not truncated. An unopened std::ofstream creates no file and is a no-op on close.
+	if (!ga_only)
 	for (int ct = 0; ct < i_recV.size(); ct++){
     	std::string str = out_file("IR" + std::to_string(ct) + "_" + std::to_string(src_idx) + ".bin");
     	files_rec[ct].open(str, std::ios::out | std::ios::binary);
@@ -1157,7 +1174,8 @@ int main(int argc, char *argv[]){
 	tic = clock();
 
 	// if auralization mode is on, gui side does one simulation per source
-	while(n < Nt){
+	// --ga-only short-circuits the whole FVM time-march (condition false from the start).
+	while(!ga_only && n < Nt){
 				
 		// Launch WENO5 kernel + SSP-RK3
 				
@@ -1300,14 +1318,17 @@ int main(int argc, char *argv[]){
     fclose(file_pX); fclose(file_pY); fclose(file_pZ);
     fclose(file_IyX); fclose(file_IzX); fclose(file_IxY); fclose(file_IzY); fclose(file_IxZ); fclose(file_IyZ);
     
-    FILE *header; // file for data output
-	header = fopen(out_file("header.txt").c_str(), "w");
-	if (header != NULL){
-    	fprintf(header, "%d %d %d %d %f %f %f %d %d %f %s %f %d\n", Nx, Ny, Nz, Nt, Lx, Ly, Lz, pbin_size, anim_step, dt, scene_str.c_str(), h, (int)(tol/h));
-    	fclose(header);
+    // --ga-only reuses the prior run's header.txt (grid/time unchanged); rewriting it here with a
+    // skipped time-march would stamp a wrong pbin_size, so leave the valid one in place.
+    if (!ga_only){
+        FILE *header; // file for data output
+        header = fopen(out_file("header.txt").c_str(), "w");
+        if (header != NULL){
+            fprintf(header, "%d %d %d %d %f %f %f %d %d %f %s %f %d\n", Nx, Ny, Nz, Nt, Lx, Ly, Lz, pbin_size, anim_step, dt, scene_str.c_str(), h, (int)(tol/h));
+            fclose(header);
+        }
+        printf("\n[OK] Printed header.txt for plot.py\n");
     }
-    
-    printf("\n[OK] Printed header.txt for plot.py\n");
     
     // ----- free remaining arrays -----
     
