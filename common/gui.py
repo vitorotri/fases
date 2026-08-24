@@ -31,9 +31,10 @@ import subprocess
 
 import numpy as np
 
-from PySide6.QtCore    import Qt, QThread, Signal, QPoint, QPointF, QEvent, QSettings, QTimer, QSize
+from PySide6.QtCore    import (Qt, QThread, Signal, QPoint, QPointF, QEvent,
+                              QSettings, QTimer, QSize, QVariantAnimation)
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
-                              QPainter, QCursor, QKeySequence,
+                              QPainter, QCursor, QKeySequence, QPolygon,
                               QPixmap, QIcon, QPen, QShortcut)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QDockWidget,
@@ -498,8 +499,8 @@ class GLViewer(QOpenGLWidget):
         self._hl_src = -1
         self._hl_rec = -1
         self._glyph_queue = []   # per-frame source/receiver glyph overlay list
-        self._corner_widget = None   # optional bottom-left overlay (theme button)
         self._grid_h = 0.0       # user grid spacing [m]; drives the i,j,k HUD indices
+        self._hud_left = 0       # left inset [px] so the bottom-left HUD clears the tab panel
 
         # placement state
         self._mode      = self.MODE_NONE
@@ -644,21 +645,6 @@ class GLViewer(QOpenGLWidget):
 
     def resizeGL(self, w, h):
         glViewport(0, 0, w, h)
-
-    def set_corner_widget(self, w):
-        """Register a child widget to keep pinned at the bottom-left corner,
-        just above the coordinate HUD (10 px in, ~30 px up from the bottom)."""
-        self._corner_widget = w
-        self._anchor_corner_widget()
-
-    def _anchor_corner_widget(self):
-        w = self._corner_widget
-        if w is not None:
-            w.move(10, self.height() - w.height() - 26)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._anchor_corner_widget()
 
     def _setup_camera(self):
         glMatrixMode(GL_PROJECTION)
@@ -1280,11 +1266,12 @@ class GLViewer(QOpenGLWidget):
                 # this text has no banner behind it, so flip it with the scheme
                 painter.setPen(QColor(20, 20, 20) if SCENE_LIGHT_MODE
                                else QColor(PAL["subtext"]))
+                x0 = 10 + self._hud_left       # clear the tab panel when it is open
                 ijk = self._ijk_str(p)
                 if ijk:
-                    painter.drawText(10, self.height() - 24, ijk)      # grid indices, stacked above
+                    painter.drawText(x0, self.height() - 24, ijk)      # grid indices, stacked above
                 txt = f"x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
-                painter.drawText(10, self.height() - 10, txt)
+                painter.drawText(x0, self.height() - 10, txt)
                 painter.end()
             return
         p = self._cursor_world
@@ -1605,6 +1592,10 @@ class GLViewer(QOpenGLWidget):
 
     def set_grid_h(self, h):
         self._grid_h = float(h)
+        self.update()
+
+    def set_hud_left(self, px):
+        self._hud_left = int(px)
         self.update()
 
     def _ijk_str(self, p):
@@ -3487,6 +3478,34 @@ class FillTabBar(QTabBar):
         self.updateGeometry()
 
 
+class ChamferTabBar(FillTabBar):
+    """FillTabBar (stretches tabs to fill the width) but each tab is painted with only
+    its TWO TOP corners cut off diagonally (bottom corners stay square). CUT = cut [px]."""
+    CUT = 7
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setFont(self.font())
+        c = self.CUT
+        for i in range(self.count()):
+            r = self.tabRect(i).adjusted(1, 1, -1, -1)
+            sel = (i == self.currentIndex())
+            poly = QPolygon([
+                QPoint(r.left(),    r.top()),      # top-left square
+                QPoint(r.right()-c, r.top()),      # top edge, before the right cut
+                QPoint(r.right(),   r.top()+c),    # top-right diagonal (the only cut)
+                QPoint(r.right(),   r.bottom()),   # bottom-right square
+                QPoint(r.left(),    r.bottom()),   # bottom-left square
+            ])
+            p.setPen(QPen(QColor(PAL["border"]), 1))
+            p.setBrush(QColor(PAL["accent"] if sel else PAL["panel"]))
+            p.drawPolygon(poly)
+            p.setPen(QColor(PAL["bg"] if sel else PAL["text"]))
+            p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), self.tabText(i))
+        p.end()
+
+
 class DraggableProgress(QWidget):
     """
     A small progress bar pinned to the top-left corner of the 3D viewport.
@@ -3555,7 +3574,24 @@ class MainWindow(QMainWindow):
                     step = -1 if e.key() == Qt.Key.Key_Backtab else 1
                     self._tabs.setCurrentIndex((cur + step) % n)
                 return True   # consume so focus traversal does not also fire
+        # Auto-hide panel: any interaction with the tabs restarts the inactivity countdown;
+        # scene-only work lets it run down. A central resize re-centres the grip.
+        if hasattr(self, "_panel_idle"):
+            t = e.type()
+            if t in (QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress, QEvent.Type.Wheel):
+                if self._panel_open and self._widget_in_tabs(obj):
+                    self._panel_idle.start()
+            elif t == QEvent.Type.Resize and obj is self._central:
+                self._layout_panel()           # keep the overlay panel + grip full-height
         return super().eventFilter(obj, e)
+
+    def _widget_in_tabs(self, w):
+        """True if QObject w is the tab panel or a descendant of it."""
+        while w is not None:
+            if w is self._tabs:
+                return True
+            w = w.parent()
+        return False
 
     def _apply_theme(self):
         pal = QPalette()
@@ -3613,6 +3649,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         central = QWidget()
+        self._central = central
         self.setCentralWidget(central)
         root_lay = QHBoxLayout(central)
         root_lay.setContentsMargins(6,6,6,6); root_lay.setSpacing(6)
@@ -3658,20 +3695,23 @@ class MainWindow(QMainWindow):
         bar_wrap.setFixedHeight(24)
         bar_wrap.setLayout(place_bar)
         gl_vlay.addWidget(bar_wrap)
+        self._place_bar = place_bar     # left margin follows the panel so it isn't covered
 
         # tabs panel on the LEFT, GL viewport on the RIGHT
         self._tabs = QTabWidget()
         # Custom tab bar that divides the full width across the tabs so the last
         # tab ends flush with the panel edge (set BEFORE adding any tabs).
-        self._tabs.setTabBar(FillTabBar())
+        self._tabs.setTabBar(ChamferTabBar())
         self._tabs.setUsesScrollButtons(False)        # no arrows
         self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
-        # Fixed-width panel: not user-resizable (no splitter handle to drag) and
-        # its width never changes on maximize, so the tabs always fill it exactly.
-        self._tabs.setFixedWidth(540)   # widened to fit the Material tab's Scatter column
-        # Layout order: panel (fixed) on the left, GL viewport (stretches) right.
-        root_lay.addWidget(self._tabs)                 # left, fixed width
-        root_lay.addWidget(gl_wrap, stretch=1)         # right, takes the rest
+        # Auto-hide sliding panel: the panel is a FIXED-width overlay on top of the (full-
+        # width) viewport. It is TRANSLATED left off-screen to hide (so the tabs keep their
+        # proportions, no squish) and slid back when the left grip strip is clicked.
+        self._PANEL_W = 540   # fixed panel width (fits the Material tab's Scatter column)
+        self._tabs.setParent(self._central)
+        self._tabs.setFixedWidth(self._PANEL_W)
+        # Only the GL viewport goes in the layout; the panel floats over its left side.
+        root_lay.addWidget(gl_wrap, stretch=1)         # fills; panel overlays its left
 
 		# append "\uFE0E" in front of symbol to stay monochrome
         self._tabs.addTab(self._build_scene_tab(),   "🗂\uFE0E  Scene")
@@ -3693,6 +3733,32 @@ class MainWindow(QMainWindow):
         self._cfg['h'].valueChanged.connect(self._gl.set_grid_h)
         self._gl.set_grid_h(self._cfg['h'].value())
         self._restyle_scene_theme()        # initial hint styling
+
+        # ── auto-hide sliding tab panel (translate the fixed-width overlay) ──
+        self._panel_open = True
+        self._panel_x = 0                    # current left edge; 0 = shown, -_PANEL_W = hidden
+        self._panel_anim = QVariantAnimation(self)
+        self._panel_anim.setDuration(240)
+        self._panel_anim.valueChanged.connect(self._on_panel_slide)
+        # Invisible "near-it" hotzone at the left edge (no button): click anywhere in this
+        # strip of empty scene and the panel slides back out. Active only while hidden.
+        self._GRIP_W = 48                    # width of the reopen hotzone [px]
+        self._panel_grip = QPushButton(self._central)
+        self._panel_grip.setFlat(True)
+        self._panel_grip.setStyleSheet("QPushButton{background:transparent;border:none;}")
+        self._panel_grip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._panel_grip.clicked.connect(self._show_panel)
+        self._panel_grip.hide()
+        # idle timer: slides the panel shut after inactivity ON THE TABS (scene-only work
+        # lets it run down); reset in eventFilter on any tab interaction.
+        # >>> EDIT HERE to change the auto-hide delay <<<
+        self.PANEL_HIDE_SECONDS = 10
+        self._panel_idle = QTimer(self)
+        self._panel_idle.setSingleShot(True)
+        self._panel_idle.setInterval(int(self.PANEL_HIDE_SECONDS * 1000))
+        self._panel_idle.timeout.connect(self._hide_panel)
+        self._panel_idle.start()
+        self._tabs.show(); self._tabs.raise_()
 
         # status bar
         self._sb = QStatusBar()
@@ -3726,6 +3792,47 @@ class MainWindow(QMainWindow):
         self._sb.showMessage("Undid last source/receiver change.")
 
     # ── placement mode ───────────────────────────────────────
+    # ── auto-hide sliding tab panel (translate the fixed-width overlay) ──
+    def _layout_panel(self):
+        """Keep the overlay panel full-height at its current x, the reopen hotzone docked
+        to the left edge, and push the scene's Src/Rec bar + HUD text clear of the panel
+        (indent them by the panel's on-screen right edge) so it never covers them."""
+        h = self._central.height()
+        self._tabs.setGeometry(self._panel_x, 0, self._PANEL_W, h)
+        self._tabs.raise_()
+        self._panel_grip.setGeometry(0, 0, self._GRIP_W, h)
+        if not self._panel_open:
+            self._panel_grip.raise_()
+        vis = max(0, self._panel_x + self._PANEL_W)    # panel's right edge on screen (0 hidden)
+        m = self._place_bar.contentsMargins()
+        self._place_bar.setContentsMargins(vis, m.top(), m.right(), m.bottom())
+        self._gl.set_hud_left(vis)
+
+    def _on_panel_slide(self, v):
+        self._panel_x = int(v)
+        self._layout_panel()
+
+    def _animate_panel(self, target_x):
+        self._panel_anim.stop()
+        self._panel_anim.setStartValue(self._panel_x)
+        self._panel_anim.setEndValue(target_x)
+        self._panel_anim.start()
+
+    def _hide_panel(self):
+        if not self._panel_open:
+            return
+        self._panel_open = False
+        self._panel_grip.show(); self._panel_grip.raise_()   # strip becomes clickable
+        self._animate_panel(-self._PANEL_W)                  # slide fully off to the left
+
+    def _show_panel(self):
+        if self._panel_open:
+            return
+        self._panel_open = True
+        self._panel_grip.hide()
+        self._animate_panel(0)
+        self._panel_idle.start()               # restart the inactivity countdown
+
     def _toggle_scene_theme(self):
         """Flip the viewport between Dark and Light and repaint."""
         set_scene_mode(not SCENE_LIGHT_MODE)
