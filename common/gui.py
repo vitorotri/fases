@@ -687,8 +687,8 @@ class GLViewer(QOpenGLWidget):
         self._setup_camera()
         self._glyph_queue = []            # collected by _draw_sources/_receivers
         self._draw_gizmo()   # replaces grid + world axes
+        self._draw_axes()    # before the mesh so the wireframe paints on top (less z-fighting)
         self._draw_mesh()
-        self._draw_axes()
         self._draw_rays()
         self._draw_sources()
         self._draw_receivers()
