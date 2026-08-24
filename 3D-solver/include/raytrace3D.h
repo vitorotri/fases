@@ -560,7 +560,10 @@ inline static void rt_trace_late(const RTScene& S,
                 // energy keeps bouncing (multiple scattering) and the tail decays at the
                 // absorption-governed rate for any s.
                 float alive=0.f;
-                for(int b = 0;b < RT_NBANDS; b++){ Rp[b] = Rrefl[b]; alive = std::max(alive, Rp[b]); }
+                for(int b = 0;b < RT_NBANDS; b++){
+                	Rp[b] = Rrefl[b];
+                	alive = std::max(alive, Rp[b]);
+                }
                 if(alive < Rp_min) break;
 
                 // ---- STOCHASTIC direction: draw once with the GLOBAL s (one scalar per surface,
