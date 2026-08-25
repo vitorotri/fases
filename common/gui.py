@@ -737,11 +737,27 @@ class GLViewer(QOpenGLWidget):
             'z': [(mn[0], mn[1], z0), (mx[0], mn[1], z0), (mx[0], mx[1], z0), (mn[0], mx[1], z0)],
         }
         tc = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        # sort planes BACK-TO-FRONT by projected depth of their centre, so the nearer plane
+        # composites over the farther one (fixed x,y,z order made z always look in front).
+        cen = {'x': (x0, (mn[1]+mx[1])*0.5, (mn[2]+mx[2])*0.5),
+               'y': ((mn[0]+mx[0])*0.5, y0, (mn[2]+mx[2])*0.5),
+               'z': ((mn[0]+mx[0])*0.5, (mn[1]+mx[1])*0.5, z0)}
+        vp = [0, 0, int(self.width()), int(self.height())]
+        def _depth(ax):
+            try:
+                return gluProject(cen[ax][0], cen[ax][1], cen[ax][2], self._mv, self._proj, vp)[2]
+            except Exception:
+                return 0.0
+        order = sorted(('x', 'y', 'z'), key=_depth, reverse=True)   # far first, near last
         glDisable(GL_LIGHTING); glEnable(GL_TEXTURE_2D)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glDepthMask(GL_FALSE)
+        # depth-WRITE the visible wavefronts so intersecting planes occlude each other
+        # per-pixel; alpha-test drops the transparent silence so it doesn't write depth and
+        # hide the plane behind it. This is what actually fixes front/back at the crossings.
+        glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.06)
+        glDepthMask(GL_TRUE)
         glColor4f(1, 1, 1, 1)
-        for ax in ('x', 'y', 'z'):
+        for ax in order:
             if not self._plane_vis[ax] or ax not in self._anim:
                 continue
             frame = self._anim[ax][self._anim_frame % len(self._anim[ax])]
@@ -758,7 +774,8 @@ class GLViewer(QOpenGLWidget):
             for v, (s, t) in zip(quads[ax], tc):
                 glTexCoord2f(s, t); glVertex3f(*v)
             glEnd()
-        glDisable(GL_TEXTURE_2D); glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_LIGHTING)
+        glDisable(GL_TEXTURE_2D); glDisable(GL_ALPHA_TEST)
+        glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_LIGHTING)
 
     def exit_placement_mode(self):
         self._mode      = self.MODE_NONE
@@ -4104,6 +4121,12 @@ class MainWindow(QMainWindow):
                             self._slice_sb['z'].value())
 
     # ── slice-pressure animation ──
+    def _toggle_all_planes(self):
+        all_on = all(cb.isChecked() for cb in self._plane_chk.values())
+        for cb in self._plane_chk.values():
+            cb.setChecked(not all_on)           # drives set_plane_visible via toggled
+        self._planes_all_btn.setText("Show all" if all_on else "Hide all")
+
     def _on_prange(self, _=None):
         self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
 
@@ -4269,9 +4292,9 @@ class MainWindow(QMainWindow):
         toggle_btn = QPushButton("Toggle")
         toggle_btn.clicked.connect(self._toggle_selected_vis)
         vis_row.addWidget(toggle_btn)
-        for lbl, fn in [("Show all", lambda: self._set_all_vis(True)),
-                        ("Hide all", lambda: self._set_all_vis(False))]:
-            b = QPushButton(lbl); b.clicked.connect(fn); vis_row.addWidget(b)
+        self._layers_all_btn = QPushButton("Hide all")   # one button, name flips with state
+        self._layers_all_btn.clicked.connect(self._toggle_all_layers)
+        vis_row.addWidget(self._layers_all_btn)
         vis_row.addStretch(); lay.addLayout(vis_row)
 
         lay.addWidget(QLabel("Material — α per octave band [Hz] (click a row to plot; Ctrl+V to paste):"))
@@ -4483,33 +4506,44 @@ class MainWindow(QMainWindow):
         an.addWidget(QLabel("fps:"), 0, 0)
         self._fps = QSpinBox(); self._fps.setRange(1, 240); self._fps.setValue(24)
         an.addWidget(self._fps, 0, 1)
-        # which planes show / animate (whichever are on)
-        an.addWidget(QLabel("Show:"), 0, 3)
-        self._plane_chk = {}
-        for axis, col in (('x', 4), ('y', 5), ('z', 6)):
-            cb = QCheckBox(axis.upper()); cb.setChecked(True)
-            cb.toggled.connect(lambda on, a=axis: self._gl.set_plane_visible(a, on))
-            an.addWidget(cb, 0, col); self._plane_chk[axis] = cb
 
         an.addWidget(QLabel("Slice planes [m]  (or pick in scene: Slice [L])"), 1, 0, 1, 7)
         self._slice_sync = False        # guard: suppress field->gl while syncing gl->field
         self._slice_sb = {}
-        for axis, col in (('x', 0), ('y', 2), ('z', 4)):
-            an.addWidget(QLabel(f"{axis}0:"), 2, col)
+        srow = QHBoxLayout(); srow.setSpacing(4)
+        for axis in ('x', 'y', 'z'):
+            srow.addWidget(QLabel(f"{axis}0:"))
             sb = QDoubleSpinBox(); sb.setRange(-1e4, 1e4); sb.setDecimals(3); sb.setSingleStep(0.05)
-            sb.valueChanged.connect(self._on_slice_field)
-            an.addWidget(sb, 2, col + 1)
-            self._slice_sb[axis] = sb
+            sb.setMaximumWidth(90); sb.valueChanged.connect(self._on_slice_field)
+            srow.addWidget(sb); self._slice_sb[axis] = sb
+        srow.addStretch(1)
+        an.addLayout(srow, 2, 0, 1, 7)
 
         # pressure colour range [Pa] for the animation
-        an.addWidget(QLabel("Pressure range [Pa]:"), 3, 0, 1, 2)
-        self._pmin = QDoubleSpinBox(); self._pmin.setRange(-1e6, 1e6); self._pmin.setDecimals(4); self._pmin.setValue(-0.5)
-        self._pmax = QDoubleSpinBox(); self._pmax.setRange(-1e6, 1e6); self._pmax.setDecimals(4); self._pmax.setValue(0.5)
+        prow = QHBoxLayout(); prow.setSpacing(4)
+        prow.addWidget(QLabel("Pressure range [Pa]:"))
+        self._pmin = QDoubleSpinBox(); self._pmin.setRange(-1e6, 1e6); self._pmin.setDecimals(4)
+        self._pmin.setValue(-0.5); self._pmin.setMaximumWidth(90)
+        self._pmax = QDoubleSpinBox(); self._pmax.setRange(-1e6, 1e6); self._pmax.setDecimals(4)
+        self._pmax.setValue(0.5); self._pmax.setMaximumWidth(90)
         self._pmin.valueChanged.connect(self._on_prange); self._pmax.valueChanged.connect(self._on_prange)
-        an.addWidget(self._pmin, 3, 2); an.addWidget(QLabel("to"), 3, 3); an.addWidget(self._pmax, 3, 4)
+        prow.addWidget(self._pmin); prow.addWidget(QLabel("to")); prow.addWidget(self._pmax)
+        prow.addStretch(1)
+        an.addLayout(prow, 3, 0, 1, 7)
+
+        # which planes show / animate (whichever are on) + one show/hide-all toggle
+        an.addWidget(QLabel("Show:"), 4, 0)
+        self._plane_chk = {}
+        for axis, col in (('x', 1), ('y', 2), ('z', 3)):
+            cb = QCheckBox(axis.upper()); cb.setChecked(True)
+            cb.toggled.connect(lambda on, a=axis: self._gl.set_plane_visible(a, on))
+            an.addWidget(cb, 4, col); self._plane_chk[axis] = cb
+        self._planes_all_btn = QPushButton("Hide all")
+        self._planes_all_btn.clicked.connect(self._toggle_all_planes)
+        an.addWidget(self._planes_all_btn, 4, 4)
 
         # colour palette for the animation
-        an.addWidget(QLabel("Palette:"), 4, 0)
+        an.addWidget(QLabel("Palette:"), 5, 0)
         from PySide6.QtWidgets import QRadioButton, QButtonGroup
         self._pal_group = QButtonGroup(self)
         rb_c = QRadioButton("Colour"); rb_c.setChecked(True)
@@ -4517,11 +4551,11 @@ class MainWindow(QMainWindow):
         self._pal_group.addButton(rb_c); self._pal_group.addButton(rb_g)
         rb_c.toggled.connect(lambda on: on and self._gl.set_anim_palette('color'))
         rb_g.toggled.connect(lambda on: on and self._gl.set_anim_palette('greys'))
-        an.addWidget(rb_c, 4, 1); an.addWidget(rb_g, 4, 2)
+        an.addWidget(rb_c, 5, 1); an.addWidget(rb_g, 5, 2)
 
         self._anim_btn = QPushButton("▶︎  Play animation")
         self._anim_btn.clicked.connect(self._toggle_animation)
-        an.addWidget(self._anim_btn, 5, 0, 1, 7)
+        an.addWidget(self._anim_btn, 6, 0, 1, 7)
         lay.addWidget(an_box)
 
         # ── Simulation: Fit impedances + Run/Stop ──
@@ -4884,6 +4918,11 @@ class MainWindow(QMainWindow):
 
     def _set_all_vis(self, v):
         for g in self._groups: self._gl.set_layer_visible(g["name"], v)
+
+    def _toggle_all_layers(self):
+        all_on = all(self._gl.is_layer_visible(g["name"]) for g in self._groups) if self._groups else True
+        self._set_all_vis(not all_on)
+        self._layers_all_btn.setText("Show all" if all_on else "Hide all")
 
     def _toggle_selected_vis(self):
         row = self._layer_list.currentRow()
