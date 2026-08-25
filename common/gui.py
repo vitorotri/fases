@@ -443,11 +443,13 @@ class GLViewer(QOpenGLWidget):
     pointDragStarted = Signal()                        # a grab/drag just began
     coordsChanged = Signal(float, float, float)        # live HUD coords
     themeToggle   = Signal()                            # RMB "Dark/Light scene" chosen
+    sliceChanged  = Signal(float, float, float)         # x0,y0,z0 world slice positions
 
     # placement modes
-    MODE_NONE = 0
-    MODE_SRC  = 1
-    MODE_REC  = 2
+    MODE_NONE  = 0
+    MODE_SRC   = 1
+    MODE_REC   = 2
+    MODE_SLICE = 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -507,6 +509,7 @@ class GLViewer(QOpenGLWidget):
         self._axis_lock = None          # 'X','Y','Z' or None
         self._place_pos = np.zeros(3, np.float32)  # frozen base position
         self._cursor_world = np.zeros(3, np.float32)
+        self._slices = None            # np(3,) world x0,y0,z0 of the animation slice planes
 
         # pivot (orbit centre = mesh centre)
         self._pivot      = np.zeros(3, np.float32)
@@ -600,6 +603,19 @@ class GLViewer(QOpenGLWidget):
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.update()
 
+    def enter_slice_mode(self):
+        """Slice-plane picking: hold X/Y/Z to slide the x/y/z plane, LMB commits.
+        Slides from the domain centre; the three planes stay drawn."""
+        c = (self._domain_min + self._domain_max) * 0.5
+        if self._slices is None:
+            self._slices = c.astype(np.float32).copy()
+        self._place_pos = c.astype(np.float32).copy()
+        self.enter_placement_mode(self.MODE_SLICE)
+
+    def set_slices(self, x, y, z):
+        self._slices = np.array([x, y, z], np.float32)
+        self.update()
+
     def exit_placement_mode(self):
         self._mode      = self.MODE_NONE
         self._axis_lock = None
@@ -689,6 +705,7 @@ class GLViewer(QOpenGLWidget):
         self._draw_gizmo()   # replaces grid + world axes
         self._draw_axes()    # before the mesh so the wireframe paints on top (less z-fighting)
         self._draw_mesh()
+        self._draw_slices()
         self._draw_rays()
         self._draw_sources()
         self._draw_receivers()
@@ -976,6 +993,34 @@ class GLViewer(QOpenGLWidget):
         glEnd()
         glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
 
+    def _draw_slices(self):
+        """Translucent axis-aligned slice planes, shown ONLY while in slice mode. Holding
+        an axis shows just that plane (the one being moved); with no axis held all three
+        show faintly as a reference. Each spans the scene AABB, tinted by axis colour."""
+        if self._slices is None or self._mode != self.MODE_SLICE:
+            return
+        mn, mx = self._domain_min, self._domain_max
+        x0, y0, z0 = float(self._slices[0]), float(self._slices[1]), float(self._slices[2])
+        quads = {
+            'X': [(x0, mn[1], mn[2]), (x0, mx[1], mn[2]), (x0, mx[1], mx[2]), (x0, mn[1], mx[2])],
+            'Y': [(mn[0], y0, mn[2]), (mx[0], y0, mn[2]), (mx[0], y0, mx[2]), (mn[0], y0, mx[2])],
+            'Z': [(mn[0], mn[1], z0), (mx[0], mn[1], z0), (mx[0], mx[1], z0), (mn[0], mx[1], z0)],
+        }
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDepthMask(GL_FALSE)             # translucent: don't occlude the mesh behind
+        for ax, q in quads.items():
+            if self._axis_lock and self._axis_lock != ax:
+                continue                  # editing one axis -> only that plane
+            alpha = 0.28 if self._axis_lock == ax else 0.12
+            c = AXIS_COLORS[ax]
+            glColor4f(c[0], c[1], c[2], alpha)
+            glBegin(GL_QUADS)
+            for v in q:
+                glVertex3f(float(v[0]), float(v[1]), float(v[2]))
+            glEnd()
+        glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_LIGHTING)
+
     def _outside_domain(self, x, y, z):
         """Return True if (x,y,z) lies outside the scene bounding box."""
         p = np.array([x, y, z], np.float32)
@@ -1167,13 +1212,15 @@ class GLViewer(QOpenGLWidget):
             glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
             glEnd()
 
-        # preview: draw the SAME glyph as a placed point, at the exact centre
-        col_override = OUTSIDE_COLOR \
-                       if self._outside_domain(p[0], p[1], p[2]) else None
-        icon_col = col_override if col_override else \
-                   (SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR)
-        kind = "source" if self._mode == self.MODE_SRC else "receiver"
-        self._point_glyph(p[0], p[1], p[2], icon_col, kind)
+        # preview: draw the SAME glyph as a placed point, at the exact centre -- ONLY for
+        # source/receiver placement. Slice mode shows just the crosshair (no symbol).
+        if self._mode in (self.MODE_SRC, self.MODE_REC):
+            col_override = OUTSIDE_COLOR \
+                           if self._outside_domain(p[0], p[1], p[2]) else None
+            icon_col = col_override if col_override else \
+                       (SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR)
+            kind = "source" if self._mode == self.MODE_SRC else "receiver"
+            self._point_glyph(p[0], p[1], p[2], icon_col, kind)
 
         glEnable(GL_LIGHTING)
 
@@ -1275,8 +1322,10 @@ class GLViewer(QOpenGLWidget):
                 painter.end()
             return
         p = self._cursor_world
-        mode_str = "SOURCE" if self._mode == self.MODE_SRC else "RECEIVER"
-        mode_col = SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR
+        mode_str = ("SLICE"    if self._mode == self.MODE_SLICE else
+                    "SOURCE"   if self._mode == self.MODE_SRC   else "RECEIVER")
+        mode_col = ((1.0, 1.0, 1.0) if self._mode == self.MODE_SLICE else
+                    SRC_COLOR if self._mode == self.MODE_SRC else REC_COLOR)
         axis_str = f"  locked: {self._axis_lock}" if self._axis_lock else "  (hold X / Y / Z + drag LMB to lock an axis)"
         ijk = self._ijk_str(p)
         coord_str = (f"  x={p[0]:.3f}  y={p[1]:.3f}  z={p[2]:.3f} m"
@@ -1341,6 +1390,9 @@ class GLViewer(QOpenGLWidget):
                 self._slide_axis(e.position())     # slide along locked axis
             else:
                 self._update_cursor_world(e.position())
+            if self._mode == self.MODE_SLICE and self._axis_lock:
+                i = 'XYZ'.index(self._axis_lock)   # move only that plane, live
+                self._slices[i] = float(self._cursor_world[i])
             self._last_pos = e.position()
             self.update()
             return
@@ -1431,12 +1483,15 @@ class GLViewer(QOpenGLWidget):
             return
 
         if self._mode != self.MODE_NONE:
-            # Place on LMB release (whether the user dragged along a locked
-            # axis or just clicked). Releasing the button commits the point.
+            # Place / commit on LMB release (after an axis drag or a plain click).
             if e.button() == Qt.MouseButton.LeftButton:
-                p = self._cursor_world.copy()
-                mode_name = "source" if self._mode == self.MODE_SRC else "receiver"
-                self.pointPlaced.emit(mode_name, float(p[0]), float(p[1]), float(p[2]))
+                if self._mode == self.MODE_SLICE:
+                    s = self._slices
+                    self.sliceChanged.emit(float(s[0]), float(s[1]), float(s[2]))
+                else:
+                    p = self._cursor_world.copy()
+                    mode_name = "source" if self._mode == self.MODE_SRC else "receiver"
+                    self.pointPlaced.emit(mode_name, float(p[0]), float(p[1]), float(p[2]))
             return
 
         if not moved and e.button() == Qt.MouseButton.LeftButton:
@@ -1595,8 +1650,10 @@ class GLViewer(QOpenGLWidget):
         self.update()
 
     def set_hud_left(self, px):
+        # store only -- no repaint. During the panel slide this is called every frame;
+        # forcing a full GL redraw each time is the slide lag. The HUD re-lays out on the
+        # next natural repaint (and once at slide end, see _panel_anim.finished).
         self._hud_left = int(px)
-        self.update()
 
     def _ijk_str(self, p):
         """Integer grid indices i,j,k at world point p for the user's grid spacing
@@ -3582,7 +3639,9 @@ class MainWindow(QMainWindow):
                 if self._panel_open and self._widget_in_tabs(obj):
                     self._panel_idle.start()
             elif t == QEvent.Type.Resize and obj is self._central:
-                self._layout_panel()           # keep the overlay panel + grip full-height
+                # defer: at Resize time the layout hasn't repositioned gl_wrap yet, so its
+                # geometry is still stale (this caused the panel to keep the old size on maximize).
+                QTimer.singleShot(0, self._layout_panel)
         return super().eventFilter(obj, e)
 
     def _widget_in_tabs(self, w):
@@ -3686,6 +3745,12 @@ class MainWindow(QMainWindow):
         self._rec_btn.clicked.connect(lambda: self._toggle_placement("receiver"))
         place_bar.addWidget(self._rec_btn)
 
+        self._slice_btn = QPushButton("Slice [L]")
+        self._slice_btn.setCheckable(True)
+        self._slice_btn.setFixedSize(90, 22)
+        self._slice_btn.clicked.connect(lambda: self._toggle_placement("slice"))
+        place_bar.addWidget(self._slice_btn)
+
         self._hint_lbl = QLabel(
                       "Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
                       "T: reset view   S: src   R: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   "
@@ -3731,6 +3796,7 @@ class MainWindow(QMainWindow):
         # the viewport emits themeToggle when it's picked. Also feed the grid spacing
         # to the viewport so the HUD shows i,j,k next to x,y,z.
         self._gl.themeToggle.connect(self._toggle_scene_theme)
+        self._gl.sliceChanged.connect(self._on_slice_changed)
         self._cfg['h'].valueChanged.connect(self._gl.set_grid_h)
         self._gl.set_grid_h(self._cfg['h'].value())
         self._restyle_scene_theme()        # initial hint styling
@@ -3741,6 +3807,7 @@ class MainWindow(QMainWindow):
         self._panel_anim = QVariantAnimation(self)
         self._panel_anim.setDuration(240)
         self._panel_anim.valueChanged.connect(self._on_panel_slide)
+        self._panel_anim.finished.connect(self._gl.update)   # settle HUD inset once, at rest
         # Invisible "near-it" hotzone at the left edge (no button): click anywhere in this
         # strip of empty scene and the panel slides back out. Active only while hidden.
         self._GRIP_W = 48                    # width of the reopen hotzone [px]
@@ -3808,6 +3875,8 @@ class MainWindow(QMainWindow):
         m = self._place_bar.contentsMargins()
         self._place_bar.setContentsMargins(vis, m.top(), m.right(), m.bottom())
         self._gl.set_hud_left(vis)
+        if hasattr(self, "_float_prog"):               # progress bar rides the panel edge
+            self._float_prog.move(vis + 16, self._float_prog.y())
 
     def _on_panel_slide(self, v):
         self._panel_x = int(v)
@@ -3847,24 +3916,29 @@ class MainWindow(QMainWindow):
         self._hint_lbl.setStyleSheet(f"color:{hint_col};font-size:9px;")
 
     def _toggle_placement(self, kind):
+        btns = {"source": self._src_btn, "receiver": self._rec_btn, "slice": self._slice_btn}
+        on = btns[kind].isChecked()
+        for k, b in btns.items():             # mutual exclusion
+            if k != kind:
+                b.setChecked(False)
+        if not on:
+            self._gl.exit_placement_mode()
+            self._sb.showMessage("Ready.")
+            return
         if kind == "source":
-            if self._src_btn.isChecked():
-                self._rec_btn.setChecked(False)
-                self._gl.enter_placement_mode(GLViewer.MODE_SRC)
-                self._tabs.setCurrentIndex(1)   # Sources tab
-                self._sb.showMessage("SOURCE placement: drag LMB to position (hold X/Y/Z to lock an axis); release to place. Esc to cancel")
-            else:
-                self._gl.exit_placement_mode()
-                self._sb.showMessage("Ready.")
-        else:
-            if self._rec_btn.isChecked():
-                self._src_btn.setChecked(False)
-                self._gl.enter_placement_mode(GLViewer.MODE_REC)
-                self._tabs.setCurrentIndex(2)   # Receivers tab
-                self._sb.showMessage("RECEIVER placement: drag LMB to position (hold X/Y/Z to lock an axis); release to place. Esc to cancel")
-            else:
-                self._gl.exit_placement_mode()
-                self._sb.showMessage("Ready.")
+            self._gl.enter_placement_mode(GLViewer.MODE_SRC)
+            self._tabs.setCurrentIndex(1)
+            self._sb.showMessage("SOURCE placement: drag LMB to position (hold X/Y/Z to lock an axis); release to place. Esc to cancel")
+        elif kind == "receiver":
+            self._gl.enter_placement_mode(GLViewer.MODE_REC)
+            self._tabs.setCurrentIndex(2)
+            self._sb.showMessage("RECEIVER placement: drag LMB to position (hold X/Y/Z to lock an axis); release to place. Esc to cancel")
+        else:  # slice
+            self._gl.enter_slice_mode()
+            self._sb.showMessage("SLICE: hold X / Y / Z and drag to move that plane; release to set. Esc to finish")
+
+    def _on_slice_changed(self, x, y, z):
+        self._sb.showMessage(f"Slice planes  x={x:.3f}  y={y:.3f}  z={z:.3f} m")
 
     def _on_point_placed(self, mode, x, y, z):
         self._remember_points_for_undo()
@@ -3934,15 +4008,21 @@ class MainWindow(QMainWindow):
             self._rec_btn.setChecked(checked)
             self._toggle_placement("receiver")
             e.accept(); return
+        if key == Qt.Key.Key_L:
+            self._slice_btn.setChecked(not self._slice_btn.isChecked())
+            self._toggle_placement("slice")
+            e.accept(); return
         if key == Qt.Key.Key_T and self._gl._mode == GLViewer.MODE_NONE:
             # reset the 3D view to the exact initial visualization
             self._gl._reset_view()
             self._sb.showMessage("View reset.")
             e.accept(); return
         if key == Qt.Key.Key_Escape:
-            was_placing = self._src_btn.isChecked() or self._rec_btn.isChecked()
+            was_placing = (self._src_btn.isChecked() or self._rec_btn.isChecked()
+                           or self._slice_btn.isChecked())
             self._src_btn.setChecked(False)
             self._rec_btn.setChecked(False)
+            self._slice_btn.setChecked(False)
             self._gl.exit_placement_mode()
             if not was_placing:
                 self._layer_list.setCurrentRow(-1)
@@ -4608,6 +4688,11 @@ class MainWindow(QMainWindow):
             f.write(ln(max(0, self._src_group.checkedId()),    "source type (0=PCS,1=Ricker,2=Sinusoid)"))
             f.write(ln(self._src_freq.value(),                 "global source frequency [Hz] (PCS/Ricker; sinusoid uses per-source f0)"))
             f.write(ln(int(src_idx),                           "source index (auralization: one run per source; 0 otherwise)"))
+            # animation slice planes (world coords); main3D converts to i0/j0/k0 in its grid
+            s = self._gl._slices if self._gl._slices is not None else (0.0, 0.0, 0.0)
+            f.write(ln(f"{float(s[0]):.6g}", "slice x0 [m] (animation)"))
+            f.write(ln(f"{float(s[1]):.6g}", "slice y0 [m] (animation)"))
+            f.write(ln(f"{float(s[2]):.6g}", "slice z0 [m] (animation)"))
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -4640,6 +4725,8 @@ class MainWindow(QMainWindow):
             if btn: btn.setChecked(True)
         if len(vals) > 16:
             self._src_freq.setValue(int(vals[16]))  # global source frequency [Hz] (PCS/Ricker)
+        if len(vals) > 20:
+            self._gl.set_slices(vals[18], vals[19], vals[20])  # animation slice planes
 
     def _save_src(self):
         if not self._proj_root: return
@@ -4707,7 +4794,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 return None
 
-        cfg = norm(os.path.join(root, "config", "config.txt"), drop={12, 14})
+        cfg = norm(os.path.join(root, "config", "config.txt"),
+                   drop={12, 14, 18, 19, 20})   # ism_order, nrays, slice planes: not FVM inputs
         if cfg is None:
             return None
         comps = {
