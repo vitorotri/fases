@@ -146,6 +146,31 @@ AXIS_COLORS = {
     'Z': (105/255, 210/255, 45/255),          # bright lime
 }
 
+def pressure_lut(palette='color', dark=False):
+    """256x3 RGB LUT for the animation.
+      'color' -> the 5-colour diverging map; the CENTRE (zero pressure) blends with the
+                 background: white in Light, near-black in Dark.
+      'greys' -> linear black->white ramp (sign preserved: negative dark, positive light)."""
+    if palette == 'greys':
+        g = np.linspace(0, 255, 256).astype(np.uint8)
+        return np.stack([g, g, g], axis=1)
+    centre = (18, 18, 22) if dark else (255, 255, 255)
+    stops = [(0.00, (220,  20,  60)),   # crimson
+             (0.25, (  0, 255, 127)),   # springgreen
+             (0.50, centre),            # white (Light) / near-black (Dark) = zero pressure
+             (0.75, (124, 252,   0)),   # lawngreen
+             (1.00, (138,  43, 226))]   # blueviolet
+    lut = np.zeros((256, 3), np.uint8)
+    for i in range(256):
+        t = i / 255.0
+        for k in range(len(stops) - 1):
+            t0, c0 = stops[k]; t1, c1 = stops[k + 1]
+            if t0 <= t <= t1:
+                f = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+                lut[i] = [int(round(c0[j] + (c1[j] - c0[j]) * f)) for j in range(3)]
+                break
+    return lut
+
 # Opacity of the gizmo's opposite-side (negative-axis) balls, 0.0..1.0.
 # Set to 0.0 to hide them completely (fully transparent); 1.0 = fully opaque.
 GIZMO_NEG_ALPHA = 0.55
@@ -510,6 +535,14 @@ class GLViewer(QOpenGLWidget):
         self._place_pos = np.zeros(3, np.float32)  # frozen base position
         self._cursor_world = np.zeros(3, np.float32)
         self._slices = None            # np(3,) world x0,y0,z0 of the animation slice planes
+        self._plane_vis = {'x': True, 'y': True, 'z': True}  # which slice planes show / animate
+        self._anim = None          # {'x':(F,h,w), ...} loaded pressure-slice frames, or None
+        self._anim_frame = 0
+        self._anim_min = -0.5
+        self._anim_max = 0.5
+        self._anim_tex = {}        # axis -> GL texture id
+        self._anim_palette = 'color'   # 'color' | 'greys'
+        self._lut = None; self._lut_key = None
 
         # pivot (orbit centre = mesh centre)
         self._pivot      = np.zeros(3, np.float32)
@@ -616,6 +649,117 @@ class GLViewer(QOpenGLWidget):
         self._slices = np.array([x, y, z], np.float32)
         self.update()
 
+    def set_plane_visible(self, axis, on):
+        self._plane_vis[axis] = bool(on)
+        self.update()
+
+    # ── slice-pressure animation ──
+    def load_animation(self, out_dir):
+        """Load pressureX/Y/Z.bin + header.txt from out_dir. Returns frame count (0 if none).
+        Layouts (from main3D): X = F×(Ny·Nz) idx j+Ny·k -> (F,Nz,Ny); Y = F×(Nx·Nz) -> (F,Nz,Nx);
+        Z = F×(Nx·Ny) -> (F,Ny,Nx)."""
+        try:
+            hp = open(os.path.join(out_dir, "header.txt")).read().split()
+            Nx, Ny, Nz = int(hp[0]), int(hp[1]), int(hp[2])
+        except Exception:
+            return 0
+        planes = {'x': ("pressureX.bin", Nz, Ny),
+                  'y': ("pressureY.bin", Nz, Nx),
+                  'z': ("pressureZ.bin", Ny, Nx)}
+        anim, frames = {}, 0
+        for ax, (fn, hgt, wid) in planes.items():
+            p = os.path.join(out_dir, fn)
+            if not os.path.isfile(p):
+                continue
+            a = np.fromfile(p, np.float32)
+            per = hgt * wid
+            if per == 0 or a.size < per:
+                continue
+            F = a.size // per
+            anim[ax] = a[:F * per].reshape(F, hgt, wid)
+            frames = max(frames, F)
+        if not anim:
+            return 0
+        self._anim = anim
+        self._anim_frame = 0
+        self.update()
+        return frames
+
+    def clear_animation(self):
+        self._anim = None
+        self.update()
+
+    def set_pressure_range(self, pmin, pmax):
+        self._anim_min = float(pmin); self._anim_max = float(pmax)
+        self.update()
+
+    def set_anim_palette(self, name):
+        self._anim_palette = name
+        self.update()
+
+    def step_frame(self):
+        if self._anim is None:
+            return
+        F = max(len(v) for v in self._anim.values())
+        self._anim_frame = (self._anim_frame + 1) % F
+        self.update()
+
+    def _colormap(self, img):
+        """2-D pressure slice -> (h,w,4) uint8 RGBA via the pressure LUT + [min,max] range."""
+        key = (self._anim_palette, not SCENE_LIGHT_MODE)   # rebuild LUT on palette/scheme change
+        if key != self._lut_key:
+            self._lut = pressure_lut(self._anim_palette, not SCENE_LIGHT_MODE)
+            self._lut_key = key
+        lo, hi = self._anim_min, self._anim_max
+        span = (hi - lo) if hi > lo else 1.0
+        idx = np.clip((img - lo) / span, 0.0, 1.0) * 255.0
+        idx = idx.astype(np.uint8)
+        rgb = self._lut[idx]                            # (h,w,3)
+        h, w = img.shape
+        rgba = np.empty((h, w, 4), np.uint8)
+        rgba[..., :3] = rgb
+        # alpha follows |p|: zero pressure (ghost/PML border, silence) -> transparent, so the
+        # dead frame around the domain drops out and only the wavefronts show.
+        amp = max(abs(lo), abs(hi), 1e-12)
+        rgba[..., 3] = (np.clip(np.abs(img) / amp, 0.0, 1.0) * 235).astype(np.uint8)
+        return rgba
+
+    def _draw_anim(self):
+        """Texture the visible slice quads with the current animation frame."""
+        if self._anim is None or self._slices is None:
+            return
+        mn, mx = self._domain_min, self._domain_max
+        x0, y0, z0 = float(self._slices[0]), float(self._slices[1]), float(self._slices[2])
+        # quad corners in draw order matching texcoords (0,0)(1,0)(1,1)(0,1)
+        quads = {
+            'x': [(x0, mn[1], mn[2]), (x0, mx[1], mn[2]), (x0, mx[1], mx[2]), (x0, mn[1], mx[2])],
+            'y': [(mn[0], y0, mn[2]), (mx[0], y0, mn[2]), (mx[0], y0, mx[2]), (mn[0], y0, mx[2])],
+            'z': [(mn[0], mn[1], z0), (mx[0], mn[1], z0), (mx[0], mx[1], z0), (mn[0], mx[1], z0)],
+        }
+        tc = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        glDisable(GL_LIGHTING); glEnable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDepthMask(GL_FALSE)
+        glColor4f(1, 1, 1, 1)
+        for ax in ('x', 'y', 'z'):
+            if not self._plane_vis[ax] or ax not in self._anim:
+                continue
+            frame = self._anim[ax][self._anim_frame % len(self._anim[ax])]
+            rgba = self._colormap(frame)
+            h, w = frame.shape
+            tex = self._anim_tex.get(ax)
+            if tex is None:
+                tex = glGenTextures(1); self._anim_tex[ax] = tex
+            glBindTexture(GL_TEXTURE_2D, tex)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba)
+            glBegin(GL_QUADS)
+            for v, (s, t) in zip(quads[ax], tc):
+                glTexCoord2f(s, t); glVertex3f(*v)
+            glEnd()
+        glDisable(GL_TEXTURE_2D); glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_LIGHTING)
+
     def exit_placement_mode(self):
         self._mode      = self.MODE_NONE
         self._axis_lock = None
@@ -706,6 +850,7 @@ class GLViewer(QOpenGLWidget):
         self._draw_axes()    # before the mesh so the wireframe paints on top (less z-fighting)
         self._draw_mesh()
         self._draw_slices()
+        self._draw_anim()
         self._draw_rays()
         self._draw_sources()
         self._draw_receivers()
@@ -1010,11 +1155,14 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glDepthMask(GL_FALSE)             # translucent: don't occlude the mesh behind
         for ax, q in quads.items():
+            if not self._plane_vis[ax]:
+                continue                  # plane toggled off in the Scene tab
             if self._axis_lock and self._axis_lock != ax:
                 continue                  # editing one axis -> only that plane
-            alpha = 0.28 if self._axis_lock == ax else 0.12
+            alpha = 0.50 if self._axis_lock == ax else 0.30   # brighter/opaquer: readable in Light mode
             c = AXIS_COLORS[ax]
-            glColor4f(c[0], c[1], c[2], alpha)
+            # nudge toward white so the tint reads on a light background too
+            glColor4f(min(1.0, c[0]+0.15), min(1.0, c[1]+0.15), min(1.0, c[2]+0.15), alpha)
             glBegin(GL_QUADS)
             for v in q:
                 glVertex3f(float(v[0]), float(v[1]), float(v[2]))
@@ -3805,7 +3953,7 @@ class MainWindow(QMainWindow):
         self._panel_open = True
         self._panel_x = 0                    # current left edge; 0 = shown, -_PANEL_W = hidden
         self._panel_anim = QVariantAnimation(self)
-        self._panel_anim.setDuration(240)
+        self._panel_anim.setDuration(150)
         self._panel_anim.valueChanged.connect(self._on_panel_slide)
         self._panel_anim.finished.connect(self._gl.update)   # settle HUD inset once, at rest
         # Invisible "near-it" hotzone at the left edge (no button): click anywhere in this
@@ -3938,7 +4086,46 @@ class MainWindow(QMainWindow):
             self._sb.showMessage("SLICE: hold X / Y / Z and drag to move that plane; release to set. Esc to finish")
 
     def _on_slice_changed(self, x, y, z):
+        """Scene pick -> reflect in the Animation spin boxes (without echoing back)."""
+        self._sync_slice_fields(x, y, z)
         self._sb.showMessage(f"Slice planes  x={x:.3f}  y={y:.3f}  z={z:.3f} m")
+
+    def _sync_slice_fields(self, x, y, z):
+        self._slice_sync = True
+        self._slice_sb['x'].setValue(x); self._slice_sb['y'].setValue(y); self._slice_sb['z'].setValue(z)
+        self._slice_sync = False
+
+    def _on_slice_field(self, _=None):
+        """User typed a slice coordinate -> move the planes in the scene."""
+        if self._slice_sync:
+            return
+        self._gl.set_slices(self._slice_sb['x'].value(),
+                            self._slice_sb['y'].value(),
+                            self._slice_sb['z'].value())
+
+    # ── slice-pressure animation ──
+    def _on_prange(self, _=None):
+        self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
+
+    def _toggle_animation(self):
+        t = getattr(self, "_anim_timer", None)
+        if t is not None and t.isActive():          # currently playing -> stop
+            t.stop()
+            self._anim_btn.setText("▶︎  Play animation")
+            return
+        if not self._proj_root:
+            QMessageBox.warning(self, "No project", "Open a project first."); return
+        frames = self._gl.load_animation(os.path.join(self._proj_root, "output"))
+        if frames <= 0:
+            QMessageBox.information(self, "No animation",
+                "No pressureX/Y/Z.bin found in output/. Run a full simulation first."); return
+        self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
+        if getattr(self, "_anim_timer", None) is None:
+            self._anim_timer = QTimer(self)
+            self._anim_timer.timeout.connect(self._gl.step_frame)
+        self._anim_timer.start(max(1, int(1000 / self._fps.value())))
+        self._anim_btn.setText("⏹  Stop animation")
+        self._sb.showMessage(f"Playing {frames} frames at {self._fps.value()} fps")
 
     def _on_point_placed(self, mode, x, y, z):
         self._remember_points_for_undo()
@@ -4275,25 +4462,70 @@ class MainWindow(QMainWindow):
         self._bin_le = QLineEdit(_last_bin)
         self._bin_le.setVisible(False)        # path lives in SOLVER_BINARY now
 
-        # ── ray-trace debug overlay: count + order + Trace/Clear ──
-        dbg = QHBoxLayout(); dbg.setSpacing(8)
-        dbg.addWidget(QLabel("Debug rays:"))
+        # ── Ray-Tracing: debug ray overlay (count + order + Trace/Clear) ──
+        rt_box = QGroupBox("Ray-Tracing"); rt = QHBoxLayout(rt_box); rt.setSpacing(8)
+        rt.addWidget(QLabel("Debug rays:"))
         self._dbg_rays = QSpinBox(); self._dbg_rays.setRange(1, 5000)
         self._dbg_rays.setValue(64); self._dbg_rays.setMinimumWidth(70)
-        dbg.addWidget(self._dbg_rays)
-        dbg.addWidget(QLabel("Order:"))
+        rt.addWidget(self._dbg_rays)
+        rt.addWidget(QLabel("Order:"))
         self._dbg_order = QSpinBox(); self._dbg_order.setRange(1, 20)
         self._dbg_order.setValue(5); self._dbg_order.setMinimumWidth(55)
-        dbg.addWidget(self._dbg_order)
+        rt.addWidget(self._dbg_order)
         self._btn_rays = QPushButton("Trace rays"); self._btn_rays.clicked.connect(self._dump_rays)
         self._btn_clear_rays = QPushButton("Clear rays")
         self._btn_clear_rays.clicked.connect(self._clear_rays)
-        dbg.addWidget(self._btn_rays, 1); dbg.addWidget(self._btn_clear_rays, 1)
-        lay.addLayout(dbg)
-        lay.addSpacing(12)   # breathing room between debug-ray row and Fit/Simulate
+        rt.addWidget(self._btn_rays, 1); rt.addWidget(self._btn_clear_rays, 1)
+        lay.addWidget(rt_box)
 
-        # ── top row: Fit impedances (left)  |  Run/Stop (right) ──
-        top = QHBoxLayout(); top.setSpacing(8)
+        # ── Animation: fps + slice-plane positions (or pick in scene with Slice [L]) ──
+        an_box = QGroupBox("Animation"); an = QGridLayout(an_box); an.setSpacing(6)
+        an.addWidget(QLabel("fps:"), 0, 0)
+        self._fps = QSpinBox(); self._fps.setRange(1, 240); self._fps.setValue(24)
+        an.addWidget(self._fps, 0, 1)
+        # which planes show / animate (whichever are on)
+        an.addWidget(QLabel("Show:"), 0, 3)
+        self._plane_chk = {}
+        for axis, col in (('x', 4), ('y', 5), ('z', 6)):
+            cb = QCheckBox(axis.upper()); cb.setChecked(True)
+            cb.toggled.connect(lambda on, a=axis: self._gl.set_plane_visible(a, on))
+            an.addWidget(cb, 0, col); self._plane_chk[axis] = cb
+
+        an.addWidget(QLabel("Slice planes [m]  (or pick in scene: Slice [L])"), 1, 0, 1, 7)
+        self._slice_sync = False        # guard: suppress field->gl while syncing gl->field
+        self._slice_sb = {}
+        for axis, col in (('x', 0), ('y', 2), ('z', 4)):
+            an.addWidget(QLabel(f"{axis}0:"), 2, col)
+            sb = QDoubleSpinBox(); sb.setRange(-1e4, 1e4); sb.setDecimals(3); sb.setSingleStep(0.05)
+            sb.valueChanged.connect(self._on_slice_field)
+            an.addWidget(sb, 2, col + 1)
+            self._slice_sb[axis] = sb
+
+        # pressure colour range [Pa] for the animation
+        an.addWidget(QLabel("Pressure range [Pa]:"), 3, 0, 1, 2)
+        self._pmin = QDoubleSpinBox(); self._pmin.setRange(-1e6, 1e6); self._pmin.setDecimals(4); self._pmin.setValue(-0.5)
+        self._pmax = QDoubleSpinBox(); self._pmax.setRange(-1e6, 1e6); self._pmax.setDecimals(4); self._pmax.setValue(0.5)
+        self._pmin.valueChanged.connect(self._on_prange); self._pmax.valueChanged.connect(self._on_prange)
+        an.addWidget(self._pmin, 3, 2); an.addWidget(QLabel("to"), 3, 3); an.addWidget(self._pmax, 3, 4)
+
+        # colour palette for the animation
+        an.addWidget(QLabel("Palette:"), 4, 0)
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup
+        self._pal_group = QButtonGroup(self)
+        rb_c = QRadioButton("Colour"); rb_c.setChecked(True)
+        rb_g = QRadioButton("Greys")
+        self._pal_group.addButton(rb_c); self._pal_group.addButton(rb_g)
+        rb_c.toggled.connect(lambda on: on and self._gl.set_anim_palette('color'))
+        rb_g.toggled.connect(lambda on: on and self._gl.set_anim_palette('greys'))
+        an.addWidget(rb_c, 4, 1); an.addWidget(rb_g, 4, 2)
+
+        self._anim_btn = QPushButton("▶︎  Play animation")
+        self._anim_btn.clicked.connect(self._toggle_animation)
+        an.addWidget(self._anim_btn, 5, 0, 1, 7)
+        lay.addWidget(an_box)
+
+        # ── Simulation: Fit impedances + Run/Stop ──
+        sim_box = QGroupBox("Simulation"); top = QHBoxLayout(sim_box); top.setSpacing(8)
         self._fitimp_btn = QPushButton("⡶\uFE0E⣰\uFE0E  Fit impedances")
         self._fitimp_btn.setStyleSheet(
             f"background:{PAL['btn']};color:{PAL['text']};font-weight:bold;padding:8px;")
@@ -4306,20 +4538,24 @@ class MainWindow(QMainWindow):
             f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
         self._run_btn.clicked.connect(self._toggle_run)
         top.addWidget(self._run_btn, 1)
-        lay.addLayout(top)
+        lay.addWidget(sim_box)
 
-        # (progress bar floats over the 3D scene — see DraggableProgress)
+        # groups hug their content (don't inflate to fill the tab)
+        from PySide6.QtWidgets import QSizePolicy
+        for box in (rt_box, an_box, sim_box):
+            box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        # ── output log ── keep it in the lower ~half so the wall of solver messages
-        # (useful for debugging, but noisy) doesn't dominate the tab.
+        # ── output log ── stretch above pushes it to the BOTTOM; label sits snug above the
+        # box, which has a fixed height (no stretch cell = no gap).
         lay.addStretch(1)
         lay.addWidget(QLabel("Output log:"))
         self._log = QTextEdit(); self._log.setReadOnly(True)
         self._log.setFont(QFont("Monospace", 10))
+        self._log.setFixedHeight(330)       # 50% taller than the old 220
         self._log.setStyleSheet(
             f"background:#000000;color:{PAL['text']};"
             f"border:1px solid {PAL['border']};")
-        lay.addWidget(self._log, 1)
+        lay.addWidget(self._log)
 
         self._solver_thread = None
         self._aural_queue = []      # remaining source indices to run (auralization mode)
@@ -4451,7 +4687,6 @@ class MainWindow(QMainWindow):
             self._groups   = []
             self._write_manifest()
             self._sb.showMessage(f"Created project: {root}  —  load an OBJ to add geometry.")
-        self._update_cmd_preview()
 
     def _open_project(self):
         """Open a project directory and restore its full state. Reads the
@@ -4505,7 +4740,6 @@ class MainWindow(QMainWindow):
         # Persist the manifest now so opening a project always records current
         # state (scene path included) even if no .mat/config was touched.
         self._write_manifest()
-        self._update_cmd_preview()
         self._sb.showMessage(f"Opened project: {d}")
 
     def _save_project(self):
@@ -4570,7 +4804,6 @@ class MainWindow(QMainWindow):
         print(f"[OBJ] Parsed {len(groups)} groups: {names}")
         self._gl.load_mesh(verts, groups)
         self._populate_layers(groups)
-        self._update_cmd_preview()
         if self._proj_root:
             self._write_manifest()          # persist the scene path on open/load
         status = f"Loaded {len(groups)} layer(s)  —  {len(verts)} vertices"
@@ -4693,6 +4926,7 @@ class MainWindow(QMainWindow):
             f.write(ln(f"{float(s[0]):.6g}", "slice x0 [m] (animation)"))
             f.write(ln(f"{float(s[1]):.6g}", "slice y0 [m] (animation)"))
             f.write(ln(f"{float(s[2]):.6g}", "slice z0 [m] (animation)"))
+            f.write(ln(self._fps.value(), "animation fps (frames capped to RAM in main3D)"))
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -4727,6 +4961,9 @@ class MainWindow(QMainWindow):
             self._src_freq.setValue(int(vals[16]))  # global source frequency [Hz] (PCS/Ricker)
         if len(vals) > 20:
             self._gl.set_slices(vals[18], vals[19], vals[20])  # animation slice planes
+            self._sync_slice_fields(vals[18], vals[19], vals[20])
+        if len(vals) > 21:
+            self._fps.setValue(int(vals[21]))  # animation fps
 
     def _save_src(self):
         if not self._proj_root: return
@@ -4795,7 +5032,7 @@ class MainWindow(QMainWindow):
                 return None
 
         cfg = norm(os.path.join(root, "config", "config.txt"),
-                   drop={12, 14, 18, 19, 20})   # ism_order, nrays, slice planes: not FVM inputs
+                   drop={12, 14, 18, 19, 20, 21})  # ism_order, nrays, slices, fps: not FVM inputs
         if cfg is None:
             return None
         comps = {
@@ -4859,19 +5096,6 @@ class MainWindow(QMainWindow):
             print(f"[ga] stored wave signature -> {p}")
         except Exception as e:
             print(f"[ga] FAILED to store wave signature at {p}: {e}")
-
-    def _update_cmd_preview(self):
-        if not hasattr(self, '_cmd_preview'): return
-        if not self._proj_root:
-            self._cmd_preview.setText("(open a project folder first)"); return
-        binary = self._bin_le.text() if hasattr(self, "_bin_le") else SOLVER_BINARY
-        # absolute binary paths are used as-is; only bare relative ones get ./
-        bin_disp = binary if os.path.isabs(binary) else f"./{binary}"
-        scene = self._obj_path or "input/scene/scene.obj"
-        if self._proj_root and scene.startswith(self._proj_root):
-            scene = os.path.relpath(scene, self._proj_root)
-        self._cmd_preview.setText(
-            f"{bin_disp}  {scene}  config/config.txt  input/src/src.txt  input/rec/rec.txt  config/poles.txt")
 
     def _field_binding_h(self, voxels, h):
         """Coarsest-constraint grid spacing that fits the FIELD allocation (36 B/vox host,

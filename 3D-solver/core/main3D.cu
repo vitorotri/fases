@@ -1070,39 +1070,59 @@ int main(int argc, char *argv[]){
     }
 	*/
 	
-	// --------------------------------------- Memory assessment ----------------------------------------------
+	// -------------------------------- Memory assessment for animations --------------------------------------
 	
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		printf("[!] CUDA error: %s\n", cudaGetErrorString(err));
 	}
 	
-	size_t anim_step = (int)(0.01*Nt);
-	if (anim_step == 0) anim_step = 1; // Nt < 40 would make n % anim_step divide by zero (fix this)
-	size_t frames = Nt/anim_step; // make denominator smaller for more frames
-	printf("\n[OK] anim_step = %d\n\n",anim_step);
-	size_t anim_s = frames*N*sizeof(float); // animation size in bytess
-	
-	if ((anim_s/1000000000.0) > 5.2){
-		printf("\n[!] Memory to animate is %f, larger than 5.2 GB, exiting...\n\n\n",anim_s/1000000000.0);
+	// ---- animation frame sampling ----
+	// User picks fps (real-time playback); frames capped so total anim memory stays under a
+	// fraction of the machine's ACTUAL RAM (queried, not hardcoded). RAM cap wins over fps.
+	double ram_total = (double)sysconf(_SC_PHYS_PAGES) * (double)sysconf(_SC_PAGE_SIZE); // bytes
+	const double RAM_FRACTION = 0.85;                 // <<< EDIT: max share of RAM for the animation
+	double ram_cap = RAM_FRACTION * ram_total;
+
+	float fps = (conf_arr.size() > 21) ? (float)conf_arr[21] : 24.0f;   // config line 22 (after slices)
+	if (fps < 1.0f) fps = 1.0f;
+
+	size_t frame_bytes   = (size_t)N * sizeof(float);          // bytes per saved frame
+	double t_real        = (double)Nt * dt;                    // simulated duration [s]
+	size_t frames_wanted = (size_t)std::ceil((double)fps * t_real);
+	if (frames_wanted < 1) frames_wanted = 1;
+
+	if ((double)frame_bytes > ram_cap) {                       // one frame already too big
+		printf("\n[!] One frame is %.2f GB > %.2f GB cap; cannot animate. Exiting.\n\n",
+		       frame_bytes/1e9, ram_cap/1e9);
 		return -1;
 	}
+	size_t max_frames = (size_t)(ram_cap / (double)frame_bytes);
+	size_t frames     = std::min(frames_wanted, max_frames);   // RAM ceiling overrides fps
+
+	size_t anim_step = Nt / frames;
+	if (anim_step == 0) anim_step = 1;                          // Nt < frames -> every step
+	frames = Nt / anim_step;                                    // actual frames after integer floor
+	size_t anim_s = frames * frame_bytes;
+
+	printf("\n[OK] fps=%.1f  anim_step=%zu  frames=%zu  anim mem=%.2f GB (cap %.2f / %.2f GB)\n\n",
+	       fps, anim_step, frames, anim_s/1e9, ram_cap/1e9, ram_total/1e9);
 	
-	// Can handle much more memory if save animation in chuncks and assemble together:
+	// Can handle much more memory if save animation in chuncks and assembled together:
 	// e.g., the last sound pressure field is the initial field for the next instant in time.
 
 
-	// ---------------------------------- animation arrays ---------------------------------
+	// ------------------------------------------ animation arrays --------------------------------------------
 	
-	int i0 = i_src;
+	int i0 = (int)(conf_arr[18] / h) + 3;
 	size_t stride_X = (size_t)Ny * (size_t)Nz;
 	std::vector<float> p_X(stride_X); // reuse each frame
 	
-	int j0 = j_src;
+	int j0 = (int)(conf_arr[19] / h) + 3;
 	size_t stride_Y = (size_t)Nx * (size_t)Nz;
 	std::vector<float> p_Y(stride_Y); // reuse each frame
 	
-	int k0 = k_src;
+	int k0 = (int)(conf_arr[20] / h) + 3;
 	size_t stride_Z = (size_t)Nx * (size_t)Ny;
 	std::vector<float> p_Z(stride_Z); // reuse each frame
 
