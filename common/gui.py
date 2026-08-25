@@ -3656,6 +3656,7 @@ class MainWindow(QMainWindow):
 
         # left — GL + status
         gl_wrap = QWidget()
+        self._gl_wrap = gl_wrap          # panel overlay is sized to this (inside the margin)
         gl_vlay = QVBoxLayout(gl_wrap)
         gl_vlay.setContentsMargins(0,0,0,0); gl_vlay.setSpacing(3)
 
@@ -3797,10 +3798,10 @@ class MainWindow(QMainWindow):
         """Keep the overlay panel full-height at its current x, the reopen hotzone docked
         to the left edge, and push the scene's Src/Rec bar + HUD text clear of the panel
         (indent them by the panel's on-screen right edge) so it never covers them."""
-        h = self._central.height()
-        self._tabs.setGeometry(self._panel_x, 0, self._PANEL_W, h)
+        g = self._gl_wrap.geometry()     # scene area, already inset by the root margin
+        self._tabs.setGeometry(g.x() + self._panel_x, g.y(), self._PANEL_W, g.height())
         self._tabs.raise_()
-        self._panel_grip.setGeometry(0, 0, self._GRIP_W, h)
+        self._panel_grip.setGeometry(g.x(), g.y(), self._GRIP_W, g.height())
         if not self._panel_open:
             self._panel_grip.raise_()
         vis = max(0, self._panel_x + self._PANEL_W)    # panel's right edge on screen (0 hidden)
