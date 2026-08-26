@@ -541,7 +541,10 @@ class GLViewer(QOpenGLWidget):
         self._anim_min = -0.5
         self._anim_max = 0.5
         self._anim_tex = {}        # axis -> GL texture id
-        self._anim_palette = 'color'   # 'color' | 'greys'
+        self._anim_palette = 'color'   # 'color' | 'greys' | 'particles'
+        self._part = {}            # axis -> (F,H,W,2) solver particle positions (cell units)
+        self._part_idx = {}        # axis -> (rows,cols) strided display sample indices
+        self._part_tex = None      # lazy round-ball point-sprite texture
         self._lut = None; self._lut_key = None
 
         # pivot (orbit centre = mesh centre)
@@ -680,6 +683,39 @@ class GLViewer(QOpenGLWidget):
             frames = max(frames, F)
         if not anim:
             return 0
+        # particle positions: one bin per in-plane component (like the Poynting bins), (F,H,W,2)
+        pplanes = {'x': ("ry_X.bin", "rz_X.bin", Nz, Ny),
+                   'y': ("rx_Y.bin", "rz_Y.bin", Nz, Nx),
+                   'z': ("rx_Z.bin", "ry_Z.bin", Ny, Nx)}
+        self._part = {}
+        for ax, (f0, f1, hgt, wid) in pplanes.items():
+            p0 = os.path.join(out_dir, f0); p1 = os.path.join(out_dir, f1)
+            if not (os.path.isfile(p0) and os.path.isfile(p1)):
+                continue
+            a0 = np.fromfile(p0, np.float32); a1 = np.fromfile(p1, np.float32)
+            per = hgt * wid
+            if per == 0 or a0.size < per or a1.size < per:
+                continue
+            F = min(a0.size, a1.size) // per
+            c0 = a0[:F * per].reshape(F, hgt, wid); c1 = a1[:F * per].reshape(F, hgt, wid)
+            self._part[ax] = np.stack([c0, c1], axis=-1)
+        self._part_idx = {}
+        self._part_rest = {}
+        mags = []
+        for ax, P in self._part.items():
+            _, H, W, _ = P.shape
+            stride = max(1, min(H, W) // 60)          # ~60 particles per side
+            rr, cc = np.meshgrid(np.arange(0, H, stride), np.arange(0, W, stride), indexing='ij')
+            self._part_idx[ax] = (rr.ravel(), cc.ravel())
+            self._part_rest[ax] = P[0]                # rest = frame-0 positions
+            mags.append(np.abs(P - P[0]).max(axis=0).ravel())   # per-cell peak displacement
+        # auto gain (no knob): scale so a typical moving cell swings ~0.75 cell; robust to the
+        # loud near-source spike via the median of active cells. Physical disp is ~0.01 cell.
+        self._part_gain = 1.0
+        if mags:
+            act = np.concatenate(mags); act = act[act > 1e-12]
+            if act.size:
+                self._part_gain = 0.75 / float(np.median(act))
         self._anim = anim
         self._anim_frame = 0
         self.update()
@@ -726,7 +762,7 @@ class GLViewer(QOpenGLWidget):
 
     def _draw_anim(self):
         """Texture the visible slice quads with the current animation frame."""
-        if self._anim is None or self._slices is None:
+        if self._anim is None or self._slices is None or self._anim_palette == 'particles':
             return
         mn, mx = self._domain_min, self._domain_max
         x0, y0, z0 = float(self._slices[0]), float(self._slices[1]), float(self._slices[2])
@@ -776,6 +812,62 @@ class GLViewer(QOpenGLWidget):
             glEnd()
         glDisable(GL_TEXTURE_2D); glDisable(GL_ALPHA_TEST)
         glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_LIGHTING)
+
+    def _particle_tex(self):
+        """Lazy radial-alpha disc so points render as round balls (POINT_SMOOTH is square on
+        some drivers). White texture -> glColor tints it."""
+        if self._part_tex:
+            return self._part_tex
+        n = 32
+        yy, xx = np.mgrid[0:n, 0:n]
+        d = np.sqrt((xx - (n - 1) / 2.0) ** 2 + (yy - (n - 1) / 2.0) ** 2) / ((n - 1) / 2.0)
+        a = (np.clip(1.0 - d, 0.0, 1.0) ** 0.6 * 255).astype(np.uint8)
+        rgba = np.dstack([np.full((n, n), 255, np.uint8)] * 3 + [a])
+        tid = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tid)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, n, n, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba)
+        self._part_tex = tid
+        return tid
+
+    def _draw_particles(self):
+        """Plain-blue balls at the solver's absolute particle positions on each visible plane."""
+        if self._anim_palette != 'particles' or self._slices is None or not self._part_idx:
+            return
+        mn, mx = self._domain_min, self._domain_max
+        x0, y0, z0 = float(self._slices[0]), float(self._slices[1]), float(self._slices[2])
+        glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, self._particle_tex())
+        glEnable(GL_POINT_SPRITE); glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE)
+        glPointSize(6.0); glColor4f(0.15, 0.35, 0.95, 1.0)     # plain blue
+        glEnableClientState(GL_VERTEX_ARRAY)
+        for ax, P in self._part.items():
+            if not self._plane_vis[ax] or ax not in self._part_idx:
+                continue
+            _, H, W, _ = P.shape
+            rr, cc = self._part_idx[ax]
+            rest = self._part_rest[ax][rr, cc]
+            cur = P[self._anim_frame % len(P)][rr, cc]
+            pos = rest + np.clip(self._part_gain * (cur - rest), -4.0, 4.0)   # amplify, clamp
+            u = pos[:, 0] / W; v = pos[:, 1] / H
+            world = np.empty((len(pos), 3), np.float32)
+            if ax == 'x':
+                world[:, 0] = x0
+                world[:, 1] = mn[1] + u * (mx[1] - mn[1]); world[:, 2] = mn[2] + v * (mx[2] - mn[2])
+            elif ax == 'y':
+                world[:, 1] = y0
+                world[:, 0] = mn[0] + u * (mx[0] - mn[0]); world[:, 2] = mn[2] + v * (mx[2] - mn[2])
+            else:
+                world[:, 2] = z0
+                world[:, 0] = mn[0] + u * (mx[0] - mn[0]); world[:, 1] = mn[1] + v * (mx[1] - mn[1])
+            world = np.ascontiguousarray(world)
+            glVertexPointer(3, GL_FLOAT, 0, world)
+            glDrawArrays(GL_POINTS, 0, len(world))
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glDisable(GL_POINT_SPRITE); glDisable(GL_TEXTURE_2D)
+        glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
 
     def exit_placement_mode(self):
         self._mode      = self.MODE_NONE
@@ -868,6 +960,7 @@ class GLViewer(QOpenGLWidget):
         self._draw_mesh()
         self._draw_slices()
         self._draw_anim()
+        self._draw_particles()
         self._draw_rays()
         self._draw_sources()
         self._draw_receivers()
@@ -4548,10 +4641,12 @@ class MainWindow(QMainWindow):
         self._pal_group = QButtonGroup(self)
         rb_c = QRadioButton("Colour"); rb_c.setChecked(True)
         rb_g = QRadioButton("Greys")
-        self._pal_group.addButton(rb_c); self._pal_group.addButton(rb_g)
+        rb_p = QRadioButton("Particles")
+        self._pal_group.addButton(rb_c); self._pal_group.addButton(rb_g); self._pal_group.addButton(rb_p)
         rb_c.toggled.connect(lambda on: on and self._gl.set_anim_palette('color'))
         rb_g.toggled.connect(lambda on: on and self._gl.set_anim_palette('greys'))
-        an.addWidget(rb_c, 5, 1); an.addWidget(rb_g, 5, 2)
+        rb_p.toggled.connect(lambda on: on and self._gl.set_anim_palette('particles'))
+        an.addWidget(rb_c, 5, 1); an.addWidget(rb_g, 5, 2); an.addWidget(rb_p, 5, 3)
 
         self._anim_btn = QPushButton("▶︎  Play animation")
         self._anim_btn.clicked.connect(self._toggle_animation)

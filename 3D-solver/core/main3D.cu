@@ -1087,23 +1087,28 @@ int main(int argc, char *argv[]){
 	float fps = (conf_arr.size() > 21) ? (float)conf_arr[21] : 24.0f;   // config line 22 (after slices)
 	if (fps < 1.0f) fps = 1.0f;
 
-	size_t frame_bytes   = (size_t)N * sizeof(float);          // bytes per saved frame
+	// bytes actually saved per frame = the SLICES (not the full 3-D field): pressure + 2
+	// intensity components, over the three slice planes.
+	size_t per_frame = ((size_t)Ny*Nz + (size_t)Nx*Nz + (size_t)Nx*Ny) * 3 * sizeof(float);
 	double t_real        = (double)Nt * dt;                    // simulated duration [s]
+	// fps sets the frame density (frames per simulated second) with a sane minimum for a
+	// smooth clip; then capped by RAM and by Nt.
 	size_t frames_wanted = (size_t)std::ceil((double)fps * t_real);
-	if (frames_wanted < 1) frames_wanted = 1;
+	if (frames_wanted < 60) frames_wanted = 60;
 
-	if ((double)frame_bytes > ram_cap) {                       // one frame already too big
-		printf("\n[!] One frame is %.2f GB > %.2f GB cap; cannot animate. Exiting.\n\n",
-		       frame_bytes/1e9, ram_cap/1e9);
+	if ((double)per_frame > ram_cap) {                         // one frame already too big
+		printf("\n[!] One animation frame is %.3f GB > %.2f GB cap; cannot animate. Exiting.\n\n",
+		       per_frame/1e9, ram_cap/1e9);
 		return -1;
 	}
-	size_t max_frames = (size_t)(ram_cap / (double)frame_bytes);
+	size_t max_frames = (size_t)(ram_cap / (double)per_frame);
 	size_t frames     = std::min(frames_wanted, max_frames);   // RAM ceiling overrides fps
+	if (frames > (size_t)Nt) frames = (size_t)Nt;
 
 	size_t anim_step = Nt / frames;
 	if (anim_step == 0) anim_step = 1;                          // Nt < frames -> every step
 	frames = Nt / anim_step;                                    // actual frames after integer floor
-	size_t anim_s = frames * frame_bytes;
+	size_t anim_s = frames * per_frame;
 
 	printf("\n[OK] fps=%.1f  anim_step=%zu  frames=%zu  anim mem=%.2f GB (cap %.2f / %.2f GB)\n\n",
 	       fps, anim_step, frames, anim_s/1e9, ram_cap/1e9, ram_total/1e9);
@@ -1131,6 +1136,7 @@ int main(int argc, char *argv[]){
 	std::vector<float> Iy_X(stride_X), Iz_X(stride_X);   // YZ slice (x = x0)
 	std::vector<float> Ix_Y(stride_Y), Iz_Y(stride_Y);   // XZ slice (y = y0)
 	std::vector<float> Ix_Z(stride_Z), Iy_Z(stride_Z);   // XY slice (z = z0)
+
 
 	// open BIN file for writing pressure fields
 	FILE *file_pX = fopen(out_file("pressureX.bin").c_str(), "wb");
