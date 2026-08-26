@@ -983,7 +983,31 @@ class GLViewer(QOpenGLWidget):
         self._paint_origin(gp)
         if self._glyph_queue:
             self._paint_point_glyphs(gp)
+        self._paint_colorbar(gp)
         gp.end()
+
+    def _paint_colorbar(self, p):
+        """Vertical LUT scale bar on the middle-right edge while a colour/greys animation runs,
+        labelled with the user's Pressure range [min,max]."""
+        if self._anim is None or self._anim_palette not in ('color', 'greys'):
+            return
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import QRect
+        lut = pressure_lut(self._anim_palette, not SCENE_LIGHT_MODE)      # (256,3) uint8
+        strip = np.ascontiguousarray(lut[::-1])                          # row 0 = max at top
+        img = QImage(strip.data, 1, 256, 3, QImage.Format.Format_RGB888)
+        W, H = self.width(), self.height()
+        bw = 14; bh = max(120, int(H * 0.4)); bx = W - bw - 56; by = (H - bh) // 2
+        p.drawImage(QRect(bx, by, bw, bh), img)
+        fg = QColor(20, 20, 20) if SCENE_LIGHT_MODE else QColor(235, 235, 235)
+        p.setPen(fg); p.drawRect(QRect(bx, by, bw, bh))
+        f = QFont(); f.setPointSize(8); p.setFont(f)
+        lo, hi = self._anim_min, self._anim_max
+        tx = bx + bw + 5
+        p.drawText(bx - 2, by - 6, "Pa")
+        p.drawText(tx, by + 9, f"{hi:+.3g}")
+        p.drawText(tx, by + bh // 2 + 4, f"{(lo + hi) * 0.5:+.3g}")
+        p.drawText(tx, by + bh, f"{lo:+.3g}")
 
     # ── drawing helpers ──────────────────────────────────────
     def _draw_gizmo(self):
