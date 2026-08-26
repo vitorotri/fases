@@ -151,6 +151,7 @@ int main(int argc, char *argv[]){
     if (!estimate_only) {
     for (const char* fn : {"pressureX.bin", "pressureY.bin", "pressureZ.bin",
                            "Iy_X.bin", "Iz_X.bin", "Ix_Y.bin", "Iz_Y.bin", "Ix_Z.bin", "Iy_Z.bin",
+                           "vy_X.bin", "vz_X.bin", "vx_Y.bin", "vz_Y.bin", "vx_Z.bin", "vy_Z.bin",
                            "header.txt", "pre_header.txt"}) {
         // --ga-only reuses the prior run's header.txt (broadIR reads it) -> keep it.
         if (ga_only && (std::strcmp(fn, "header.txt") == 0 ||
@@ -1088,8 +1089,8 @@ int main(int argc, char *argv[]){
 	if (fps < 1.0f) fps = 1.0f;
 
 	// bytes actually saved per frame = the SLICES (not the full 3-D field): pressure + 2
-	// intensity components, over the three slice planes.
-	size_t per_frame = ((size_t)Ny*Nz + (size_t)Nx*Nz + (size_t)Nx*Ny) * 3 * sizeof(float);
+	// intensity + 2 velocity components, over the three slice planes.
+	size_t per_frame = ((size_t)Ny*Nz + (size_t)Nx*Nz + (size_t)Nx*Ny) * 5 * sizeof(float);
 	double t_real        = (double)Nt * dt;                    // simulated duration [s]
 	// fps sets the frame density (frames per simulated second) with a sane minimum for a
 	// smooth clip; then capped by RAM and by Nt.
@@ -1137,6 +1138,12 @@ int main(int argc, char *argv[]){
 	std::vector<float> Ix_Y(stride_Y), Iz_Y(stride_Y);   // XZ slice (y = y0)
 	std::vector<float> Ix_Z(stride_Z), Iy_Z(stride_Z);   // XY slice (z = z0)
 
+	// Raw in-plane particle VELOCITY per slice (one comp/array, same layout as Poynting). GUI
+	// integrates position from these (r += v*dt) for the particle animation.
+	std::vector<float> vy_X(stride_X), vz_X(stride_X);   // YZ slice -> (v,w)
+	std::vector<float> vx_Y(stride_Y), vz_Y(stride_Y);   // XZ slice -> (u,w)
+	std::vector<float> vx_Z(stride_Z), vy_Z(stride_Z);   // XY slice -> (u,v)
+
 
 	// open BIN file for writing pressure fields
 	FILE *file_pX = fopen(out_file("pressureX.bin").c_str(), "wb");
@@ -1164,6 +1171,17 @@ int main(int argc, char *argv[]){
 	FILE *file_IyZ = fopen(out_file("Iy_Z.bin").c_str(), "wb");
 	if (!file_IyX || !file_IzX || !file_IxY || !file_IzY || !file_IxZ || !file_IyZ){
 		printf("[!] Error opening Poynting I*_*.bin file(s)!\n"); exit(1);
+	}
+
+	// in-plane velocity bins for the particle animation (one per component, like the Poynting bins)
+	FILE *file_vyX = fopen(out_file("vy_X.bin").c_str(), "wb");
+	FILE *file_vzX = fopen(out_file("vz_X.bin").c_str(), "wb");
+	FILE *file_vxY = fopen(out_file("vx_Y.bin").c_str(), "wb");
+	FILE *file_vzY = fopen(out_file("vz_Y.bin").c_str(), "wb");
+	FILE *file_vxZ = fopen(out_file("vx_Z.bin").c_str(), "wb");
+	FILE *file_vyZ = fopen(out_file("vy_Z.bin").c_str(), "wb");
+	if (!file_vyX || !file_vzX || !file_vxY || !file_vzY || !file_vxZ || !file_vyZ){
+		printf("[!] Error opening v*_*.bin velocity file(s)!\n"); exit(1);
 	}
 
 	int src_idx = (conf_arr.size() > 17) ? conf_arr[17] : 0; // source index to save on files
@@ -1267,11 +1285,15 @@ int main(int argc, char *argv[]){
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
     				Iy_X[dst] = v0[src] * inv;
     				Iz_X[dst] = w0[src] * inv;
+    				vy_X[dst] = v0[src];   // raw in-plane velocity (v,w)
+    				vz_X[dst] = w0[src];
   				}
 			}
 			fwrite(p_X.data(),  sizeof(float), (size_t)Ny*(size_t)Nz, file_pX);
 			fwrite(Iy_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_IyX);
 			fwrite(Iz_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_IzX);
+			fwrite(vy_X.data(), sizeof(float), stride_X, file_vyX);
+			fwrite(vz_X.data(), sizeof(float), stride_X, file_vzX);
 
 			// XZ slice at j0: dst = i + Nx*k ; in-plane comps (Ix, Iz)
 			#pragma omp parallel for collapse(2) schedule(static)
@@ -1284,11 +1306,15 @@ int main(int argc, char *argv[]){
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
     				Ix_Y[dst] = u0[src] * inv;
     				Iz_Y[dst] = w0[src] * inv;
+    				vx_Y[dst] = u0[src];   // raw in-plane velocity (u,w)
+    				vz_Y[dst] = w0[src];
   				}
 			}
 			fwrite(p_Y.data(),  sizeof(float), (size_t)Nx*(size_t)Nz, file_pY);
 			fwrite(Ix_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_IxY);
 			fwrite(Iz_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_IzY);
+			fwrite(vx_Y.data(), sizeof(float), stride_Y, file_vxY);
+			fwrite(vz_Y.data(), sizeof(float), stride_Y, file_vzY);
 
 			// XY slice at k0: dst = i + Nx*j ; in-plane comps (Ix, Iy)
 			#pragma omp parallel for collapse(2) schedule(static)
@@ -1301,11 +1327,15 @@ int main(int argc, char *argv[]){
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
     				Ix_Z[dst] = u0[src] * inv;
     				Iy_Z[dst] = v0[src] * inv;
+    				vx_Z[dst] = u0[src];   // raw in-plane velocity (u,v)
+    				vy_Z[dst] = v0[src];
   				}
 			}
 			fwrite(p_Z.data(),  sizeof(float), (size_t)Nx*(size_t)Ny, file_pZ);
 			fwrite(Ix_Z.data(), sizeof(float), (size_t)Nx*(size_t)Ny, file_IxZ);
 			fwrite(Iy_Z.data(), sizeof(float), (size_t)Nx*(size_t)Ny, file_IyZ);
+			fwrite(vx_Z.data(), sizeof(float), stride_Z, file_vxZ);
+			fwrite(vy_Z.data(), sizeof(float), stride_Z, file_vyZ);
     			
     		// increment real size of binnaries
     		pbin_size += 1;
@@ -1343,6 +1373,7 @@ int main(int argc, char *argv[]){
     
     fclose(file_pX); fclose(file_pY); fclose(file_pZ);
     fclose(file_IyX); fclose(file_IzX); fclose(file_IxY); fclose(file_IzY); fclose(file_IxZ); fclose(file_IyZ);
+    fclose(file_vyX); fclose(file_vzX); fclose(file_vxY); fclose(file_vzY); fclose(file_vxZ); fclose(file_vyZ);
     
     // --ga-only reuses the prior run's header.txt (grid/time unchanged); rewriting it here with a
     // skipped time-march would stamp a wrong pbin_size, so leave the valid one in place.

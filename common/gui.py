@@ -538,12 +538,13 @@ class GLViewer(QOpenGLWidget):
         self._plane_vis = {'x': True, 'y': True, 'z': True}  # which slice planes show / animate
         self._anim = None          # {'x':(F,h,w), ...} loaded pressure-slice frames, or None
         self._anim_frame = 0
-        self._anim_min = -0.5
-        self._anim_max = 0.5
+        self._anim_min = -0.01
+        self._anim_max = 0.01
         self._anim_tex = {}        # axis -> GL texture id
         self._anim_palette = 'color'   # 'color' | 'greys' | 'particles'
-        self._part = {}            # axis -> (F,H,W,2) solver particle positions (cell units)
+        self._pdisp = {}           # axis -> (F,H,W,2) pressure-derived particle displacement (cells)
         self._part_idx = {}        # axis -> (rows,cols) strided display sample indices
+        self._part_gain = 1.0      # auto display gain (no knob)
         self._part_tex = None      # lazy round-ball point-sprite texture
         self._lut = None; self._lut_key = None
 
@@ -683,12 +684,16 @@ class GLViewer(QOpenGLWidget):
             frames = max(frames, F)
         if not anim:
             return 0
-        # particle positions: one bin per in-plane component (like the Poynting bins), (F,H,W,2)
-        pplanes = {'x': ("ry_X.bin", "rz_X.bin", Nz, Ny),
-                   'y': ("rx_Y.bin", "rz_Y.bin", Nz, Nx),
-                   'z': ("rx_Z.bin", "ry_Z.bin", Ny, Nx)}
-        self._part = {}
-        for ax, (f0, f1, hgt, wid) in pplanes.items():
+        self._anim = anim
+        # Particles: main exports the in-plane VELOCITY slices (one bin per component). GUI just
+        # integrates position like the script:  r[n] = r[n-1] + v[n]*dt  => displacement = cumsum(v)
+        # over frames. dt folds into one auto display gain (no knob). Single integration of the
+        # solver's exact velocity -> clean return-to-rest (no gradient noise; fixes Ricker).
+        vplanes = {'x': ("vy_X.bin", "vz_X.bin", Nz, Ny),
+                   'y': ("vx_Y.bin", "vz_Y.bin", Nz, Nx),
+                   'z': ("vx_Z.bin", "vy_Z.bin", Ny, Nx)}
+        self._pdisp = {}; self._part_idx = {}; mags = []
+        for ax, (f0, f1, hgt, wid) in vplanes.items():
             p0 = os.path.join(out_dir, f0); p1 = os.path.join(out_dir, f1)
             if not (os.path.isfile(p0) and os.path.isfile(p1)):
                 continue
@@ -697,26 +702,20 @@ class GLViewer(QOpenGLWidget):
             if per == 0 or a0.size < per or a1.size < per:
                 continue
             F = min(a0.size, a1.size) // per
-            c0 = a0[:F * per].reshape(F, hgt, wid); c1 = a1[:F * per].reshape(F, hgt, wid)
-            self._part[ax] = np.stack([c0, c1], axis=-1)
-        self._part_idx = {}
-        self._part_rest = {}
-        mags = []
-        for ax, P in self._part.items():
-            _, H, W, _ = P.shape
-            stride = max(1, min(H, W) // 60)          # ~60 particles per side
-            rr, cc = np.meshgrid(np.arange(0, H, stride), np.arange(0, W, stride), indexing='ij')
+            vcol = a0[:F * per].reshape(F, hgt, wid); vrow = a1[:F * per].reshape(F, hgt, wid)
+            dcol = np.cumsum(vcol, axis=0); drow = np.cumsum(vrow, axis=0)      # r += v*dt
+            self._pdisp[ax] = np.stack([dcol, drow], axis=-1).astype(np.float32)   # (F,H,W,2)
+            stride = max(1, min(hgt, wid) // 60)   # ~60 particles per side
+            rr, cc = np.meshgrid(np.arange(0, hgt, stride), np.arange(0, wid, stride), indexing='ij')
             self._part_idx[ax] = (rr.ravel(), cc.ravel())
-            self._part_rest[ax] = P[0]                # rest = frame-0 positions
-            mags.append(np.abs(P - P[0]).max(axis=0).ravel())   # per-cell peak displacement
-        # auto gain (no knob): scale so a typical moving cell swings ~0.75 cell; robust to the
-        # loud near-source spike via the median of active cells. Physical disp is ~0.01 cell.
+            mags.append(np.abs(self._pdisp[ax]).max(axis=0).ravel())
+        # auto gain (no knob): typical active cell swings ~0.6 cell; median is robust to the loud
+        # near-source spike that would otherwise crush the rest of the field.
         self._part_gain = 1.0
         if mags:
             act = np.concatenate(mags); act = act[act > 1e-12]
             if act.size:
-                self._part_gain = 0.75 / float(np.median(act))
-        self._anim = anim
+                self._part_gain = 0.6 / float(np.median(act))
         self._anim_frame = 0
         self.update()
         return frames
@@ -832,27 +831,29 @@ class GLViewer(QOpenGLWidget):
         return tid
 
     def _draw_particles(self):
-        """Plain-blue balls at the solver's absolute particle positions on each visible plane."""
+        """Plain-blue balls displaced from their rest cell by the pressure-derived displacement;
+        they return to rest once the wavefront has passed (displacement -> 0)."""
         if self._anim_palette != 'particles' or self._slices is None or not self._part_idx:
             return
         mn, mx = self._domain_min, self._domain_max
         x0, y0, z0 = float(self._slices[0]), float(self._slices[1]), float(self._slices[2])
+        G = self._part_gain
         glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, self._particle_tex())
         glEnable(GL_POINT_SPRITE); glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE)
         glPointSize(6.0); glColor4f(0.15, 0.35, 0.95, 1.0)     # plain blue
         glEnableClientState(GL_VERTEX_ARRAY)
-        for ax, P in self._part.items():
+        for ax, D in self._pdisp.items():
             if not self._plane_vis[ax] or ax not in self._part_idx:
                 continue
-            _, H, W, _ = P.shape
+            _, H, W, _ = D.shape
             rr, cc = self._part_idx[ax]
-            rest = self._part_rest[ax][rr, cc]
-            cur = P[self._anim_frame % len(P)][rr, cc]
-            pos = rest + np.clip(self._part_gain * (cur - rest), -4.0, 4.0)   # amplify, clamp
-            u = pos[:, 0] / W; v = pos[:, 1] / H
-            world = np.empty((len(pos), 3), np.float32)
+            disp = D[self._anim_frame % len(D)][rr, cc]        # (Nsel,2) displacement in cells
+            col = cc + 0.5 + np.clip(G * disp[:, 0], -4.0, 4.0)
+            row = rr + 0.5 + np.clip(G * disp[:, 1], -4.0, 4.0)
+            u = col / W; v = row / H
+            world = np.empty((len(col), 3), np.float32)
             if ax == 'x':
                 world[:, 0] = x0
                 world[:, 1] = mn[1] + u * (mx[1] - mn[1]); world[:, 2] = mn[2] + v * (mx[2] - mn[2])
@@ -4616,9 +4617,9 @@ class MainWindow(QMainWindow):
         prow = QHBoxLayout(); prow.setSpacing(4)
         prow.addWidget(QLabel("Pressure range [Pa]:"))
         self._pmin = QDoubleSpinBox(); self._pmin.setRange(-1e6, 1e6); self._pmin.setDecimals(4)
-        self._pmin.setValue(-0.5); self._pmin.setMaximumWidth(90)
+        self._pmin.setValue(-0.01); self._pmin.setMaximumWidth(90)
         self._pmax = QDoubleSpinBox(); self._pmax.setRange(-1e6, 1e6); self._pmax.setDecimals(4)
-        self._pmax.setValue(0.5); self._pmax.setMaximumWidth(90)
+        self._pmax.setValue(0.01); self._pmax.setMaximumWidth(90)
         self._pmin.valueChanged.connect(self._on_prange); self._pmax.valueChanged.connect(self._on_prange)
         prow.addWidget(self._pmin); prow.addWidget(QLabel("to")); prow.addWidget(self._pmax)
         prow.addStretch(1)
