@@ -707,7 +707,11 @@ class GLViewer(QOpenGLWidget):
             self._pdisp[ax] = np.stack([dcol, drow], axis=-1).astype(np.float32)   # (F,H,W,2)
             stride = max(1, min(hgt, wid) // 60)   # ~60 particles per side
             rr, cc = np.meshgrid(np.arange(0, hgt, stride), np.arange(0, wid, stride), indexing='ij')
-            self._part_idx[ax] = (rr.ravel(), cc.ravel())
+            rr = rr.ravel(); cc = cc.ravel()
+            rng = np.random.default_rng(ord(ax))                        # distinct, stable per plane
+            pr = 0.4 * rng.random(len(rr)).astype(np.float32)           # +[0,0.4] cell jitter
+            pc = 0.4 * rng.random(len(cc)).astype(np.float32)
+            self._part_idx[ax] = (rr, cc, pr, pc)
             mags.append(np.abs(self._pdisp[ax]).max(axis=0).ravel())
         # auto gain (no knob): typical active cell swings ~0.6 cell; median is robust to the loud
         # near-source spike that would otherwise crush the rest of the field.
@@ -848,10 +852,10 @@ class GLViewer(QOpenGLWidget):
             if not self._plane_vis[ax] or ax not in self._part_idx:
                 continue
             _, H, W, _ = D.shape
-            rr, cc = self._part_idx[ax]
+            rr, cc, pr, pc = self._part_idx[ax]
             disp = D[self._anim_frame % len(D)][rr, cc]        # (Nsel,2) displacement in cells
-            col = cc + 0.5 + np.clip(G * disp[:, 0], -4.0, 4.0)
-            row = rr + 0.5 + np.clip(G * disp[:, 1], -4.0, 4.0)
+            col = cc + 0.5 + pc + np.clip(G * disp[:, 0], -4.0, 4.0)
+            row = rr + 0.5 + pr + np.clip(G * disp[:, 1], -4.0, 4.0)
             u = col / W; v = row / H
             world = np.empty((len(col), 3), np.float32)
             if ax == 'x':
