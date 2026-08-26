@@ -1264,7 +1264,7 @@ class GLViewer(QOpenGLWidget):
 
         # Pass 4: domain bounding box — explicit hexahedron from the origin
         # (0,0,0) to (Lx, Ly, Lz), drawn as a white wireframe when enabled.
-        if self._bbox_visible:
+        if self._bbox_visible and not getattr(self, "_dollhouse", False):
             self._draw_domain_box()
             glDisable(GL_BLEND)
 
