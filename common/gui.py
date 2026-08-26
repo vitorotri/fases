@@ -957,6 +957,18 @@ class GLViewer(QOpenGLWidget):
         glTranslatef(-self._pivot[0], -self._pivot[1], -self._pivot[2])
         self._mv   = glGetDoublev(GL_MODELVIEW_MATRIX)
         self._proj = glGetDoublev(GL_PROJECTION_MATRIX)
+        # camera view direction in world (into the scene), for the dollhouse facing test. Built
+        # by unprojecting screen-centre at depth 0 and 1 -> no matrix-layout guessing, correct
+        # for ortho AND perspective.
+        try:
+            vp = [0, 0, int(self.width()), int(self.height())]
+            cx, cy = self.width() * 0.5, self.height() * 0.5
+            p0 = np.array(gluUnProject(cx, cy, 0.0, self._mv, self._proj, vp))
+            p1 = np.array(gluUnProject(cx, cy, 1.0, self._mv, self._proj, vp))
+            vd = p1 - p0
+            self._view_dir = vd / (np.linalg.norm(vd) or 1.0)
+        except Exception:
+            self._view_dir = None
 
     def paintGL(self):
         glClearColor(*SCENE_BG)        # re-applied each frame so Dark/Light toggles take effect
@@ -1144,10 +1156,36 @@ class GLViewer(QOpenGLWidget):
             painter.drawText(int(wx), int(wy), label)
         painter.end()
 
+    def _dollhouse_cut(self, g):
+        """True if group g is a near, camera-facing wall to hide in dollhouse mode. Geometric:
+        outward direction (centroid - room centre) vs view direction; grazing bias keeps floor/
+        ceiling. Shared by rendering AND picking so you can't select a hidden near wall."""
+        if not getattr(self, "_dollhouse", False) or g.get("is_bbox"):
+            return False
+        vdir = getattr(self, "_view_dir", None)
+        if vdir is None:
+            return False
+        cen = g.get("_cen")
+        if cen is None:
+            tris = np.asarray(g["tris"])
+            if len(tris) == 0:
+                return False
+            cen = np.asarray(self._verts, np.float32)[np.unique(tris.ravel())].mean(axis=0)
+            g["_cen"] = cen
+        out = cen - np.asarray(self._pivot, np.float32)
+        n = float(np.linalg.norm(out))
+        if n < 1e-9:
+            return False
+        return float(np.dot(out / n, vdir)) < -0.2
+
     def _draw_mesh(self):
         if len(self._verts) == 0:
             return
-        verts = self._verts
+        verts = np.asarray(self._verts, np.float32)
+        # dollhouse: hide wall groups facing the camera (fills+wires) so the outside view matches
+        # the inside view. Selected wall is kept so you always see what you're editing.
+        def _cut(g):
+            return self._dollhouse_cut(g) and g["name"] != self._selected_layer
 
         # Final visualization rule:
         #   1. OBJ groups keep their own assigned colors. No grouping by wall,
@@ -1161,6 +1199,7 @@ class GLViewer(QOpenGLWidget):
         #   4. The boundary object remains wire-only.
         glDisable(GL_CULL_FACE)
         glDisable(GL_LIGHTING)          # flat, stable layer colors
+
         glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
         glDisable(GL_BLEND)
@@ -1189,18 +1228,19 @@ class GLViewer(QOpenGLWidget):
         # anything else and draw order alone controls layering.
         GREY = GREY_FILL
         glDepthMask(GL_FALSE)
+        fill_a = 0.22
 
         # Pass A: FILLS first. Unselected layers get a transparent grey plane;
         # the selected layer gets its own vivid hue at SEL_ALPHA. Drawing every
         # fill BEFORE the wireframe is what keeps the highlighted layer BEHIND
         # the white wireframe instead of painting over it.
         for g in self._groups:
-            if g["is_bbox"] or not g["visible"]:
+            if g["is_bbox"] or not g["visible"] or _cut(g):
                 continue
             if self._selected_layer == g["name"]:
                 draw_triangles(g, alpha=SEL_ALPHA)            # selected: own colour
             else:
-                draw_triangles(g, alpha=0.22, color=GREY)     # others: grey
+                draw_triangles(g, alpha=fill_a, color=GREY)   # others: grey
 
         # Pass B: feature-edge wireframe for ALL visible layers (the selected
         # one included), drawn last so the edges always sit on top of every
@@ -1208,7 +1248,7 @@ class GLViewer(QOpenGLWidget):
         glColor4f(*WIRE_COLOR)
         glLineWidth(1.3)
         for g in self._groups:
-            if g["is_bbox"] or not g["visible"]:
+            if g["is_bbox"] or not g["visible"] or _cut(g):
                 continue
             edges = g.get("edges")
             if edges is None or len(edges) == 0:
@@ -1958,12 +1998,17 @@ class GLViewer(QOpenGLWidget):
         m = QMenu(self)
         ax = m.addAction("Hide axes" if self._axes_visible else "Show axes")
         th = m.addAction("Light scene" if not SCENE_LIGHT_MODE else "Dark scene")
+        dh = m.addAction("Exit dollhouse view" if getattr(self, "_dollhouse", False)
+                         else "Dollhouse view")
         chosen = m.exec(self.mapToGlobal(QPoint(int(qpos.x()), int(qpos.y()))))
         if chosen is ax:
             self._axes_visible = not self._axes_visible
             self.update()
         elif chosen is th:
             self.themeToggle.emit()
+        elif chosen is dh:
+            self._dollhouse = not getattr(self, "_dollhouse", False)
+            self.update()
 
     def _find_nearest_point(self, qpos, radius=30.0):
         """Return (kind, idx) of the nearest source/receiver within `radius`
@@ -2136,6 +2181,7 @@ class GLViewer(QOpenGLWidget):
         for g in self._groups:
             if not g["visible"]: continue
             if g["is_bbox"] and not self._bbox_visible: continue
+            if self._dollhouse_cut(g): continue      # can't pick a hidden near wall
             tris = g["tris"]
             if len(tris) == 0: continue
             t = ray_group_hit(ro.astype(np.float64),
