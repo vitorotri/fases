@@ -709,10 +709,9 @@ class GLViewer(QOpenGLWidget):
             rr, cc = np.meshgrid(np.arange(0, hgt, stride), np.arange(0, wid, stride), indexing='ij')
             rr = rr.ravel(); cc = cc.ravel()
             rng = np.random.default_rng(ord(ax))                        # distinct, stable per plane
-            # jitter as a fraction of the SPACING (stride cells), else a fixed sub-cell offset is
-            # tiny vs the multi-cell lattice and still looks ordered. +[0.15,0.45]*stride.
-            pr = ((0.15 + 0.3 * rng.random(len(rr))) * stride).astype(np.float32)
-            pc = ((0.15 + 0.3 * rng.random(len(cc))) * stride).astype(np.float32)
+            # jitter fills each lattice cell edge-to-edge: uniform [0,stride) so no ordered grid.
+            pr = (rng.random(len(rr)) * stride).astype(np.float32)
+            pc = (rng.random(len(cc)) * stride).astype(np.float32)
             self._part_idx[ax] = (rr, cc, pr, pc)
             mags.append(np.abs(self._pdisp[ax]).max(axis=0).ravel())
         # auto gain (no knob): typical active cell swings ~0.6 cell; median is robust to the loud
