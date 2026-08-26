@@ -693,6 +693,7 @@ class GLViewer(QOpenGLWidget):
                    'y': ("vx_Y.bin", "vz_Y.bin", Nz, Nx),
                    'z': ("vx_Z.bin", "vy_Z.bin", Ny, Nx)}
         self._pdisp = {}; self._part_idx = {}; mags = []
+        stride = max(1, max(Nx, Ny, Nz) // 60)     # ONE spacing for all planes -> uniform density
         for ax, (f0, f1, hgt, wid) in vplanes.items():
             p0 = os.path.join(out_dir, f0); p1 = os.path.join(out_dir, f1)
             if not (os.path.isfile(p0) and os.path.isfile(p1)):
@@ -705,12 +706,13 @@ class GLViewer(QOpenGLWidget):
             vcol = a0[:F * per].reshape(F, hgt, wid); vrow = a1[:F * per].reshape(F, hgt, wid)
             dcol = np.cumsum(vcol, axis=0); drow = np.cumsum(vrow, axis=0)      # r += v*dt
             self._pdisp[ax] = np.stack([dcol, drow], axis=-1).astype(np.float32)   # (F,H,W,2)
-            stride = max(1, min(hgt, wid) // 60)   # ~60 particles per side
             rr, cc = np.meshgrid(np.arange(0, hgt, stride), np.arange(0, wid, stride), indexing='ij')
             rr = rr.ravel(); cc = cc.ravel()
             rng = np.random.default_rng(ord(ax))                        # distinct, stable per plane
-            pr = 0.4 * rng.random(len(rr)).astype(np.float32)           # +[0,0.4] cell jitter
-            pc = 0.4 * rng.random(len(cc)).astype(np.float32)
+            # jitter as a fraction of the SPACING (stride cells), else a fixed sub-cell offset is
+            # tiny vs the multi-cell lattice and still looks ordered. +[0.15,0.45]*stride.
+            pr = ((0.15 + 0.3 * rng.random(len(rr))) * stride).astype(np.float32)
+            pc = ((0.15 + 0.3 * rng.random(len(cc))) * stride).astype(np.float32)
             self._part_idx[ax] = (rr, cc, pr, pc)
             mags.append(np.abs(self._pdisp[ax]).max(axis=0).ravel())
         # auto gain (no knob): typical active cell swings ~0.6 cell; median is robust to the loud
@@ -720,6 +722,7 @@ class GLViewer(QOpenGLWidget):
             act = np.concatenate(mags); act = act[act > 1e-12]
             if act.size:
                 self._part_gain = 0.6 / float(np.median(act))
+        self._part_dist_ref = float(self._dist)   # zoom at load; motion scales with _dist/this
         self._anim_frame = 0
         self.update()
         return frames
@@ -841,12 +844,13 @@ class GLViewer(QOpenGLWidget):
             return
         mn, mx = self._domain_min, self._domain_max
         x0, y0, z0 = float(self._slices[0]), float(self._slices[1]), float(self._slices[2])
-        G = self._part_gain
+        G = self._part_gain                     # movement untouched
+        clamp = 4.0
         glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, self._particle_tex())
         glEnable(GL_POINT_SPRITE); glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE)
-        glPointSize(6.0); glColor4f(0.15, 0.35, 0.95, 1.0)     # plain blue
+        glPointSize(5.0); glColor4f(0.34, 0.30, 1.0, 1.0)     # bright purple-blue
         glEnableClientState(GL_VERTEX_ARRAY)
         for ax, D in self._pdisp.items():
             if not self._plane_vis[ax] or ax not in self._part_idx:
@@ -854,8 +858,8 @@ class GLViewer(QOpenGLWidget):
             _, H, W, _ = D.shape
             rr, cc, pr, pc = self._part_idx[ax]
             disp = D[self._anim_frame % len(D)][rr, cc]        # (Nsel,2) displacement in cells
-            col = cc + 0.5 + pc + np.clip(G * disp[:, 0], -4.0, 4.0)
-            row = rr + 0.5 + pr + np.clip(G * disp[:, 1], -4.0, 4.0)
+            col = cc + 0.5 + pc + np.clip(G * disp[:, 0], -clamp, clamp)
+            row = rr + 0.5 + pr + np.clip(G * disp[:, 1], -clamp, clamp)
             u = col / W; v = row / H
             world = np.empty((len(col), 3), np.float32)
             if ax == 'x':
