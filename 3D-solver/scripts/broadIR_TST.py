@@ -80,6 +80,20 @@ LIR = low_arrays[0]
 r = Fraction(fs/fs_fv).limit_denominator(2000)
 LIR = resample_poly(LIR, r.numerator, r.denominator)   # anti-aliased
 
+'''
+# Ricker Wavelet lag
+sigma_s = 1/(np.sqrt(2)*np.pi*0.3*f_cutoff_sim)
+ts_ = np.ceil(8.5*sigma_s/dt_half)
+lag = int(round(ts_*dt_half*fs))
+'''
+# PCS lag
+sigma_s = 0.425 / f_cutoff
+ts_ = np.ceil(8.5 * sigma_s / dt_half)
+lag = int(round(ts_ * dt_half * fs)) # ts_ on the dt_half grid -> samples at 44100
+
+# apply lag
+LIR = np.roll(LIR, -lag)
+
 plt.figure()
 plt.plot(LIR)
 plt.plot(high_arrays[0])
@@ -106,9 +120,6 @@ for sos, name in [(sos_lp, 'low'), (sos_hp, 'high')]:
 	plt.margins(0, 0.1)
 	plt.grid(which='both', axis='both')
 	plt.axvline(f_cutoff, color='green') # cutoff frequency
-
-lag = 159 # ts_ * dt_half * 44100
-HIR = np.roll(HIR, lag)
 
 plt.figure()
 plt.plot(LIR,'b')
