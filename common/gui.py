@@ -560,6 +560,7 @@ class GLViewer(QOpenGLWidget):
     # ── public ──────────────────────────────────────────────
     def load_mesh(self, verts, groups):
         self._verts  = verts
+        self._obj_geom_cache = None      # invalidate cached triangles for the inside-mesh test
         self._groups = []
         color_idx = 0   # counts only non-bbox groups so colors are never skipped
         for g in groups:
@@ -713,6 +714,14 @@ class GLViewer(QOpenGLWidget):
             # jitter fills each lattice cell edge-to-edge: uniform [0,stride) so no ordered grid.
             pr = (rng.random(len(rr)) * stride).astype(np.float32)
             pc = (rng.random(len(cc)) * stride).astype(np.float32)
+            # trim the PML absorbing band (PML_CELLS=20 in functions3D.cuh) on each side, plus
+            # anything outside the OBJ. Fixed 20 cells; bump if PML_CELLS changes in the solver.
+            PAD = 10
+            keep = (rr >= PAD) & (rr < hgt - PAD) & (cc >= PAD) & (cc < wid - PAD)
+            if self._slices is not None and len(self._verts):
+                w = self._cells_world(ax, wid, hgt, cc + 0.5 + pc, rr + 0.5 + pr)
+                keep &= self._inside_obj(w)
+            rr, cc, pr, pc = rr[keep], cc[keep], pr[keep], pc[keep]
             self._part_idx[ax] = (rr, cc, pr, pc)
             mags.append(np.abs(self._pdisp[ax]).max(axis=0).ravel())
         # auto gain (no knob): typical active cell swings ~0.6 cell; median is robust to the loud
@@ -817,6 +826,57 @@ class GLViewer(QOpenGLWidget):
             glEnd()
         glDisable(GL_TEXTURE_2D); glDisable(GL_ALPHA_TEST)
         glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_LIGHTING)
+
+    def _cells_world(self, ax, W, H, col, row):
+        """Map particle (col,row) cell coords on plane `ax` to world points (N,3)."""
+        mn, mx = self._domain_min, self._domain_max
+        x0, y0, z0 = float(self._slices[0]), float(self._slices[1]), float(self._slices[2])
+        u = col / W; v = row / H
+        w = np.empty((len(col), 3), np.float32)
+        if ax == 'x':
+            w[:, 0] = x0; w[:, 1] = mn[1] + u*(mx[1]-mn[1]); w[:, 2] = mn[2] + v*(mx[2]-mn[2])
+        elif ax == 'y':
+            w[:, 1] = y0; w[:, 0] = mn[0] + u*(mx[0]-mn[0]); w[:, 2] = mn[2] + v*(mx[2]-mn[2])
+        else:
+            w[:, 2] = z0; w[:, 0] = mn[0] + u*(mx[0]-mn[0]); w[:, 1] = mn[1] + v*(mx[1]-mn[1])
+        return w
+
+    def _obj_geom(self):
+        """Cached Möller constants for all non-bbox triangles, for the inside-mesh test."""
+        if getattr(self, "_obj_geom_cache", None) is not None:
+            return self._obj_geom_cache
+        verts = np.asarray(self._verts, np.float64)
+        T = [np.asarray(g["tris"]) for g in self._groups
+             if not g.get("is_bbox") and len(g["tris"])]
+        if not T or len(verts) == 0:
+            self._obj_geom_cache = None; return None
+        T = np.concatenate(T, 0)
+        a = verts[T[:, 0]]; e1 = verts[T[:, 1]] - a; e2 = verts[T[:, 2]] - a
+        rd = np.array([1.0, 0.0, 0.0])
+        pv = np.cross(rd, e2)
+        det = np.einsum('ij,ij->i', e1, pv)
+        ok = np.abs(det) > 1e-9
+        inv = np.zeros_like(det); inv[ok] = 1.0 / det[ok]
+        self._obj_geom_cache = (a, e1, e2, pv, inv, ok, rd)
+        return self._obj_geom_cache
+
+    def _inside_obj(self, pts):
+        """Point-in-mesh by +x ray parity (odd crossings = inside). Assumes a watertight shell.
+        ponytail: O(points * triangles), fine at load for room-sized meshes; add a BVH if huge."""
+        G = self._obj_geom()
+        if G is None:
+            return np.ones(len(pts), bool)
+        a, e1, e2, pv, inv, ok, rd = G
+        out = np.zeros(len(pts), bool)
+        for i, ro in enumerate(pts):
+            tv = ro - a
+            u = np.einsum('ij,ij->i', tv, pv) * inv
+            qv = np.cross(tv, e1)
+            v = (qv @ rd) * inv
+            t = np.einsum('ij,ij->i', e2, qv) * inv
+            hit = ok & (u >= 0) & (u <= 1) & (v >= 0) & (u + v <= 1) & (t > 1e-6)
+            out[i] = (int(hit.sum()) & 1) == 1
+        return out
 
     def _particle_tex(self):
         """Lazy radial-alpha disc so points render as round balls (POINT_SMOOTH is square on
@@ -1001,7 +1061,8 @@ class GLViewer(QOpenGLWidget):
     def _paint_colorbar(self, p):
         """Vertical LUT scale bar on the middle-right edge while a colour/greys animation runs,
         labelled with the user's Pressure range [min,max]."""
-        if self._anim is None or self._anim_palette not in ('color', 'greys'):
+        if (self._anim is None or self._anim_palette not in ('color', 'greys')
+                or not getattr(self, "_anim_playing", False)):
             return
         from PySide6.QtGui import QImage
         from PySide6.QtCore import QRect
@@ -4298,12 +4359,19 @@ class MainWindow(QMainWindow):
             cb.setChecked(not all_on)           # drives set_plane_visible via toggled
         self._planes_all_btn.setText("Show all" if all_on else "Hide all")
 
+    def _toggle_all_pml(self):
+        all_on = all(c.isChecked() for c in self._pml.values())
+        for c in self._pml.values():
+            c.setChecked(not all_on)
+        self._pml_all_btn.setText("Select all" if all_on else "Deselect all")
+
     def _on_prange(self, _=None):
         self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
 
     def _toggle_animation(self):
         t = getattr(self, "_anim_timer", None)
         if t is not None and t.isActive():          # currently playing -> stop
+            self._gl._anim_playing = False; self._gl.update()   # hide colorbar when paused
             t.stop()
             self._anim_btn.setText("▶︎  Play animation")
             return
@@ -4318,6 +4386,7 @@ class MainWindow(QMainWindow):
             self._anim_timer = QTimer(self)
             self._anim_timer.timeout.connect(self._gl.step_frame)
         self._anim_timer.start(max(1, int(1000 / self._fps.value())))
+        self._gl._anim_playing = True                        # show colorbar while playing
         self._anim_btn.setText("⏹  Stop animation")
         self._sb.showMessage(f"Playing {frames} frames at {self._fps.value()} fps")
 
@@ -4504,33 +4573,33 @@ class MainWindow(QMainWindow):
         self._cfg = {}
         def _add(key, lbl, val, mn, mx, dec, sfx):
             sp = ds(val, mn, mx, dec, sfx); self._cfg[key] = sp
-            lay.addRow(f"{lbl}:", sp)
+            lay.addRow(f"{lbl}", sp)
         # Temperature + Altitude first: they set the atmosphere (speed of sound), which the
         # estimate derives h / f_cutoff / rays from. config.txt is written/read by fixed index.
         _add("T_C",      "Temperature", 20., -30.,   50., 1, "°C")
         _add("altitude", "Altitude",    408., -500., 9000., 1, "m")   # config line 14 (v[13])
         lay.addRow(_eb)                                                # Estimate, under the atmosphere
-        _add("h",        "Grid spacing",     0.05, 0.001, 2.0,   3, "m")
-        _add("t_max",    "Simulation time",  0.5,  0.001, 60.0,  3, "s")
-        _add("f_cutoff", "Cutoff frequency", 250., 50.,   10000., 1, "Hz")
+        _add("h",        "Grid spacing ↔︎",     0.05, 0.001, 2.0,   3, "m")
+        _add("t_max",    "Simulation time 🕐︎",  0.5,  0.001, 60.0,  3, "s")
+        _add("f_cutoff", "Cutoff frequency ✁︎", 250., 50.,   10000., 1, "Hz")
         _add("CFL",      "CFL number",       0.40, 0.05,  0.50,  2, "")
 
         # Number of poles for the ADE (line 6 of config.txt; vectFIT reads v[5])
         self._npoles = QSpinBox(); self._npoles.setRange(1, 64)
         self._npoles.setValue(8); self._npoles.setMinimumWidth(130)
-        lay.addRow("ADE poles:", self._npoles)
+        lay.addRow("ADE poles", self._npoles)
 
         # Max reflection order for the ISM (line 13 of config.txt; main3D reads v[12])
         self._ism_order = QSpinBox(); self._ism_order.setRange(0, 20)
         self._ism_order.setValue(3); self._ism_order.setMinimumWidth(130)
-        lay.addRow("ISM max order:", self._ism_order)
+        lay.addRow("ISM max order", self._ism_order)
 
         # Number of rays for the ray-traced late tail (line 15 of config.txt; main3D
         # reads v[14]). Seeded from Vol.bin after a solve (Vorlander <k>); user may
         # override. Wide range for large rooms.
         self._nrays = QSpinBox(); self._nrays.setRange(0, 50_000_000)  # 0 = RT off (clean ISM-only test)
         self._nrays.setValue(20000); self._nrays.setMinimumWidth(130)
-        lay.addRow("Number of rays:", self._nrays)
+        lay.addRow("Number of rays", self._nrays)
 
         # Source type + frequency now live under the source table (Sources tab), built
         # before this tab. Wire the f_cutoff-dependent clamps here, where _cfg exists:
@@ -4550,6 +4619,9 @@ class MainWindow(QMainWindow):
                                          ("L_PML","x-"),("B_PML","y-"),("D_PML","z-")]):
             chk = QCheckBox(lbl); chk.setChecked(True)
             self._pml[k] = chk; grid.addWidget(chk, idx//3, idx%3)
+        self._pml_all_btn = QPushButton("Deselect all")
+        self._pml_all_btn.clicked.connect(self._toggle_all_pml)
+        grid.addWidget(self._pml_all_btn, 2, 0, 1, 3)
         root.addWidget(pml_box)
 
         cfg_btns = QHBoxLayout()
@@ -4582,7 +4654,7 @@ class MainWindow(QMainWindow):
         # 0=PCS, 1=Ricker, 2=Sinusoid.
         self._src_group = QButtonGroup(self)
         type_row = QHBoxLayout(); type_row.setContentsMargins(0, 0, 0, 0)
-        type_row.addWidget(QLabel("Source type:"))
+        type_row.addWidget(QLabel("Source type"))
         for sid, label in [(0, "PCS"), (1, "Ricker"), (2, "Sinusoid")]:
             rb = QRadioButton(label)
             rb.setIcon(make_pulse_icon(label.lower())); rb.setIconSize(QSize(46, 28))
@@ -4597,7 +4669,7 @@ class MainWindow(QMainWindow):
         self._src_freq = QSpinBox(); self._src_freq.setRange(1, 1_000_000)
         self._src_freq.setValue(100); self._src_freq.setSuffix(" Hz")
         self._src_freq.setAccelerated(True); self._src_freq.setMinimumWidth(120)
-        self._src_freq_lbl = QLabel("Frequency:")
+        self._src_freq_lbl = QLabel("Frequency")
         freq_row.addWidget(self._src_freq_lbl); freq_row.addWidget(self._src_freq); freq_row.addStretch(1)
         lay.addLayout(freq_row)
 
@@ -4658,11 +4730,11 @@ class MainWindow(QMainWindow):
 
         # ── Ray-Tracing: debug ray overlay (count + order + Trace/Clear) ──
         rt_box = QGroupBox("Ray-Tracing"); rt = QHBoxLayout(rt_box); rt.setSpacing(8)
-        rt.addWidget(QLabel("Debug rays:"))
+        rt.addWidget(QLabel("Debug rays"))
         self._dbg_rays = QSpinBox(); self._dbg_rays.setRange(1, 5000)
         self._dbg_rays.setValue(64); self._dbg_rays.setMinimumWidth(70)
         rt.addWidget(self._dbg_rays)
-        rt.addWidget(QLabel("Order:"))
+        rt.addWidget(QLabel("Order"))
         self._dbg_order = QSpinBox(); self._dbg_order.setRange(1, 20)
         self._dbg_order.setValue(5); self._dbg_order.setMinimumWidth(55)
         rt.addWidget(self._dbg_order)
@@ -4673,17 +4745,19 @@ class MainWindow(QMainWindow):
         lay.addWidget(rt_box)
 
         # ── Animation: fps + slice-plane positions (or pick in scene with Slice [L]) ──
-        an_box = QGroupBox("Animation"); an = QGridLayout(an_box); an.setSpacing(6)
-        an.addWidget(QLabel("fps:"), 0, 0)
+        an_box = QGroupBox("Animation"); an = QGridLayout(an_box)
+        an.setHorizontalSpacing(6); an.setVerticalSpacing(12)   # roomier rows
         self._fps = QSpinBox(); self._fps.setRange(1, 240); self._fps.setValue(24)
-        an.addWidget(self._fps, 0, 1)
+        frow = QHBoxLayout(); frow.setSpacing(6)      # keep the box snug to its label
+        frow.addWidget(QLabel("FPS")); frow.addWidget(self._fps); frow.addStretch(1)
+        an.addLayout(frow, 0, 0, 1, 7)
 
-        an.addWidget(QLabel("Slice planes [m]  (or pick in scene: Slice [L])"), 1, 0, 1, 7)
+        an.addWidget(QLabel("Slice planes [m]"), 1, 0, 1, 7)
         self._slice_sync = False        # guard: suppress field->gl while syncing gl->field
         self._slice_sb = {}
         srow = QHBoxLayout(); srow.setSpacing(4)
         for axis in ('x', 'y', 'z'):
-            srow.addWidget(QLabel(f"{axis}0:"))
+            srow.addWidget(QLabel(f"{axis}0"))
             sb = QDoubleSpinBox(); sb.setRange(-1e4, 1e4); sb.setDecimals(3); sb.setSingleStep(0.05)
             sb.setMaximumWidth(90); sb.valueChanged.connect(self._on_slice_field)
             srow.addWidget(sb); self._slice_sb[axis] = sb
@@ -4692,7 +4766,7 @@ class MainWindow(QMainWindow):
 
         # pressure colour range [Pa] for the animation
         prow = QHBoxLayout(); prow.setSpacing(4)
-        prow.addWidget(QLabel("Pressure range [Pa]:"))
+        prow.addWidget(QLabel("Pressure range [Pa]"))
         self._pmin = QDoubleSpinBox(); self._pmin.setRange(-1e6, 1e6); self._pmin.setDecimals(4)
         self._pmin.setValue(-0.01); self._pmin.setMaximumWidth(90)
         self._pmax = QDoubleSpinBox(); self._pmax.setRange(-1e6, 1e6); self._pmax.setDecimals(4)
@@ -4756,17 +4830,16 @@ class MainWindow(QMainWindow):
         for box in (rt_box, an_box, sim_box):
             box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        # ── output log ── stretch above pushes it to the BOTTOM; label sits snug above the
-        # box, which has a fixed height (no stretch cell = no gap).
-        lay.addStretch(1)
+        # ── output log ── fills all remaining height under the (fixed-height) boxes above
         lay.addWidget(QLabel("Output log:"))
         self._log = QTextEdit(); self._log.setReadOnly(True)
         self._log.setFont(QFont("Monospace", 10))
-        self._log.setFixedHeight(330)       # 50% taller than the old 220
+        self._log.setMinimumHeight(120)
+        self._log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._log.setStyleSheet(
             f"background:#000000;color:{PAL['text']};"
             f"border:1px solid {PAL['border']};")
-        lay.addWidget(self._log)
+        lay.addWidget(self._log, 1)         # stretch factor -> takes the leftover space
 
         self._solver_thread = None
         self._aural_queue = []      # remaining source indices to run (auralization mode)
