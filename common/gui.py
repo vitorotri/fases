@@ -3992,7 +3992,7 @@ class DraggableProgress(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PHASES - Parallel Hybrid Acoustic Solver for Enhanced Soundfields")
+        self.setWindowTitle("FASES - Faithful Acoustic Solver for Extended Spaces")
         self.resize(1440, 860)
         self._proj_root  = None
         self._obj_path   = None
