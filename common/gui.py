@@ -542,7 +542,7 @@ class GLViewer(QOpenGLWidget):
         self._anim_max = 0.01
         self._anim_tex = {}        # axis -> GL texture id
         self._anim_palette = 'color'   # 'color' | 'greys' | 'particles'
-        self._pdisp = {}           # axis -> (F,H,W,2) pressure-derived particle displacement (cells)
+        self._pdisp = {}           # axis -> (F,H,W,2) particle displacement (cells), integrated from solver velocity
         self._part_idx = {}        # axis -> (rows,cols) strided display sample indices
         self._part_gain = 1.0      # auto display gain (no knob)
         self._part_tex = None      # lazy round-ball point-sprite texture
@@ -586,8 +586,9 @@ class GLViewer(QOpenGLWidget):
             self._scene_span = span if span > 0 else 1.0
             self._domain_min = mn.copy()
             self._domain_max = mx.copy()
-            self._pan        = np.zeros(3, np.float32)
             self._dist       = span * 1.8 if span > 0 else 6.0
+            # nudge the scene right (~10% of view width) so the sliding left panel doesn't cover it
+            self._pan        = np.array([0.12 * self._dist, 0.0, 0.0], np.float32)
             self._yaw   = 215.0
             self._pitch = -22.0
             self._free_x = 0.0
@@ -721,7 +722,6 @@ class GLViewer(QOpenGLWidget):
             act = np.concatenate(mags); act = act[act > 1e-12]
             if act.size:
                 self._part_gain = 0.6 / float(np.median(act))
-        self._part_dist_ref = float(self._dist)   # zoom at load; motion scales with _dist/this
         self._anim_frame = 0
         self.update()
         return frames
@@ -2399,13 +2399,13 @@ class AlphaCurveEditor(QWidget):
         p.setFont(QFont("Sans", 8))
         p.setPen(light)
         p.drawText(QRectF(0, self.height() - 16, self.width(), 14),
-                   Qt.AlignmentFlag.AlignCenter, "Frequency [Hz]")
+                   Qt.AlignmentFlag.AlignCenter, "Octave band [Hz]")
 
         if self._vals is None:
             p.setPen(grey)
             p.setFont(QFont("Sans", 11))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                       "α per octave band [Hz]")
+                       "α per octave band")
             p.end()
             return
 
@@ -4146,7 +4146,7 @@ class MainWindow(QMainWindow):
         self._panel_anim.finished.connect(self._gl.update)   # settle HUD inset once, at rest
         # Invisible "near-it" hotzone at the left edge (no button): click anywhere in this
         # strip of empty scene and the panel slides back out. Active only while hidden.
-        self._GRIP_W = 48                    # width of the reopen hotzone [px]
+        self._GRIP_W = self._PANEL_W - 20    # reopen hotzone: almost the full panel width
         self._panel_grip = QPushButton(self._central)
         self._panel_grip.setFlat(True)
         self._panel_grip.setStyleSheet("QPushButton{background:transparent;border:none;}")
@@ -4229,7 +4229,7 @@ class MainWindow(QMainWindow):
             return
         self._panel_open = False
         self._panel_grip.show(); self._panel_grip.raise_()   # strip becomes clickable
-        self._animate_panel(-self._PANEL_W)                  # slide fully off to the left
+        self._animate_panel(-self._PANEL_W - 12)             # overshoot so no sliver/border peeks
 
     def _show_panel(self):
         if self._panel_open:
@@ -4449,7 +4449,7 @@ class MainWindow(QMainWindow):
         bbox_row = QHBoxLayout()
         self._bbox_chk = QCheckBox("Show bounding box")
         self._bbox_chk.toggled.connect(self._gl.set_bbox_visible)
-        self._bbox_chk.setChecked(True)   # on by default; set after connect so GL syncs
+        self._bbox_chk.setChecked(False)   # off by default; set after connect so GL syncs
         bbox_row.addWidget(self._bbox_chk); bbox_row.addStretch()
         lay.addLayout(bbox_row)
 
@@ -4468,7 +4468,7 @@ class MainWindow(QMainWindow):
         vis_row.addWidget(self._layers_all_btn)
         vis_row.addStretch(); lay.addLayout(vis_row)
 
-        lay.addWidget(QLabel("Material — α per octave band [Hz] (click a row to plot; Ctrl+V to paste):"))
+        lay.addWidget(QLabel("Material - α per octave band"))
         self._mat_panel = MaterialPanel()
         self._mat_panel.rowSelected.connect(self._on_material_row_selected)
         self._mat_panel.fitBegan.connect(self._begin_fit_log)
@@ -4480,8 +4480,9 @@ class MainWindow(QMainWindow):
 
     # ── Config tab ───────────────────────────────────────────
     def _build_config_tab(self):
-        inner = QWidget(); lay = QFormLayout(inner)
-        lay.setSpacing(8); lay.setContentsMargins(12,12,12,12)
+        inner = QWidget(); root = QVBoxLayout(inner)
+        root.setSpacing(10); root.setContentsMargins(12,12,12,12)
+        val_box = QGroupBox("Values"); lay = QFormLayout(val_box); lay.setSpacing(8)
 
         def ds(val, mn, mx, dec=4, sfx=""):
             s = QDoubleSpinBox(); s.setDecimals(dec); s.setRange(mn,mx)
@@ -4492,30 +4493,27 @@ class MainWindow(QMainWindow):
         # Estimate pass: runs the solver with --estimate (parse + V + T60, no FVM)
         # and fills the recommended Cutoff frequency / Number of rays below. Do this
         # first, after setting grid spacing + temperature.
-        self._btn_estimate = QPushButton("≈\uFE0E  Estimate values")
+        self._btn_estimate = QPushButton("≈\uFE0E  Estimate")
         self._btn_estimate.clicked.connect(self._estimate_room)
         _eb = QHBoxLayout()                       # keep the button its natural width,
         _eb.addWidget(self._btn_estimate)         # left-aligned (text + padding), not
         _eb.addStretch(1)                         # stretched across the whole row
-        lay.addRow(_eb)
+        # (added to the layout after Temperature + Altitude, below)
 
 
         self._cfg = {}
-        # Temperature + Altitude first: they set the atmosphere (speed of sound),
-        # which the estimate derives h / f_cutoff / rays from. All unit-bearing
-        # fields stay bundled; the unitless CFL sits last. Display order only --
-        # config.txt is still written/read by fixed key/index below.
-        for key, lbl, val, mn, mx, dec, sfx in [
-            ("T_C",     "Temperature",      20., -30.,   50., 1, "°C"),
-            # altitude is written as line 14 of config.txt (v[13])
-            ("altitude","Altitude",         408., -500., 9000., 1, "m"),
-            ("h",       "Grid spacing",     0.05, 0.001, 2.0, 3, "m"),
-            ("t_max",   "Simulation time",  0.5,  0.001, 60.0, 3, "s"),
-            ("f_cutoff","Cutoff frequency", 250., 50., 10000., 1, "Hz"),
-            ("CFL",     "CFL number",       0.40,  0.05,  0.50, 2, ""),
-        ]:
+        def _add(key, lbl, val, mn, mx, dec, sfx):
             sp = ds(val, mn, mx, dec, sfx); self._cfg[key] = sp
             lay.addRow(f"{lbl}:", sp)
+        # Temperature + Altitude first: they set the atmosphere (speed of sound), which the
+        # estimate derives h / f_cutoff / rays from. config.txt is written/read by fixed index.
+        _add("T_C",      "Temperature", 20., -30.,   50., 1, "°C")
+        _add("altitude", "Altitude",    408., -500., 9000., 1, "m")   # config line 14 (v[13])
+        lay.addRow(_eb)                                                # Estimate, under the atmosphere
+        _add("h",        "Grid spacing",     0.05, 0.001, 2.0,   3, "m")
+        _add("t_max",    "Simulation time",  0.5,  0.001, 60.0,  3, "s")
+        _add("f_cutoff", "Cutoff frequency", 250., 50.,   10000., 1, "Hz")
+        _add("CFL",      "CFL number",       0.40, 0.05,  0.50,  2, "")
 
         # Number of poles for the ADE (line 6 of config.txt; vectFIT reads v[5])
         self._npoles = QSpinBox(); self._npoles.setRange(1, 64)
@@ -4544,20 +4542,21 @@ class MainWindow(QMainWindow):
         self._cfg['f_cutoff'].valueChanged.connect(_apply_src_freq_clamps)
         _apply_src_freq_clamps(self._cfg['f_cutoff'].value())
 
-        lay.addRow(QLabel("PML faces  (check = active):"))
-        grid = QGridLayout(); self._pml = {}
+        root.addWidget(val_box)                 # close the Values box
+
+        pml_box = QGroupBox("PML faces"); grid = QGridLayout(pml_box); self._pml = {}
         # labels: Right=x+, Front=y+, Up=z+ / Left=x-, Back=y-, Down=z- (keys unchanged)
         for idx, (k, lbl) in enumerate([("R_PML","x+"),("F_PML","y+"),("U_PML","z+"),
                                          ("L_PML","x-"),("B_PML","y-"),("D_PML","z-")]):
             chk = QCheckBox(lbl); chk.setChecked(True)
             self._pml[k] = chk; grid.addWidget(chk, idx//3, idx%3)
-        lay.addRow(grid)
+        root.addWidget(pml_box)
 
         cfg_btns = QHBoxLayout()
         b_load = QPushButton("🗁\uFE0E  Load config.txt"); b_load.clicked.connect(self._load_config)
         b_save = QPushButton("🖫\uFE0E  Save config.txt"); b_save.clicked.connect(self._save_config)
         cfg_btns.addWidget(b_load); cfg_btns.addWidget(b_save)   # Load left, Save right
-        lay.addRow(cfg_btns)
+        root.addLayout(cfg_btns); root.addStretch(1)
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setWidget(inner)
@@ -4568,7 +4567,7 @@ class MainWindow(QMainWindow):
     def _build_src_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8)
         info = QLabel("Press S (or the toolbar button) to enter placement mode.\n"
-                      "Then drag LMB to position; hold X/Y/Z to lock an axis; release to place.\n"
+                      "Drag LMB to position; hold X/Y/Z to lock an axis; release to place. Esc to finish.\n"
                       "Or add rows manually below.")
         info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         info.setWordWrap(True); lay.addWidget(info)
@@ -4628,7 +4627,8 @@ class MainWindow(QMainWindow):
     def _build_rec_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8)
         info = QLabel("Press R (or the toolbar button) to enter placement mode.\n"
-                      "Drag LMB to position; hold X/Y/Z to lock an axis; release to place. Esc to finish.")
+                      "Drag LMB to position; hold X/Y/Z to lock an axis; release to place. Esc to finish.\n"
+                      "Or add rows manually below.")
         info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         info.setWordWrap(True); lay.addWidget(info)
         self._rec_tbl = PointTable(has_amplitude=False)
@@ -4704,21 +4704,25 @@ class MainWindow(QMainWindow):
 
         # which planes show / animate (whichever are on) + one show/hide-all toggle
         an.addWidget(QLabel("Show:"), 4, 0)
+        # own tight HBox so X/Y/Z spacing is even (grid columns are stretched by the fps
+        # spinbox and the Particles radio, which was pushing Z out).
         self._plane_chk = {}
-        for axis, col in (('x', 1), ('y', 2), ('z', 3)):
+        _show = QHBoxLayout(); _show.setSpacing(12)
+        for axis in ('x', 'y', 'z'):
             cb = QCheckBox(axis.upper()); cb.setChecked(True)
             cb.toggled.connect(lambda on, a=axis: self._gl.set_plane_visible(a, on))
-            an.addWidget(cb, 4, col); self._plane_chk[axis] = cb
+            _show.addWidget(cb); self._plane_chk[axis] = cb
         self._planes_all_btn = QPushButton("Hide all")
         self._planes_all_btn.clicked.connect(self._toggle_all_planes)
-        an.addWidget(self._planes_all_btn, 4, 4)
+        _show.addSpacing(8); _show.addWidget(self._planes_all_btn); _show.addStretch(1)
+        an.addLayout(_show, 4, 1, 1, 6)
 
         # colour palette for the animation
         an.addWidget(QLabel("Palette:"), 5, 0)
         from PySide6.QtWidgets import QRadioButton, QButtonGroup
         self._pal_group = QButtonGroup(self)
-        rb_c = QRadioButton("Colour"); rb_c.setChecked(True)
-        rb_g = QRadioButton("Greys")
+        rb_c = QRadioButton("Colorful"); rb_c.setChecked(True)
+        rb_g = QRadioButton("Black and White")
         rb_p = QRadioButton("Particles")
         self._pal_group.addButton(rb_c); self._pal_group.addButton(rb_g); self._pal_group.addButton(rb_p)
         rb_c.toggled.connect(lambda on: on and self._gl.set_anim_palette('color'))
