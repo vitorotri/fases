@@ -705,8 +705,19 @@ class GLViewer(QOpenGLWidget):
             if per == 0 or a0.size < per or a1.size < per:
                 continue
             F = min(a0.size, a1.size) // per
-            vcol = a0[:F * per].reshape(F, hgt, wid); vrow = a1[:F * per].reshape(F, hgt, wid)
-            dcol = np.cumsum(vcol, axis=0); drow = np.cumsum(vrow, axis=0)      # r += v*dt
+            vcol = a0[:F * per].reshape(F, hgt, wid).copy()
+            vrow = a1[:F * per].reshape(F, hgt, wid).copy()
+            # per-cell LINEAR detrend of velocity (remove DC + slope, keep the oscillation): a real
+            # acoustic velocity is zero-mean with no trend, so any DC/ramp is spurious and, once
+            # integrated, drifts the particle off (worst at low freq / near source). Removing it
+            # keeps r+=v*dt bounded -> particles oscillate and return to rest instead of running away.
+            if F > 1:
+                t = np.arange(F, dtype=np.float32); t -= t.mean()
+                den = float((t * t).sum()) or 1.0
+                for V in (vcol, vrow):
+                    V -= V.mean(axis=0, keepdims=True)
+                    V -= (np.tensordot(t, V, axes=(0, 0)) / den)[None] * t[:, None, None]
+            dcol = np.cumsum(vcol, axis=0); drow = np.cumsum(vrow, axis=0)      # r += v*dt, drift-free
             self._pdisp[ax] = np.stack([dcol, drow], axis=-1).astype(np.float32)   # (F,H,W,2)
             rr, cc = np.meshgrid(np.arange(0, hgt, stride), np.arange(0, wid, stride), indexing='ij')
             rr = rr.ravel(); cc = cc.ravel()
