@@ -2621,15 +2621,20 @@ class MaterialRefPreview(QWidget):
 
 class _CellDelegate(QStyledItemDelegate):
     """Per-column tweaks: `no_select` paints the cell as if never selected (so a
-    row-selection highlight skips it); `center` centre-aligns the text."""
-    def __init__(self, parent=None, no_select=False, center=False):
+    row-selection highlight skips it); `center` centre-aligns the text; `tint`
+    fills the cell background with a colour (unless the cell is selected)."""
+    def __init__(self, parent=None, no_select=False, center=False, tint=None):
         super().__init__(parent)
         self._no_select = no_select
         self._center = center
+        self._tint = QColor(tint) if tint else None
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
         if self._center:
             option.displayAlignment = Qt.AlignmentFlag.AlignCenter
+        if self._tint is not None:
+            from PySide6.QtGui import QBrush
+            option.backgroundBrush = QBrush(self._tint)
     def paint(self, painter, option, index):
         if self._no_select:
             option.state &= ~QStyle.StateFlag.State_Selected
@@ -2699,13 +2704,14 @@ class MaterialPanel(QWidget):
         hh.resizeSection(0, 90)
         # Layer + Scatter skip the row-selection highlight; the alpha and Scatter
         # numbers are centred (Layer name stays left-aligned).
-        self._tbl.setItemDelegateForColumn(0, _CellDelegate(self._tbl, no_select=True))
+        self._tbl.setItemDelegateForColumn(0, _CellDelegate(self._tbl, no_select=True, tint=PAL['panel']))
         for c in range(1, len(OCTAVE_BANDS) + 1):
             self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True))
         self._tbl.setItemDelegateForColumn(sctr_c, _CellDelegate(self._tbl, no_select=True, center=True))
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
+            QTableWidget::item:selected:!active {{background:{PAL['bg']};color:{PAL['text']};}}
             QHeaderView::section {{background:{PAL['panel']};color:{PAL['subtext']};
                 border:1px solid {PAL['border']};font-size:11px;}}
         """)
@@ -3617,6 +3623,7 @@ class PointTable(QWidget):
         for c in range(1, len(cols)):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
         self._tbl.setColumnWidth(0, 90)
+        self._tbl.setItemDelegateForColumn(0, _CellDelegate(self._tbl, tint=PAL['panel']))  # Name col
         for c in range(self._coff, len(cols)):   # centre the numeric columns (Name stays left)
             self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True))
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
@@ -3633,6 +3640,7 @@ class PointTable(QWidget):
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
+            QTableWidget::item:selected:!active {{background:{PAL['bg']};color:{PAL['text']};}}
             QHeaderView::section {{background:{PAL['panel']};color:{PAL['subtext']};
                 border:1px solid {PAL['border']};}}
         """)
@@ -3905,6 +3913,44 @@ class SolverThread(QThread):
             self._proc.terminate()
 
 
+class ResultsView(QWidget):
+    """Shows the per-receiver IR/FR plot PNG that allIRs.py writes (IR_rec<rec>.png in output/).
+    Image-based on purpose: setPixmap always repaints, so no live-canvas/draw_idle failure modes."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._proj_root = None
+        self._pix = None
+        lay = QVBoxLayout(self); lay.setContentsMargins(6, 6, 6, 6)
+        self._label = QLabel("Select a receiver in the Receivers tab.")
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setStyleSheet(f"color:{PAL['text']};background:{PAL['bg']};")
+        lay.addWidget(self._label)
+
+    def set_project(self, root):
+        self._proj_root = root
+
+    def show_receiver(self, rec):
+        from PySide6.QtGui import QPixmap
+        if self._proj_root is None or rec is None or rec < 0:
+            return
+        path = os.path.join(self._proj_root, "output", f"IR_rec{rec}.png")
+        if not os.path.isfile(path):
+            self._pix = None
+            self._label.setText(f"Receiver {rec}: no plot yet — run a full simulation, reopen Results.")
+            return
+        self._pix = QPixmap(path)
+        self._rescale()
+
+    def _rescale(self):
+        if self._pix is not None and not self._pix.isNull():
+            self._label.setPixmap(self._pix.scaled(
+                self._label.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e); self._rescale()
+
+
 # ─────────────────────────────────────────────────────────────
 #  Main window
 # ─────────────────────────────────────────────────────────────
@@ -4134,7 +4180,13 @@ class MainWindow(QMainWindow):
         self._gl.pointDragStarted.connect(self._remember_points_for_undo)
         self._gl.pointHovered.connect(self._on_point_hovered)
         self._gl.pointRemoved.connect(self._on_point_removed)
-        gl_vlay.addWidget(self._gl, stretch=1)
+        gl_vlay.addWidget(self._gl, stretch=1)      # GL stays in the layout (never re-parented)
+        # Results plots are an OVERLAY on top of the scene (QOpenGLWidget crashes if stacked),
+        # shown/hidden by the mode bar and positioned clear of the left panel in _layout_panel.
+        self._results = ResultsView(gl_wrap)
+        self._results.hide()
+        self._view_mode = "sim"
+        self._panel_locked = False
 
         # placement toolbar under the viewer
         place_bar = QHBoxLayout()
@@ -4199,6 +4251,27 @@ class MainWindow(QMainWindow):
         # is positioned near the top-left, the user can drag it anywhere.
         self._float_prog = DraggableProgress(gl_wrap)
         self._float_prog.move(16, 16)
+
+        # transparent purple-blue mode selector (accent), top-right of the scene, options STACKED
+        _ac = QColor(PAL['accent'])
+        self._mode_bar = QWidget(gl_wrap)
+        self._mode_bar.setStyleSheet(
+            f"background:rgba({_ac.red()},{_ac.green()},{_ac.blue()},150);"
+            f"border:1px solid {PAL['border']};border-radius:6px;")
+        _mb = QVBoxLayout(self._mode_bar); _mb.setContentsMargins(8, 6, 8, 6); _mb.setSpacing(2)
+        self._mode_grp = QButtonGroup(self)          # exclusive: acts like radios, no circle
+        _mode_css = (f"QPushButton{{border:none;background:transparent;color:{PAL['text']};"
+                     f"text-align:left;padding:2px 6px;}}"
+                     f"QPushButton:checked{{color:{PAL['bg']};font-weight:bold;}}")
+        from PySide6.QtGui import QFontMetrics
+        for key, label in (("sim", "Simulation"), ("results", "Results"), ("draw", "Draw")):
+            b = QPushButton(label); b.setCheckable(True); b.setChecked(key == "sim"); b.setFlat(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor); b.setStyleSheet(_mode_css)
+            bf = b.font(); bf.setBold(True)              # reserve BOLD width so checked isn't clipped
+            b.setMinimumWidth(QFontMetrics(bf).horizontalAdvance(label) + 22)
+            b.toggled.connect(lambda on, k=key: on and self._set_mode(k))
+            self._mode_grp.addButton(b); _mb.addWidget(b)
+        self._mode_bar.adjustSize(); self._mode_bar.raise_()
 
         # Dark/Light lives in the RMB scene menu now (stacked with Show/Hide axes);
         # the viewport emits themeToggle when it's picked. Also feed the grid spacing
@@ -4285,6 +4358,14 @@ class MainWindow(QMainWindow):
         self._gl.set_hud_left(vis)
         if hasattr(self, "_float_prog"):               # progress bar rides the panel edge
             self._float_prog.move(vis + 16, self._float_prog.y())
+        if hasattr(self, "_results") and self._results.isVisible():   # overlay clear of the panel
+            self._results.setGeometry(vis, 0, max(1, self._gl_wrap.width() - vis),
+                                      self._gl_wrap.height())
+            self._results.raise_()
+        if hasattr(self, "_mode_bar"):                 # mode selector docks top-right, above all
+            self._mode_bar.adjustSize()
+            self._mode_bar.move(self._gl_wrap.width() - self._mode_bar.width() - 12, 12)
+            self._mode_bar.raise_()
 
     def _on_panel_slide(self, v):
         self._panel_x = int(v)
@@ -4297,8 +4378,8 @@ class MainWindow(QMainWindow):
         self._panel_anim.start()
 
     def _hide_panel(self):
-        if not self._panel_open:
-            return
+        if not self._panel_open or getattr(self, "_panel_locked", False):
+            return                                     # Results mode: panel never shrinks
         self._panel_open = False
         self._panel_grip.show(); self._panel_grip.raise_()   # strip becomes clickable
         self._animate_panel(-self._PANEL_W - 12)             # overshoot so no sliver/border peeks
@@ -4309,7 +4390,62 @@ class MainWindow(QMainWindow):
         self._panel_open = True
         self._panel_grip.hide()
         self._animate_panel(0)
-        self._panel_idle.start()               # restart the inactivity countdown
+        if not getattr(self, "_panel_locked", False):
+            self._panel_idle.start()           # restart the inactivity countdown
+
+    def _find_common_script(self, name):
+        """Scripts (allIRs.py etc.) live NEXT TO gui.py, both in common/."""
+        cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+        return cand if os.path.isfile(cand) else None
+
+    def _set_mode(self, mode):
+        """Switch the right-side area: 'sim' = 3D scene, 'results' = per-receiver IR/FR plots,
+        'draw' = sketcher (separate script, added later)."""
+        self._view_mode = mode
+        if mode == "sim":
+            self._panel_locked = False
+            self._results.hide()
+            self._layout_panel()
+            self._panel_idle.start()
+        elif mode == "results":
+            self._panel_locked = True              # panel stays open in Results mode
+            self._panel_idle.stop(); self._show_panel()
+            self._results.set_project(self._proj_root)
+            self._results.show()
+            self._layout_panel()                   # position overlay clear of the panel now
+            self._ensure_results()                 # (re)compute broadband IRs, then plot
+        elif mode == "draw":
+            self._panel_locked = False
+            self._results.hide()
+            self._sb.showMessage("Draw mode: the sketcher script isn't wired yet.")
+
+    def _current_receiver_row(self):
+        r = self._rec_tbl._tbl.currentRow()            # currentRow works with SelectItems tables
+        return r if r >= 0 else (0 if self._rec_tbl._tbl.rowCount() else -1)
+
+    def _ensure_results(self):
+        """Run allIRs.py in output/ to build IR_broad_<r>_<s>.npy, then plot the current receiver.
+        Skips if a run is already going (reassigning a live QThread aborts the app), and if the
+        broadband files already exist (avoids recomputing every time Results is opened)."""
+        if not self._proj_root:
+            self._sb.showMessage("Open a project folder first."); return
+        t = getattr(self, "_allirs_thread", None)
+        if t is not None and t.isRunning():
+            return                                       # already computing; done handler will plot
+        out = os.path.join(self._proj_root, "output")
+        script = self._find_common_script("allIRs.py")
+        if script is None:
+            self._sb.showMessage("allIRs.py not found next to gui.py."); return
+        self._allirs_thread = SolverThread([sys.executable, script], out)
+        self._allirs_thread.output.connect(self._log.append)
+        self._allirs_thread.done.connect(self._on_allirs_done)
+        self._allirs_thread.start()
+        self._sb.showMessage("Computing broadband IRs…")
+
+    def _on_allirs_done(self, rc):
+        self._sb.showMessage("Broadband IRs ready." if rc == 0 else f"allIRs.py failed (rc={rc}).")
+        if getattr(self, "_view_mode", None) == "results":
+            self._results.show_receiver(self._current_receiver_row())
 
     def _toggle_scene_theme(self):
         """Flip the viewport between Dark and Light and repaint."""
@@ -4416,9 +4552,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_pt_sync_guard", False):
             return
         tbl = self._src_tbl if kind == "source" else self._rec_tbl
-        sel = tbl._tbl.selectionModel().selectedRows()
-        idx = sel[0].row() if sel else -1
+        idx = tbl._tbl.currentRow()                    # SelectItems: selectedRows() is empty
         self._gl.set_highlight(kind if idx >= 0 else None, idx)
+        if kind == "receiver" and getattr(self, "_view_mode", None) == "results" and idx >= 0:
+            self._results.show_receiver(idx)
 
     def _on_point_hovered(self, kind, idx):
         """G-mode hover over a point -> select its row in the matching table
@@ -4591,7 +4728,7 @@ class MainWindow(QMainWindow):
         _add("altitude", "Altitude",    408., -500., 9000., 1, "m")   # config line 14 (v[13])
         lay.addRow(_eb)                                                # Estimate, under the atmosphere
         _add("h",        "Grid spacing ↔︎",     0.05, 0.001, 2.0,   3, "m")
-        _add("t_max",    "Simulation time 🕐︎",  0.5,  0.001, 60.0,  3, "s")
+        _add("t_max",    "Simulation span 🕐︎",  0.5,  0.001, 60.0,  3, "s")
         _add("f_cutoff", "Cutoff frequency ✁︎", 250., 50.,   10000., 1, "Hz")
         _add("CFL",      "CFL number",       0.40, 0.05,  0.50,  2, "")
 
@@ -4718,6 +4855,11 @@ class MainWindow(QMainWindow):
         self._rec_tbl.changed.connect(self._refresh_gl_points)
         self._rec_tbl._tbl.itemSelectionChanged.connect(
             lambda: self._on_table_row_selected("receiver"))
+        # re-clicking the already-selected row emits no selectionChanged; use clicked so you can
+        # always jump the Results plot back to a receiver you viewed before.
+        self._rec_tbl._tbl.clicked.connect(
+            lambda ix: getattr(self, "_view_mode", None) == "results"
+            and self._results.show_receiver(ix.row()))
         lay.addWidget(self._rec_tbl)
         br = QHBoxLayout()
         for lbl, fn in [("🗁\uFE0E  Load rec.txt", self._load_rec),
@@ -4967,6 +5109,7 @@ class MainWindow(QMainWindow):
 
         self._proj_root = root
         self._proj_label.setText(root)
+        self._results.set_project(root)
         # seed the file contract so the project is immediately runnable-shaped
         self._write_config(os.path.join(root, "config", "config.txt"))
         self._src_tbl.save_file(os.path.join(root, "input", "src", "src.txt"))
@@ -4994,6 +5137,7 @@ class MainWindow(QMainWindow):
             return
         self._proj_root = d
         self._proj_label.setText(d)
+        self._results.set_project(d)
         man = self._read_manifest(self._manifest_path())
 
         def resolve(rel):
@@ -5061,6 +5205,11 @@ class MainWindow(QMainWindow):
                 e.ignore(); return
             if ans == B.Save:
                 self._save_project()
+        for tn in ("_solver_thread", "_estimate_thread", "_rays_thread", "_allirs_thread"):
+            th = getattr(self, tn, None)               # stop background QThreads so Qt doesn't
+            if th is not None and th.isRunning():      # abort with "Destroyed while running"
+                th.stop() if hasattr(th, "stop") else None
+                th.wait(2000)
         e.accept()
 
     def _load_obj(self):
