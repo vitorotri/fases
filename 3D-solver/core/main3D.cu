@@ -1432,10 +1432,15 @@ int main(int argc, char *argv[]){
 	scene_free(&sc); // free scene here: ism_solve and rt_build are its last users
 
 	
+	// The FVM is only excited/valid up to ~0.5*f_cutoff (source peak ~0.45*f_cutoff), so the FVM<->GA
+	// crossover sits at f_x = 0.5*f_cutoff, NOT at f_cutoff (which stays the grid/mesh ceiling). Emit
+	// GA octave bands down to the one containing f_x so the GA reaches the crossover. allIRs filters
+	// at the same f_x.
+	const float f_x = 0.5f * f_cutoff;   // FVM<->GA crossover frequency
 	// determine number of valid bands for ISM / Ray-Tracing (easier array allocation later on)
 	int N_bands = 8; // number of bands for ISM / Ray-Tracing, start with total
 	for (int i = 0; i < 8; i++){
-		if (f_cutoff <= octave_bands[i]){
+		if (f_x <= octave_bands[i]){
 			N_bands -= i;
 			break;
 		}
@@ -1517,7 +1522,7 @@ int main(int argc, char *argv[]){
 	
 	// for each band
 	for (int b = 0; b < 8; b++){
-		if (f_cutoff > octave_bands[b]) continue; // skip band
+		if (f_x > octave_bands[b]) continue; // skip bands below the crossover (f_x = 0.5*f_cutoff)
 		
 		// allocate memory for high frequency IRs: for each rec, first index sample is time, second is
 		// receiver's index (flattened)
