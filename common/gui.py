@@ -624,7 +624,9 @@ class GLViewer(QOpenGLWidget):
         self.update()
 
     def set_sources(self, pts):
-        self._sources = [list(p[:3]) for p in pts]; self.update()
+        # keep x,y,z and the SPL (Lp,1m [dB], 4th col) so the particle sim can size its injection
+        self._sources = [list(p[:3]) + ([float(p[3])] if len(p) > 3 else []) for p in pts]
+        self.update()
 
     def set_receivers(self, pts):
         self._receivers = [list(p[:3]) for p in pts]; self.update()
@@ -728,23 +730,30 @@ class GLViewer(QOpenGLWidget):
             keep = (rr >= PAD) & (rr < hgt - PAD) & (cc >= PAD) & (cc < wid - PAD)
             keep &= inside[np.clip(rr, 0, hgt - 1), np.clip(cc, 0, wid - 1)]
             self._part_idx[ax] = (rr[keep], cc[keep], pr[keep], pc[keep])
-            # project each 3D source onto this plane -> (row, col) cell, then build the live sim
-            srcs = [self._world_to_plane(ax, s, wid, hgt) for s in self._sources]
+            # project each 3D source onto this plane -> (row, col, SPL), then build the live sim
+            srcs = [self._world_to_plane(ax, s, wid, hgt) + (s[3] if len(s) > 3 else 94.0,)
+                    for s in self._sources]
             self._sim2d[ax] = Slice2DSim(inside, srcs, src_opt=src_opt, absorb=absorb_by_ax[ax])
-        # Gain from a warm-up: track the WAVEFRONT peak (99th pct of |disp|) each step -- robust to
-        # the single impulse (median-over-cells is ~0 and blows the gain up). Then RESET so playback
-        # starts at t=0 and you actually see the pulse fire.
-        peaks = []
+        # Gain: warm up to measure the grid's displacement-per-unit-amplitude, then anchor the gain
+        # to a REFERENCE SPL (not the live field). This way ABSOLUTE source SPL and SPL_AMP_CALIB DO
+        # change the on-screen pulse: displayed ~ 1.2 * CALIB * 10^((SPL - 94dB)/20) cells. (An
+        # auto-normalised gain would cancel amplitude entirely.) Reset after so playback starts at t=0.
+        from slice2d import P_REF
+        REF_SPL = 94.0
+        peaks = []; rep_amp = 0.0
         for sim in self._sim2d.values():
+            rep_amp = max(rep_amp, float(sim.amp))
             for _ in range(50):
                 sim.step(1)
                 a = np.abs(sim.disp).ravel()
                 if a.size:
                     peaks.append(float(np.percentile(a, 99)))
             sim.reset()
-        peaks = [p for p in peaks if p > 1e-9]
-        if peaks:
-            self._part_gain = 1.2 / float(np.median(peaks))    # map a typical wavefront to ~1.2 cells
+        peaks = [p for p in peaks if p > 1e-12]
+        if peaks and rep_amp > 0:
+            k = float(np.median(peaks)) / rep_amp              # displacement per unit source amplitude
+            amp_ref = P_REF * 10.0 ** (REF_SPL / 20.0)         # reference pressure (no calib)
+            self._part_gain = 1.2 / (k * amp_ref)              # ~1.2*CALIB cells at 94 dB, scales w/ SPL
         self._anim_frame = 0
         self.update()
         return frames
@@ -784,6 +793,11 @@ class GLViewer(QOpenGLWidget):
                     sim.step()
         F = max(len(v) for v in self._anim.values())
         self._anim_frame = (self._anim_frame + 1) % F
+        # loop the live particle sim in sync with the frame cycle so it repeats like color/greys
+        # (otherwise it just rings on forever and never restarts)
+        if self._anim_palette == 'particles' and self._anim_frame == 0:
+            for sim in self._sim2d.values():
+                sim.reset()
         self.update()
 
     def _colormap(self, img):
@@ -5462,7 +5476,8 @@ class MainWindow(QMainWindow):
             self._refresh_gl_points()
 
     def _refresh_gl_points(self):
-        self._gl.set_sources(  [(p[0],p[1],p[2]) for p in self._src_tbl.get_points()])
+        self._gl.set_sources(  [(p[0],p[1],p[2]) + ((p[3],) if len(p) > 3 else ())
+                                for p in self._src_tbl.get_points()])
         self._gl.set_receivers([(p[0],p[1],p[2]) for p in self._rec_tbl.get_points()])
 
     def _browse_binary(self):

@@ -13,11 +13,24 @@ fixed amplitude); Sinusoid -> continuous sine injection.
 """
 import numpy as np
 
+P_REF = 20e-6            # Pa, 0 dB SPL reference
+DEFAULT_SPL = 94.0       # dB, fallback when a source has no level (94 dB SPL = 1 Pa)
+# ponytail: calibration knob — maps a source's SPL (Pa) to the 2D-sim injection amplitude. The
+# display gain auto-normalises brightness, so this mainly sets RELATIVE loudness between sources and
+# the working numeric range. Tune against tests; the user will report values.
+SPL_AMP_CALIB = 1.5
+
+
+def spl_to_amp(spl_db):
+    """Source SPL [dB] -> injection amplitude for the sim (pressure at the '1 m' ref, times calib)."""
+    return P_REF * 10.0 ** (float(spl_db) / 20.0) * SPL_AMP_CALIB
+
 
 class Slice2DSim:
-    def __init__(self, inside, sources, src_opt=0, f=0.06, cfl=0.9, amp=30.0,
+    def __init__(self, inside, sources, src_opt=0, f=0.06, cfl=0.9,
                  absorb=(False, False, False, False)):
-        """inside: (H,W) bool room mask. sources: iterable of (row, col) cell coords on the plane.
+        """inside: (H,W) bool room mask. sources: iterable of (row, col[, spl_dB]) on the plane; the
+        injection amplitude is spl_to_amp(spl) per source (SPL missing -> DEFAULT_SPL).
         src_opt: 0/1 = PCS/Ricker (single-node impulse), 2 = sinusoid. f: normalized freq (cyc/step).
         absorb: (top, bottom, left, right) grid edges to make outgoing (PML sides) vs rigid."""
         self.inside = np.ascontiguousarray(inside, bool)
@@ -33,16 +46,18 @@ class Slice2DSim:
         self.vy_ok = self.inside[1:, :] & self.inside[:-1, :]
         self.dt = float(cfl) / np.sqrt(2.0)                    # < 1/sqrt(2) is stable in 2D
         self.absorb = tuple(bool(a) for a in absorb)           # (top, bottom, left, right)
-        self.f, self.amp, self.src_opt = float(f), float(amp), int(src_opt)
+        self.f, self.src_opt = float(f), int(src_opt)
         self.n = 0
-        # sources snapped to the nearest in-room cell so a source projected onto a wall still fires
+        # sources snapped to the nearest in-room cell so a source projected onto a wall still fires;
+        # per-source amplitude from its SPL (dB) -> Pa via spl_to_amp
         ys, xs = np.where(self.inside)
-        self.sources = []
-        for r, c in sources:
-            r = int(np.clip(r, 0, self.H - 1)); c = int(np.clip(c, 0, self.W - 1))
+        self.sources = []                                      # (row, col, amp_linear)
+        for s in sources:
+            r = int(np.clip(s[0], 0, self.H - 1)); c = int(np.clip(s[1], 0, self.W - 1))
             if not self.inside[r, c] and len(ys):
                 k = int(np.argmin((ys - r) ** 2 + (xs - c) ** 2)); r, c = int(ys[k]), int(xs[k])
-            self.sources.append((r, c))
+            self.sources.append((r, c, spl_to_amp(s[2] if len(s) > 2 else DEFAULT_SPL)))
+        self.amp = max([a for _, _, a in self.sources], default=spl_to_amp(DEFAULT_SPL))  # ref for gain/checks
         # absorbing (PML) edges = a damping sponge: p and v ramped down over a band near the edge,
         # each step, so outgoing waves die instead of reflecting. Rigid (non-PML) edges stay at 1.
         top, bot, left, right = self.absorb
@@ -66,14 +81,13 @@ class Slice2DSim:
     def _inject(self):
         """PCS/Ricker: one high-amplitude single-node impulse at n==0 (then rings). Sinusoid:
         continuous sine every step."""
-        if self.src_opt == 2:
-            d = self.amp * np.sin(2.0 * np.pi * self.f * self.n)
-        elif self.n == 0:
-            d = self.amp
-        else:
-            return
-        for r, c in self.sources:
-            self.p[r, c] += d
+        if self.src_opt == 2:                                  # sinusoid: continuous
+            s = np.sin(2.0 * np.pi * self.f * self.n)
+            for r, c, a in self.sources:
+                self.p[r, c] += a * s
+        elif self.n == 0:                                      # PCS/Ricker: one soft node impulse
+            for r, c, a in self.sources:
+                self.p[r, c] += a
 
     def step(self, substeps=2):
         """Advance `substeps` FDTD steps and refresh `disp`. A few substeps/tick = livelier waves."""
