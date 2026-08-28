@@ -542,7 +542,7 @@ class GLViewer(QOpenGLWidget):
         self._anim_max = 0.01
         self._anim_tex = {}        # axis -> GL texture id
         self._anim_palette = 'color'   # 'color' | 'greys' | 'particles'
-        self._pdisp = {}           # axis -> (F,H,W,2) particle displacement (cells), integrated from solver velocity
+        self._sim2d = {}           # axis -> slice2d.Slice2DSim (live 2D FDTD, didactic particle anim)
         self._part_idx = {}        # axis -> (rows,cols) strided display sample indices
         self._part_gain = 1.0      # auto display gain (no knob)
         self._part_tex = None      # lazy round-ball point-sprite texture
@@ -687,64 +687,81 @@ class GLViewer(QOpenGLWidget):
         if not anim:
             return 0
         self._anim = anim
-        # Particles: main exports the in-plane VELOCITY slices (one bin per component). GUI just
-        # integrates position like the script:  r[n] = r[n-1] + v[n]*dt  => displacement = cumsum(v)
-        # over frames. dt folds into one auto display gain (no knob). Single integration of the
-        # solver's exact velocity -> clean return-to-rest (no gradient noise; fixes Ricker).
-        vplanes = {'x': ("vy_X.bin", "vz_X.bin", Nz, Ny),
-                   'y': ("vx_Y.bin", "vz_Y.bin", Nz, Nx),
-                   'z': ("vx_Z.bin", "vy_Z.bin", Ny, Nx)}
-        self._pdisp = {}; self._part_idx = {}; mags = []
-        stride = max(1, max(Nx, Ny, Nz) // 60)     # ONE spacing for all planes -> uniform density
-        for ax, (f0, f1, hgt, wid) in vplanes.items():
-            p0 = os.path.join(out_dir, f0); p1 = os.path.join(out_dir, f1)
-            if not (os.path.isfile(p0) and os.path.isfile(p1)):
+        # Particles: a LIVE 2D FDTD per visible plane (slice2d.Slice2DSim), seeded by the scene's
+        # sources projected onto the plane. This is a didactic 2D re-sim, NOT the 3D field. The GL
+        # particle renderer reads each sim's `disp`; step() is driven per tick from step_frame().
+        from slice2d import Slice2DSim
+        try:
+            cfg = np.atleast_1d(np.loadtxt(os.path.join(out_dir, os.pardir, "config", "config.txt")))
+            src_opt = int(cfg[15]) if len(cfg) > 15 else 0       # 0/1 pulse, 2 sine
+            g = lambda i: (len(cfg) > i and float(cfg[i]) > 0.0)  # PML face flags -> absorbing edges
+            U, D, R, L, F, B = g(6), g(7), g(8), g(9), g(10), g(11)
+        except Exception:
+            src_opt = 0; U = D = R = L = F = B = False
+        # box face -> plane edge (from functions3D.cuh): L/R=x-/x+, B/F=y-/y+, D/U=z-/z+.
+        # edges are (top, bottom, left, right) = (row-min, row-max, col-min, col-max)
+        absorb_by_ax = {'x': (D, U, B, F),      # YZ: col=y, row=z
+                        'y': (D, U, L, R),      # XZ: col=x, row=z
+                        'z': (B, F, L, R)}      # XY: col=x, row=y
+        planes2d = {'x': (Nz, Ny), 'y': (Nz, Nx), 'z': (Ny, Nx)}   # (hgt, wid) per plane at solver res
+        self._sim2d = {}; self._part_idx = {}; self._part_gain = 1.0
+        PAD = 4
+        CAP = 100                                  # cap the live-sim grid: keeps the mask (point-in-mesh,
+        if self._slices is None or not len(self._verts):   # a Python per-point loop) and the FDTD fast
+            self._anim_frame = 0; self.update(); return frames
+        for ax, (h0, w0) in planes2d.items():
+            s = max(1, (max(h0, w0) + CAP - 1) // CAP)
+            hgt, wid = max(8, h0 // s), max(8, w0 // s)
+            stride = max(1, max(hgt, wid) // 60)   # uniform particle spacing on the capped grid
+            # room cross-section mask on this plane (True = inside room), via the point-in-mesh test
+            jj, ii = np.meshgrid(np.arange(hgt), np.arange(wid), indexing='ij')
+            wcen = self._cells_world(ax, wid, hgt, ii.ravel() + 0.5, jj.ravel() + 0.5)
+            inside = self._inside_obj(wcen).reshape(hgt, wid)
+            if not inside.any():
                 continue
-            a0 = np.fromfile(p0, np.float32); a1 = np.fromfile(p1, np.float32)
-            per = hgt * wid
-            if per == 0 or a0.size < per or a1.size < per:
-                continue
-            F = min(a0.size, a1.size) // per
-            vcol = a0[:F * per].reshape(F, hgt, wid).copy()
-            vrow = a1[:F * per].reshape(F, hgt, wid).copy()
-            # per-cell LINEAR detrend of velocity (remove DC + slope, keep the oscillation): a real
-            # acoustic velocity is zero-mean with no trend, so any DC/ramp is spurious and, once
-            # integrated, drifts the particle off (worst at low freq / near source). Removing it
-            # keeps r+=v*dt bounded -> particles oscillate and return to rest instead of running away.
-            if F > 1:
-                t = np.arange(F, dtype=np.float32); t -= t.mean()
-                den = float((t * t).sum()) or 1.0
-                for V in (vcol, vrow):
-                    V -= V.mean(axis=0, keepdims=True)
-                    V -= (np.tensordot(t, V, axes=(0, 0)) / den)[None] * t[:, None, None]
-            dcol = np.cumsum(vcol, axis=0); drow = np.cumsum(vrow, axis=0)      # r += v*dt, drift-free
-            self._pdisp[ax] = np.stack([dcol, drow], axis=-1).astype(np.float32)   # (F,H,W,2)
+            # strided, jittered particle lattice trimmed to the room interior
             rr, cc = np.meshgrid(np.arange(0, hgt, stride), np.arange(0, wid, stride), indexing='ij')
             rr = rr.ravel(); cc = cc.ravel()
             rng = np.random.default_rng(ord(ax))                        # distinct, stable per plane
-            # jitter fills each lattice cell edge-to-edge: uniform [0,stride) so no ordered grid.
-            pr = (rng.random(len(rr)) * stride).astype(np.float32)
+            pr = (rng.random(len(rr)) * stride).astype(np.float32)      # jitter [0,stride)
             pc = (rng.random(len(cc)) * stride).astype(np.float32)
-            # trim the PML absorbing band (PML_CELLS=20 in functions3D.cuh) on each side, plus
-            # anything outside the OBJ. Fixed 20 cells; bump if PML_CELLS changes in the solver.
-            PAD = 10
             keep = (rr >= PAD) & (rr < hgt - PAD) & (cc >= PAD) & (cc < wid - PAD)
-            if self._slices is not None and len(self._verts):
-                w = self._cells_world(ax, wid, hgt, cc + 0.5 + pc, rr + 0.5 + pr)
-                keep &= self._inside_obj(w)
-            rr, cc, pr, pc = rr[keep], cc[keep], pr[keep], pc[keep]
-            self._part_idx[ax] = (rr, cc, pr, pc)
-            mags.append(np.abs(self._pdisp[ax]).max(axis=0).ravel())
-        # auto gain (no knob): typical active cell swings ~0.6 cell; median is robust to the loud
-        # near-source spike that would otherwise crush the rest of the field.
-        self._part_gain = 1.0
-        if mags:
-            act = np.concatenate(mags); act = act[act > 1e-12]
-            if act.size:
-                self._part_gain = 0.6 / float(np.median(act))
+            keep &= inside[np.clip(rr, 0, hgt - 1), np.clip(cc, 0, wid - 1)]
+            self._part_idx[ax] = (rr[keep], cc[keep], pr[keep], pc[keep])
+            # project each 3D source onto this plane -> (row, col) cell, then build the live sim
+            srcs = [self._world_to_plane(ax, s, wid, hgt) for s in self._sources]
+            self._sim2d[ax] = Slice2DSim(inside, srcs, src_opt=src_opt, absorb=absorb_by_ax[ax])
+        # Gain from a warm-up: track the WAVEFRONT peak (99th pct of |disp|) each step -- robust to
+        # the single impulse (median-over-cells is ~0 and blows the gain up). Then RESET so playback
+        # starts at t=0 and you actually see the pulse fire.
+        peaks = []
+        for sim in self._sim2d.values():
+            for _ in range(50):
+                sim.step(1)
+                a = np.abs(sim.disp).ravel()
+                if a.size:
+                    peaks.append(float(np.percentile(a, 99)))
+            sim.reset()
+        peaks = [p for p in peaks if p > 1e-9]
+        if peaks:
+            self._part_gain = 1.2 / float(np.median(peaks))    # map a typical wavefront to ~1.2 cells
         self._anim_frame = 0
         self.update()
         return frames
+
+    def _world_to_plane(self, ax, world, W, H):
+        """3D world point -> (row, col) cell on plane `ax` (inverse of _cells_world); the out-of-plane
+        coordinate is dropped (projection). Clamped to the grid."""
+        mn, mx = self._domain_min, self._domain_max
+        def frac(val, a, b):
+            return 0.0 if b <= a else (float(val) - a) / (b - a)
+        if ax == 'x':      # plane YZ: col<-y, row<-z
+            u = frac(world[1], mn[1], mx[1]); v = frac(world[2], mn[2], mx[2])
+        elif ax == 'y':    # plane XZ: col<-x, row<-z
+            u = frac(world[0], mn[0], mx[0]); v = frac(world[2], mn[2], mx[2])
+        else:              # plane XY: col<-x, row<-y
+            u = frac(world[0], mn[0], mx[0]); v = frac(world[1], mn[1], mx[1])
+        return (int(np.clip(v * H, 0, H - 1)), int(np.clip(u * W, 0, W - 1)))
 
     def clear_animation(self):
         self._anim = None
@@ -761,6 +778,10 @@ class GLViewer(QOpenGLWidget):
     def step_frame(self):
         if self._anim is None:
             return
+        if self._anim_palette == 'particles':          # advance the live 2D sims each tick
+            for ax, sim in self._sim2d.items():
+                if self._plane_vis[ax]:
+                    sim.step()
         F = max(len(v) for v in self._anim.values())
         self._anim_frame = (self._anim_frame + 1) % F
         self.update()
@@ -922,12 +943,12 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_POINT_SPRITE); glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE)
         glPointSize(5.0); glColor4f(0.34, 0.30, 1.0, 1.0)     # bright purple-blue
         glEnableClientState(GL_VERTEX_ARRAY)
-        for ax, D in self._pdisp.items():
+        for ax, sim in self._sim2d.items():
             if not self._plane_vis[ax] or ax not in self._part_idx:
                 continue
-            _, H, W, _ = D.shape
+            H, W = sim.H, sim.W
             rr, cc, pr, pc = self._part_idx[ax]
-            disp = D[self._anim_frame % len(D)][rr, cc]        # (Nsel,2) displacement in cells
+            disp = sim.disp[rr, cc]                            # (Nsel,2) live displacement in cells
             col = cc + 0.5 + pc + np.clip(G * disp[:, 0], -clamp, clamp)
             row = rr + 0.5 + pr + np.clip(G * disp[:, 1], -clamp, clamp)
             u = col / W; v = row / H
