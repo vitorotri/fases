@@ -9,6 +9,16 @@ import glob, re, os, numpy as np
 import matplotlib
 matplotlib.use("Agg")                       # headless: savefig only, no display needed
 import matplotlib.pyplot as plt
+
+# GUI dark theme (mirror of gui.py PAL + PLOT_COLORS): dark bg, white axes/text, purple-first cycle
+FG = "#cfd8dc"
+plt.rcParams.update({
+    "figure.facecolor": "#1a1d23", "savefig.facecolor": "#1a1d23", "axes.facecolor": "#1a1d23",
+    "axes.edgecolor": FG, "axes.labelcolor": FG, "axes.titlecolor": FG, "text.color": FG,
+    "xtick.color": FG, "ytick.color": FG, "grid.color": "#2e3340",
+    "legend.facecolor": "#20242c", "legend.edgecolor": "#2e3340",
+    "axes.prop_cycle": plt.cycler(color=["#7c5cfc", "#0ff091", "#ff5c7a"]),
+})
 from scipy import signal
 from fractions import Fraction
 from scipy.signal import resample_poly
@@ -197,7 +207,7 @@ def main():
             f, magL = _fr(LIRp); _, magH = _fr(HIRp)
             axc.semilogx(f, magL, lw=0.8, label=f"src {src} FVM (low)")
             axc.semilogx(f, magH, lw=0.8, ls="--", label=f"src {src} GA (high)")
-        axc.axvline(f_cutoff, color="k", lw=1, ls=":", label=f"f_cutoff {f_cutoff:.0f} Hz")
+        axc.axvline(f_cutoff, color=FG, lw=1, ls=":", label=f"f_cutoff {f_cutoff:.0f} Hz")
         axc.set_title(f"Receiver {rec} — crossover check (FVM vs GA level at f_cutoff)")
         axc.set_xlabel("Frequency [Hz]"); axc.set_ylabel("Magnitude [dB]")
         axc.set_xlim(20, fs / 2); axc.grid(True, which="both"); axc.legend(fontsize=8)

@@ -79,6 +79,10 @@ PAL = {
     "btn_hover": "#35404f", "layer_sel":"#251a55",
 }
 
+# Line colours for the Results overlay plots, in order (add more as needed):
+# blue-purple (accent), cyan-green (layers), pink-red, ...
+PLOT_COLORS = ["#7c5cfc", "#0ff091", "#ff5c7a"]
+
 LAYER_COLORS = [
 	(15/255,  240/255, 145/255)] #, aqua-cyan
 '''
@@ -3997,6 +4001,13 @@ class ResultsView(QWidget):
         self._pix = QPixmap(path)
         self._rescale()
 
+    def show_png(self, path):
+        """Show an arbitrary PNG (e.g. the on-the-fly receiver-overlay plot)."""
+        from PySide6.QtGui import QPixmap
+        if not path or not os.path.isfile(path):
+            self._pix = None; self._label.setText("No overlay plot."); return
+        self._pix = QPixmap(path); self._rescale()
+
     def _rescale(self):
         if self._pix is not None and not self._pix.isNull():
             self._label.setPixmap(self._pix.scaled(
@@ -4627,8 +4638,56 @@ class MainWindow(QMainWindow):
         tbl = self._src_tbl if kind == "source" else self._rec_tbl
         idx = tbl._tbl.currentRow()                    # SelectItems: selectedRows() is empty
         self._gl.set_highlight(kind if idx >= 0 else None, idx)
-        if kind == "receiver" and getattr(self, "_view_mode", None) == "results" and idx >= 0:
-            self._results.show_receiver(idx)
+        if kind == "receiver" and getattr(self, "_view_mode", None) == "results":
+            rows = sorted({ix.row() for ix in tbl._tbl.selectedIndexes()})
+            if len(rows) > 1:                          # Ctrl/Shift-select many -> overlay comparison
+                self._render_overlay(rows)
+            elif idx >= 0:                             # single -> the full allIRs per-receiver plot
+                self._results.show_receiver(idx)
+
+    def _render_overlay(self, recs):
+        """Overlay IR + frequency response of several receivers from the saved IR_broad_*.npy (no
+        re-run). Per receiver: sum the broadband IR over its sources -> one curve, GUI-themed."""
+        import glob
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        out = os.path.join(self._proj_root, "output")
+        fs = 44100                                     # allIRs saves broadband IRs at this rate
+        FG, BG = PAL['text'], PAL['bg']
+        fig, (ax_t, ax_f) = plt.subplots(2, 1, figsize=(9, 7)); drew = False
+        for i, rec in enumerate(recs):
+            files = sorted(glob.glob(os.path.join(out, f"IR_broad_{rec}_*.npy")))
+            if not files:
+                continue
+            arrs = [np.load(f) for f in files]
+            n = max(a.size for a in arrs); ir = np.zeros(n)
+            for a in arrs:
+                ir[:a.size] += a                       # total response at the receiver (all sources)
+            col = PLOT_COLORS[i % len(PLOT_COLORS)]
+            ax_t.plot(np.arange(n) / fs, ir, lw=0.7, color=col, label=f"receiver {rec}")
+            H = np.abs(np.fft.rfft(ir)); fr = np.fft.rfftfreq(n, 1 / fs)
+            ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] + 1e-12), lw=0.8, color=col, label=f"receiver {rec}")
+            drew = True
+        if not drew:
+            plt.close(fig); self._results.show_png(None); return
+        ax_t.set_title("Receiver comparison — impulse response")
+        ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude")
+        ax_f.set_title("Receiver comparison — frequency response")
+        ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("Magnitude [dB]"); ax_f.set_xlim(20, fs / 2)
+        fig.patch.set_facecolor(BG)
+        for ax in (ax_t, ax_f):                        # GUI dark theme: bg + white axes/text/grid
+            ax.set_facecolor(BG)
+            for sp in ax.spines.values(): sp.set_color(FG)
+            ax.tick_params(colors=FG, which='both')
+            ax.xaxis.label.set_color(FG); ax.yaxis.label.set_color(FG); ax.title.set_color(FG)
+            ax.grid(True, which='both', color=PAL['border'], alpha=0.6)
+            leg = ax.legend(fontsize=8)
+            leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
+            for t in leg.get_texts(): t.set_color(FG)
+        fig.tight_layout()
+        path = os.path.join(out, "IR_overlay.png")
+        fig.savefig(path, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
+        self._results.show_png(path)
 
     def _on_point_hovered(self, kind, idx):
         """G-mode hover over a point -> select its row in the matching table
@@ -4932,7 +4991,7 @@ class MainWindow(QMainWindow):
         # always jump the Results plot back to a receiver you viewed before.
         self._rec_tbl._tbl.clicked.connect(
             lambda ix: getattr(self, "_view_mode", None) == "results"
-            and self._results.show_receiver(ix.row()))
+            and self._on_table_row_selected("receiver"))
         lay.addWidget(self._rec_tbl)
         br = QHBoxLayout()
         for lbl, fn in [("🗁\uFE0E  Load rec.txt", self._load_rec),
