@@ -469,7 +469,7 @@ class GLViewer(QOpenGLWidget):
     coordsChanged = Signal(float, float, float)        # live HUD coords
     themeToggle   = Signal()                            # RMB "Dark/Light scene" chosen
     sliceChanged  = Signal(float, float, float)         # x0,y0,z0 world slice positions
-    frameChanged  = Signal(int)                         # animation frame index (drives the scrubber)
+    frameChanged  = Signal(int)                         # current anim frame -> drives the scrubber
 
     # placement modes
     MODE_NONE  = 0
@@ -803,8 +803,8 @@ class GLViewer(QOpenGLWidget):
         self.update()
 
     def seek(self, k):
-        """Jump to frame k (scrubber). color/greys index stored frames directly; the live particle
-        sim has no stored past, so it replays from reset to k (cheap: F is small)."""
+        """Scrubber jump to frame k. color/greys index stored frames; the live particle sim has no
+        stored past, so it replays from reset to k (cheap; F is small)."""
         if self._anim is None:
             return
         F = max((len(v) for v in self._anim.values()), default=0)
@@ -4540,7 +4540,7 @@ class MainWindow(QMainWindow):
     def _on_slice_changed(self, x, y, z):
         """Scene pick -> reflect in the Animation spin boxes (without echoing back)."""
         self._sync_slice_fields(x, y, z)
-        self._anim_ready = False        # slice moved -> particle sim mask/sources are stale
+        self._gl.clear_animation()      # slice moved -> particle mask/sources stale; reload on next play
         self._sb.showMessage(f"Slice planes  x={x:.3f}  y={y:.3f}  z={z:.3f} m")
 
     def _sync_slice_fields(self, x, y, z):
@@ -4555,7 +4555,7 @@ class MainWindow(QMainWindow):
         self._gl.set_slices(self._slice_sb['x'].value(),
                             self._slice_sb['y'].value(),
                             self._slice_sb['z'].value())
-        self._anim_ready = False        # slice moved -> particle sim mask/sources are stale
+        self._gl.clear_animation()      # slice moved -> reload on next play
 
     # ── slice-pressure animation ──
     def _toggle_all_planes(self):
@@ -4573,32 +4573,22 @@ class MainWindow(QMainWindow):
     def _on_prange(self, _=None):
         self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
 
-    def _ensure_anim_loaded(self):
-        """Load pressure frames + build the particle sims once; reuse across play/pause/scrub and
-        palette switches. Invalidated (self._anim_ready=False) when the slice or project changes."""
-        if self._anim_ready and self._gl._anim is not None:
-            return True
-        if not self._proj_root:
-            QMessageBox.warning(self, "No project", "Open a project first."); return False
-        frames = self._gl.load_animation(os.path.join(self._proj_root, "output"))
-        if frames <= 0:
-            QMessageBox.information(self, "No animation",
-                "No pressureX/Y/Z.bin found in output/. Run a full simulation first."); return False
-        self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
-        self._scrub_guard = True
-        self._anim_slider.setRange(0, frames - 1); self._anim_slider.setValue(0)
-        self._scrub_guard = False
-        self._anim_ready = True
-        return True
-
     def _toggle_animation(self):
         t = getattr(self, "_anim_timer", None)
-        if t is not None and t.isActive():          # playing -> pause IN PLACE (no reload/reset)
+        if t is not None and t.isActive():          # playing -> pause IN PLACE (no reset)
             self._gl._anim_playing = False; self._gl.update()
             t.stop(); self._anim_btn.setText("▶︎")
             return
-        if not self._ensure_anim_loaded():
-            return
+        if self._gl._anim is None:                   # (re)load only when not loaded yet
+            if not self._proj_root:
+                QMessageBox.warning(self, "No project", "Open a project first."); return
+            frames = self._gl.load_animation(os.path.join(self._proj_root, "output"))
+            if frames <= 0:
+                QMessageBox.information(self, "No animation",
+                    "No pressureX/Y/Z.bin found in output/. Run a full simulation first."); return
+            self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
+            self._scrub_guard = True
+            self._anim_slider.setRange(0, frames - 1); self._scrub_guard = False
         if getattr(self, "_anim_timer", None) is None:
             self._anim_timer = QTimer(self)
             self._anim_timer.timeout.connect(self._gl.step_frame)
@@ -4608,13 +4598,15 @@ class MainWindow(QMainWindow):
         self._sb.showMessage(f"Playing at {self._fps.value()} fps")
 
     def _on_scrub(self, v):
-        if self._scrub_guard:                        # value set by playback, not the user
+        if self._scrub_guard:                        # set by playback, not the user
             return
-        if self._ensure_anim_loaded():
-            self._gl.seek(v)
+        if self._gl._anim is None and self._proj_root:   # first touch before any play -> load
+            if self._gl.load_animation(os.path.join(self._proj_root, "output")) > 0:
+                self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
+        self._gl.seek(v)
 
     def _on_anim_frame(self, k):
-        self._scrub_guard = True                     # reflect playback position without re-seeking
+        self._scrub_guard = True                     # reflect playback without re-seeking
         self._anim_slider.setValue(k)
         self._scrub_guard = False
 
@@ -5038,13 +5030,13 @@ class MainWindow(QMainWindow):
         rb_p.toggled.connect(lambda on: on and self._gl.set_anim_palette('particles'))
         an.addWidget(rb_c, 5, 1); an.addWidget(rb_g, 5, 2); an.addWidget(rb_p, 5, 3)
 
-        # transport: play/pause button + a frame scrubber (drag = step/rewind/reset; arrow keys =
-        # frame-by-frame). Pause keeps position; only a new sim/slice reloads.
+        # transport: play/pause (pauses in place) + frame scrubber (drag = seek/rewind/reset,
+        # arrow keys = frame-by-frame). Only a first play / slice / project change (re)loads.
         self._anim_btn = QPushButton("▶︎"); self._anim_btn.setFixedWidth(44)
         self._anim_btn.clicked.connect(self._toggle_animation)
         self._anim_slider = QSlider(Qt.Horizontal); self._anim_slider.setRange(0, 0)
+        self._scrub_guard = False
         self._anim_slider.valueChanged.connect(self._on_scrub)
-        self._anim_ready = False; self._scrub_guard = False
         self._gl.frameChanged.connect(self._on_anim_frame)
         an.addWidget(self._anim_btn, 6, 0)
         an.addWidget(self._anim_slider, 6, 1, 1, 6)
@@ -5196,7 +5188,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Create failed", str(ex)); return
 
         self._proj_root = root
-        self._anim_ready = False        # new project -> reload animation on next play
         self._proj_label.setText(root)
         self._results.set_project(root)
         # seed the file contract so the project is immediately runnable-shaped
@@ -5225,7 +5216,7 @@ class MainWindow(QMainWindow):
         if not d:
             return
         self._proj_root = d
-        self._anim_ready = False        # opened project -> reload animation on next play
+        self._gl.clear_animation()      # new project -> reload animation on next play
         self._proj_label.setText(d)
         self._results.set_project(d)
         man = self._read_manifest(self._manifest_path())
@@ -5534,6 +5525,7 @@ class MainWindow(QMainWindow):
         self._gl.set_sources(  [(p[0],p[1],p[2]) + ((p[3],) if len(p) > 3 else ())
                                 for p in self._src_tbl.get_points()])
         self._gl.set_receivers([(p[0],p[1],p[2]) for p in self._rec_tbl.get_points()])
+        self._gl.clear_animation()   # source SPL/pos changed -> rebuild the particle sim on next play
 
     def _browse_binary(self):
         p, _ = QFileDialog.getOpenFileName(self, "Locate solver binary")
