@@ -356,12 +356,13 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Binaural auralization of the hybrid sim.")
     ap.add_argument("sofa", help="HRTF SOFA file")
-    ap.add_argument("pose", nargs="*", type=float, help="az el roll (deg); default 0 0 0")
+    ap.add_argument("pose_pos", nargs="*", type=float, help="az el roll (deg) positional; default 0 0 0")
+    ap.add_argument("--pose", nargs=3, type=float, metavar=("AZ", "EL", "ROLL"), help="az el roll (deg)")
     ap.add_argument("--rec", type=int, help="auralize ONE receiver to a wav (needs --dry --out)")
     ap.add_argument("--dry", help="anechoic mono audio in")
     ap.add_argument("--out", help="binaural wav out")
     a = ap.parse_args()
-    pose = (a.pose + [0, 0, 0])[:3]
+    pose = a.pose if a.pose is not None else (a.pose_pos + [0, 0, 0])[:3]
     if a.rec is not None:
         p = auralize_receiver(a.rec, a.sofa, pose, a.dry, a.out)
         print(f"[binauralize] receiver {a.rec} pose {pose} -> {p}")
