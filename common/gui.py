@@ -2728,6 +2728,7 @@ class MaterialPanel(QWidget):
     fitBegan = Signal(str)      # a fit run started; payload = command header line
     fitLog   = Signal(str)      # one line of fitter output -> Run tab Output log
     fitAllDone = Signal(int)    # fit-all finished; payload = return code
+    status   = Signal(str)      # status text -> shared main status bar (no per-panel label)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2827,10 +2828,6 @@ class MaterialPanel(QWidget):
         hs.addStretch(1)
         hs.addWidget(self._save_btn)             # Save all .mat, right of the toggle
         lay.addLayout(hs)
-
-        self._status = QLabel("")
-        self._status.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
-        lay.addWidget(self._status)
 
     # ── curve editor bridge ──
     def _clear_plot(self):
@@ -2933,7 +2930,7 @@ class MaterialPanel(QWidget):
                 "The predefined material catalogue was not found.\n\n"
                 "Create it with one material per line, for example:\n"
                 "rough_concrete 0.01 0.01 0.02 0.04 0.06 0.08 0.10 0.10")
-            self._status.setText("Missing predefined material catalogue.")
+            self.status.emit("Missing predefined material catalogue.")
             return
 
         try:
@@ -2942,7 +2939,7 @@ class MaterialPanel(QWidget):
             QMessageBox.critical(
                 self, "Could not read material list",
                 "Could not read the predefined material catalogue. Check that it exists and is readable.")
-            self._status.setText("Could not read predefined material catalogue.")
+            self.status.emit("Could not read predefined material catalogue.")
             return
 
         if not materials:
@@ -2950,7 +2947,7 @@ class MaterialPanel(QWidget):
                 self, "No predefined materials",
                 "No valid materials were found. Each non-comment line must be:\n\n"
                 "material_name  a63  a125  a250  a500  a1000  a2000  a4000  a8000")
-            self._status.setText("No valid predefined materials found.")
+            self.status.emit("No valid predefined materials found.")
             return
 
         dlg = QDialog(self)
@@ -3039,12 +3036,12 @@ class MaterialPanel(QWidget):
             return
         chosen = lst.currentItem()
         if chosen is None or chosen.isHidden():
-            self._status.setText("No predefined material selected.")
+            self.status.emit("No predefined material selected.")
             return
 
         file_name, display_name, vals = chosen.data(Qt.ItemDataRole.UserRole)
         self._apply_material_values(row, vals)
-        self._status.setText(
+        self.status.emit(
             f"Applied predefined material '{display_name}' to layer '{layer_name}' "
             "(remember to Save all .mat).")
 
@@ -3229,11 +3226,11 @@ class MaterialPanel(QWidget):
             self._soft_btn.blockSignals(True)
             self._soft_btn.setChecked(False)
             self._soft_btn.blockSignals(False)
-            self._status.setText("Select a layer row first."); return
+            self.status.emit("Select a layer row first."); return
         self._set_row_soft(r, checked)
         self._soft_lbl.setText("Soft (R < 0)" if checked else "Hard (R > 0)")
         name = self._tbl.item(r, 0).text()
-        self._status.setText(f"{name}: {'soft' if checked else 'hard'} "
+        self.status.emit(f"{name}: {'soft' if checked else 'hard'} "
                              "(remember to Save all .mat)")
 
     def _on_edit(self):
@@ -3384,15 +3381,15 @@ class MaterialPanel(QWidget):
         self._tbl.blockSignals(False)
         self._prev = self._snapshot()                  # post-paste is the new settled state
         self._on_row_selected()
-        self._status.setText("Pasted values from clipboard.")
+        self.status.emit("Pasted values from clipboard.")
 
     # ── save / fit ──
     def save_selected(self):
         r = self._tbl.currentRow()
         if r < 0:
-            self._status.setText("Select a layer row first."); return
+            self.status.emit("Select a layer row first."); return
         if not self._mat_dir:
-            self._status.setText("Open a project folder first."); return
+            self.status.emit("Open a project folder first."); return
         name = self._tbl.item(r, 0).text()
         vals = self._row_values(r)
         os.makedirs(self._mat_dir, exist_ok=True)
@@ -3402,15 +3399,15 @@ class MaterialPanel(QWidget):
             f.write("  ".join(f"{v:.4f}" for v in vals) + "\n")
         self._write_sctr(name, r)   # single scattering coeff -> input/sctr/<name>.sctr
         self._write_all_soft()      # hard/soft registry lives in ALL.mat
-        self._status.setText(f"Saved → {name}.mat")
+        self.status.emit(f"Saved → {name}.mat")
 
     def save_all(self):
         """Write a .mat file for EVERY layer row in one pass, independent of the
         current selection (does not move the selected row or change the plot)."""
         if not self._mat_dir:
-            self._status.setText("Open a project folder first."); return
+            self.status.emit("Open a project folder first."); return
         if self._tbl.rowCount() == 0:
-            self._status.setText("No materials to save."); return
+            self.status.emit("No materials to save."); return
         os.makedirs(self._mat_dir, exist_ok=True)
         n = 0
         for r in range(self._tbl.rowCount()):
@@ -3426,7 +3423,7 @@ class MaterialPanel(QWidget):
             self._write_sctr(name, r)   # single scattering coeff -> input/sctr/<name>.sctr
             n += 1
         self._write_all_soft()      # one central hard/soft registry
-        self._status.setText(f"Saved {n} material file(s) → {self._mat_dir}")
+        self.status.emit(f"Saved {n} material file(s) → {self._mat_dir}")
 
     def stale_fits(self, config_path):
         """Material names whose current values no longer match their .fit — recomputes
@@ -3473,9 +3470,9 @@ class MaterialPanel(QWidget):
     def run_fit_selected(self):
         r = self._tbl.currentRow()
         if r < 0:
-            self._status.setText("Select a layer row first."); return
+            self.status.emit("Select a layer row first."); return
         if not self._proj_root:
-            self._status.setText("Open a project folder first."); return
+            self.status.emit("Open a project folder first."); return
         self.save_selected()
         name = self._tbl.item(r, 0).text()
         # The fitting scripts live NEXT TO gui.py (both are in common/), so we
@@ -3483,7 +3480,7 @@ class MaterialPanel(QWidget):
         # which can live anywhere on disk.
         script = self._find_fit_script()
         if script is None:
-            self._status.setText("vectFIT.py / fminconFIT.py not found next to gui.py"); return
+            self.status.emit("vectFIT.py / fminconFIT.py not found next to gui.py"); return
         os.makedirs(self._fit_dir, exist_ok=True)
         mat = os.path.join(self._mat_dir, name + ".mat")
         out = os.path.join(self._fit_dir, name + ".fit")
@@ -3496,7 +3493,7 @@ class MaterialPanel(QWidget):
                "--config", os.path.join(proj, "config", "config.txt"),
                "--poles",  os.path.join(proj, "config", "poles.txt"),
                "--no-plot"]
-        self._status.setText(f"Running {os.path.basename(script)} on {name}…")
+        self.status.emit(f"Running {os.path.basename(script)} on {name}…")
         self.fitBegan.emit("$ " + " ".join(cmd))
         QApplication.processEvents()
         try:
@@ -3507,17 +3504,17 @@ class MaterialPanel(QWidget):
             for ln in out.splitlines():
                 self.fitLog.emit(ln)
             if proc.returncode == 0:
-                self._status.setText(f"Fit done → {name}.fit")
+                self.status.emit(f"Fit done → {name}.fit")
             else:
                 msg = out.strip().splitlines()
                 tail = msg[-1] if msg else "unknown error"
-                self._status.setText(f"Fit failed (rc={proc.returncode}): {tail[:80]}")
+                self.status.emit(f"Fit failed (rc={proc.returncode}): {tail[:80]}")
         except subprocess.TimeoutExpired:
             self.fitLog.emit("[!] Fit timed out (600 s).")
-            self._status.setText("Fit timed out (600 s).")
+            self.status.emit("Fit timed out (600 s).")
         except Exception as ex:
             self.fitLog.emit(f"[!] Fit error: {ex}")
-            self._status.setText(f"Fit error: {ex}")
+            self.status.emit(f"Fit error: {ex}")
 
     def _find_fit_script(self):
         """The fitting scripts live NEXT TO gui.py (both in common/)."""
@@ -3534,18 +3531,18 @@ class MaterialPanel(QWidget):
         run in a background thread: the GUI stays responsive while the user
         inspects and then closes the plot window."""
         if not self._proj_root:
-            self._status.setText("Open a project folder first."); return
+            self.status.emit("Open a project folder first."); return
         if self._tbl.rowCount() == 0:
-            self._status.setText("No materials to fit."); return
+            self.status.emit("No materials to fit."); return
         script = self._find_fit_script()
         if script is None:
-            self._status.setText("vectFIT.py / fminconFIT.py not found next to gui.py"); return
+            self.status.emit("vectFIT.py / fminconFIT.py not found next to gui.py"); return
         # Compatibility probe: multi-material fitting needs the updated script.
         # gui.py and vectFIT.py ship TOGETHER — if the copy next to gui.py is an
         # older one, say so explicitly instead of failing with an argparse error.
         try:
             if "--fitdir" not in open(script, encoding="utf-8", errors="ignore").read():
-                self._status.setText(
+                self.status.emit(
                     f"{os.path.basename(script)} is outdated (no --fitdir support) — "
                     "replace it with the updated version."); return
         except OSError:
@@ -3571,7 +3568,7 @@ class MaterialPanel(QWidget):
         # in its own window; the run finishes when the user closes it.
         self._fit_all_btn.setEnabled(False)
         self._fit_btn.setEnabled(False)
-        self._status.setText(f"Fitting {len(mats)} material(s)… close the plot window to finish.")
+        self.status.emit(f"Fitting {len(mats)} material(s)… close the plot window to finish.")
         self.fitBegan.emit("$ " + " ".join(cmd))
         self._fit_thread = _FitAllThread(cmd, proj)
         self._fit_thread.line.connect(self.fitLog.emit)
@@ -3582,9 +3579,9 @@ class MaterialPanel(QWidget):
         self._fit_all_btn.setEnabled(True)
         self._fit_btn.setEnabled(True)
         if rc == 0:
-            self._status.setText(f"Fit all done → {self._fit_dir}")
+            self.status.emit(f"Fit all done → {self._fit_dir}")
         else:
-            self._status.setText(f"Fit all failed (rc={rc}): {tail[:160]}")
+            self.status.emit(f"Fit all failed (rc={rc}): {tail[:160]}")
         self.fitAllDone.emit(rc)
 
 
@@ -3732,6 +3729,7 @@ class PointTable(QWidget):
             b = QPushButton(label); b.clicked.connect(fn)
             b.setIcon(make_pm_icon(sign))
             b.setIconSize(QSize(16, 16))
+            b.setFixedHeight(24)
             btn_row.addWidget(b)
         lay.addLayout(btn_row)
 
@@ -4232,7 +4230,7 @@ class MainWindow(QMainWindow):
             QCheckBox::indicator{{width:14px;height:14px;
                 border:1px solid {PAL['border']};border-radius:3px;background:{PAL['bg']};}}
             QCheckBox::indicator:checked{{background:{PAL['accent']};border-color:{PAL['accent']};}}
-            QTabWidget::pane{{border:1px solid {PAL['border']};background:{PAL['panel']};}}
+            QTabWidget::pane{{border:none;background:{PAL['panel']};}}
             QTabBar::tab{{background:{PAL['btn']};color:{PAL['subtext']};
                 border:1px solid {PAL['border']};padding:6px 8px;
                 border-bottom:none;border-top-left-radius:4px;border-top-right-radius:4px;}}
@@ -4291,23 +4289,23 @@ class MainWindow(QMainWindow):
         # placement toolbar under the viewer
         place_bar = QHBoxLayout()
         place_bar.setSpacing(4)
-        place_bar.setContentsMargins(2, 1, 2, 1)
+        place_bar.setContentsMargins(2, 1, 2, 8)    # bottom pad == tab rows' 8px (buttons bottom-aligned)
 
         self._src_btn = QPushButton("Src [S]")
         self._src_btn.setCheckable(True)
-        self._src_btn.setFixedSize(90, 22)
+        self._src_btn.setFixedSize(74, 22)
         self._src_btn.clicked.connect(lambda: self._toggle_placement("source"))
         place_bar.addWidget(self._src_btn)
 
         self._rec_btn = QPushButton("Rec [R]")
         self._rec_btn.setCheckable(True)
-        self._rec_btn.setFixedSize(90, 22)
+        self._rec_btn.setFixedSize(74, 22)
         self._rec_btn.clicked.connect(lambda: self._toggle_placement("receiver"))
         place_bar.addWidget(self._rec_btn)
 
         self._slice_btn = QPushButton("Slice [L]")
         self._slice_btn.setCheckable(True)
-        self._slice_btn.setFixedSize(90, 22)
+        self._slice_btn.setFixedSize(74, 22)
         self._slice_btn.clicked.connect(lambda: self._toggle_placement("slice"))
         place_bar.addWidget(self._slice_btn)
 
@@ -4317,8 +4315,12 @@ class MainWindow(QMainWindow):
                       "E then LMB-drag: edit/move point (hold X/Y/Z to lock)   RMB: del   Ctrl+Z: undo   Esc: cancel")
         place_bar.addWidget(self._hint_lbl)
         place_bar.addStretch()
+        # bottom-align the buttons so the bottom margin (not layout centering) sets their height,
+        # landing them 8px above the bar bottom == the tab rows' 8px bottom margin.
+        for _b in (self._src_btn, self._rec_btn, self._slice_btn):
+            place_bar.setAlignment(_b, Qt.AlignmentFlag.AlignBottom)
         bar_wrap = QWidget()
-        bar_wrap.setFixedHeight(24)
+        bar_wrap.setFixedHeight(34)
         bar_wrap.setLayout(place_bar)
         gl_vlay.addWidget(bar_wrap)
         self._place_bar = place_bar     # left margin follows the panel so it isn't covered
@@ -4454,7 +4456,7 @@ class MainWindow(QMainWindow):
             self._panel_grip.raise_()
         vis = max(0, self._panel_x + self._PANEL_W)    # panel's right edge on screen (0 hidden)
         m = self._place_bar.contentsMargins()
-        self._place_bar.setContentsMargins(vis, m.top(), m.right(), m.bottom())
+        self._place_bar.setContentsMargins(vis + 8, m.top(), m.right(), m.bottom())
         self._gl.set_hud_left(vis)
         if hasattr(self, "_float_prog"):               # progress bar rides the panel edge
             self._float_prog.move(vis + 16, self._float_prog.y())
@@ -4615,7 +4617,11 @@ class MainWindow(QMainWindow):
         all_on = all(c.isChecked() for c in self._pml.values())
         for c in self._pml.values():
             c.setChecked(not all_on)
-        self._pml_all_btn.setText("Select all" if all_on else "Deselect all")
+        self._sync_pml_all_btn()
+
+    def _sync_pml_all_btn(self):
+        on = all(c.isChecked() for c in self._pml.values())
+        self._pml_all_btn.setText("Deselect all" if on else "Select all")
 
     def _on_prange(self, _=None):
         self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
@@ -4884,6 +4890,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(QLabel("Material - α per octave band"))
         self._mat_panel = MaterialPanel()
+        self._mat_panel.status.connect(lambda t: self._sb.showMessage(t))   # shared status bar
         self._mat_panel.rowSelected.connect(self._on_material_row_selected)
         self._mat_panel.fitBegan.connect(self._begin_fit_log)
         self._mat_panel.fitLog.connect(self._append_fit_log)
@@ -4970,14 +4977,17 @@ class MainWindow(QMainWindow):
         root.addWidget(pml_box)
 
         cfg_btns = QHBoxLayout()
-        b_load = QPushButton("🗁\uFE0E  Load config.txt"); b_load.clicked.connect(self._load_config)
-        b_save = QPushButton("🖫\uFE0E  Save config.txt"); b_save.clicked.connect(self._save_config)
+        b_load = QPushButton("🗁\uFE0E  Load config.txt"); b_load.clicked.connect(self._load_config); b_load.setFixedHeight(24)
+        b_save = QPushButton("🖫\uFE0E  Save config.txt"); b_save.clicked.connect(self._save_config); b_save.setFixedHeight(24)
         cfg_btns.addWidget(b_load); cfg_btns.addWidget(b_save)   # Load left, Save right
-        root.addLayout(cfg_btns); root.addStretch(1)
+        cfg_btns.setContentsMargins(8, 0, 8, 8)     # 8px sides = same width as the src/rec Load/Save + Add/Remove
+        root.addStretch(1)
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setWidget(inner)
-        out = QWidget(); QVBoxLayout(out).addWidget(scroll)
+        out = QWidget(); ov = QVBoxLayout(out); ov.setContentsMargins(0, 0, 0, 0)
+        ov.addWidget(scroll, 1)
+        ov.addLayout(cfg_btns)          # Load/Save pinned to the tab bottom, like the src/rec tabs
         return out
 
     # ── Sources tab ──────────────────────────────────────────
@@ -5023,7 +5033,7 @@ class MainWindow(QMainWindow):
         self._aural = QCheckBox("Auralization mode (one run per source)")
         lay.addWidget(self._aural)
 
-        lay.addWidget(self._src_tbl)
+        lay.addWidget(self._src_tbl, 1)          # stretch so Load/Save pins to the bottom
 
         def _on_src_type(*_):
             is_sin = (self._src_group.checkedId() == 2)
@@ -5037,7 +5047,7 @@ class MainWindow(QMainWindow):
         br = QHBoxLayout()
         for lbl, fn in [("🗁\uFE0E  Load src.txt", self._load_src),
                         ("🖫\uFE0E  Save src.txt", self._save_src)]:
-            b = QPushButton(lbl); b.clicked.connect(fn); br.addWidget(b)
+            b = QPushButton(lbl); b.clicked.connect(fn); b.setFixedHeight(24); br.addWidget(b)
         lay.addLayout(br)
         return w
 
@@ -5057,11 +5067,11 @@ class MainWindow(QMainWindow):
         self._rec_tbl._tbl.clicked.connect(
             lambda ix: getattr(self, "_view_mode", None) == "results"
             and self._on_table_row_selected("receiver"))
-        lay.addWidget(self._rec_tbl)
+        lay.addWidget(self._rec_tbl, 1)          # stretch so Load/Save pins to the bottom
         br = QHBoxLayout()
         for lbl, fn in [("🗁\uFE0E  Load rec.txt", self._load_rec),
                         ("🖫\uFE0E  Save rec.txt", self._save_rec)]:
-            b = QPushButton(lbl); b.clicked.connect(fn); br.addWidget(b)
+            b = QPushButton(lbl); b.clicked.connect(fn); b.setFixedHeight(24); br.addWidget(b)
         lay.addLayout(br)
         return w
 
@@ -5156,7 +5166,7 @@ class MainWindow(QMainWindow):
 
         # transport: play/pause (pauses in place) + frame scrubber (drag = seek/rewind/reset,
         # arrow keys = frame-by-frame). Only a first play / slice / project change (re)loads.
-        self._anim_btn = QPushButton("▶︎"); self._anim_btn.setFixedWidth(44)
+        self._anim_btn = QPushButton("▶︎"); self._anim_btn.setFixedSize(44, 26)
         self._anim_btn.clicked.connect(self._toggle_animation)
         self._anim_slider = QSlider(Qt.Horizontal); self._anim_slider.setRange(0, 0)
         self._scrub_guard = False
@@ -5282,6 +5292,7 @@ class MainWindow(QMainWindow):
             f.write(f"poles     = {os.path.join(root, 'config', 'poles.txt')}\n")
             f.write(f"matdir    = {os.path.join(root, 'input', 'mat')}\n")
             f.write(f"layers    = {layers}\n")
+            f.write(f"show_bbox = {int(self._bbox_chk.isChecked())}\n")
             if dmax is not None:
                 f.write("# domain extent (Lx Ly Lz) is derived from the scene AABB; informational only:\n")
                 f.write(f"# domain  = {float(dmax[0]):.6g} {float(dmax[1]):.6g} {float(dmax[2]):.6g}\n")
@@ -5380,6 +5391,8 @@ class MainWindow(QMainWindow):
             self._load_obj_path(scene)          # repopulates layers + materials
         else:
             self._mat_panel.set_project(d)      # wire materials for a later OBJ
+
+        self._bbox_chk.setChecked(man.get("show_bbox", "0") == "1")   # restore bbox toggle
 
         # Persist the manifest now so opening a project always records current
         # state (scene path included) even if no .mat/config was touched.
@@ -5603,6 +5616,7 @@ class MainWindow(QMainWindow):
         for j, k in enumerate(["U_PML","D_PML","R_PML","L_PML","F_PML","B_PML"]):
             idx = 6+j
             if idx < len(vals): self._pml[k].setChecked(vals[idx] != 0.0)
+        self._sync_pml_all_btn()       # label follows the loaded PML state
         if len(vals) > 12:
             self._ism_order.setValue(int(vals[12]))  # ISM max reflection order
         if len(vals) > 13:
