@@ -4929,11 +4929,11 @@ class MainWindow(QMainWindow):
             lay.addRow(f"{lbl}", sp)
         # Temperature + Altitude first: they set the atmosphere (speed of sound), which the
         # estimate derives h / f_cutoff / rays from. config.txt is written/read by fixed index.
-        _add("T_C",      "Temperature", 20., -30.,   50., 1, "°C")
-        _add("altitude", "Altitude",    408., -500., 9000., 1, "m")   # config line 14 (v[13])
+        _add("T_C",      "Temperature 🌡\uFE0E", 20., -30.,   50., 1, "°C")
+        _add("altitude", "Altitude ↥\uFE0E",    408., -500., 9000., 1, "m")   # config line 14 (v[13])
         lay.addRow(_eb)                                                # Estimate, under the atmosphere
         _add("h",        "Grid spacing ↔︎",     0.05, 0.001, 2.0,   3, "m")
-        _add("t_max",    "Simulation span 🕐︎",  0.5,  0.001, 60.0,  3, "s")
+        _add("t_max",    "Simulation span 🕑\uFE0E",  0.5,  0.001, 60.0,  3, "s")
         _add("f_cutoff", "Cutoff frequency ✁︎", 250., 50.,   10000., 1, "Hz")
         _add("CFL",      "CFL number",       0.40, 0.05,  0.50,  2, "")
 
@@ -5090,8 +5090,8 @@ class MainWindow(QMainWindow):
         self._bin_le.setVisible(False)        # path lives in SOLVER_BINARY now
 
         # ── Ray-Tracing: debug ray overlay (count + order + Trace/Clear) ──
-        rt_box = QGroupBox("Ray-Tracing"); rt = QHBoxLayout(rt_box); rt.setSpacing(8)
-        rt.addWidget(QLabel("Debug rays"))
+        rt_box = QGroupBox("☈ay-Tracing"); rt = QHBoxLayout(rt_box); rt.setSpacing(8)
+        rt.addWidget(QLabel("Track rays ↯"))
         self._dbg_rays = QSpinBox(); self._dbg_rays.setRange(1, 5000)
         self._dbg_rays.setValue(64); self._dbg_rays.setMinimumWidth(70)
         rt.addWidget(self._dbg_rays)
@@ -5099,14 +5099,13 @@ class MainWindow(QMainWindow):
         self._dbg_order = QSpinBox(); self._dbg_order.setRange(1, 20)
         self._dbg_order.setValue(5); self._dbg_order.setMinimumWidth(55)
         rt.addWidget(self._dbg_order)
-        self._btn_rays = QPushButton("Trace rays"); self._btn_rays.clicked.connect(self._dump_rays)
-        self._btn_clear_rays = QPushButton("Clear rays")
-        self._btn_clear_rays.clicked.connect(self._clear_rays)
-        rt.addWidget(self._btn_rays, 1); rt.addWidget(self._btn_clear_rays, 1)
+        self._btn_rays = QPushButton("Trace rays"); self._btn_rays.clicked.connect(self._toggle_rays)
+        self._btn_rays.setFixedHeight(24)
+        rt.addWidget(self._btn_rays, 1)
         lay.addWidget(rt_box)
 
         # ── Animation: fps + slice-plane positions (or pick in scene with Slice [L]) ──
-        an_box = QGroupBox("Animation"); an = QGridLayout(an_box)
+        an_box = QGroupBox("Animation \U0001F39E\uFE0E"); an = QGridLayout(an_box)
         an.setHorizontalSpacing(6); an.setVerticalSpacing(12)   # roomier rows
         self._fps = QSpinBox(); self._fps.setRange(1, 240); self._fps.setValue(24)
         frow = QHBoxLayout(); frow.setSpacing(6)      # keep the box snug to its label
@@ -5178,7 +5177,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(an_box)
 
         # ── Simulation: Fit impedances + Run/Stop ──
-        sim_box = QGroupBox("Simulation"); top = QHBoxLayout(sim_box); top.setSpacing(8)
+        sim_box = QGroupBox("Simulation ∿"); top = QHBoxLayout(sim_box); top.setSpacing(8)
         self._fitimp_btn = QPushButton("⡶\uFE0E⣰\uFE0E  Fit impedances")
         self._fitimp_btn.setStyleSheet(
             f"background:{PAL['btn']};color:{PAL['text']};font-weight:bold;padding:8px;")
@@ -6194,6 +6193,13 @@ class MainWindow(QMainWindow):
                 "Increase h (or lower the cutoff frequency) and retry. The Run-tab log shows "
                 "the solver's exact message (e.g. an SDF 'does not fit' line).")
 
+    def _toggle_rays(self):
+        """One button: trace if none shown, else clear (text flips Trace <-> Clear rays)."""
+        if self._gl._ray_paths:
+            self._clear_rays()
+        else:
+            self._dump_rays()
+
     def _dump_rays(self):
         """Run the solver's --dump-rays pass (trace 'Debug rays' rays up to 'Order'
         bounces, no FVM) and overlay the paths on the 3D scene (purplish blue)."""
@@ -6226,6 +6232,8 @@ class MainWindow(QMainWindow):
             nsrc = len(set(self._gl._ray_src.values()))
             self._sb.showMessage(f"Traced {len(paths)} rays from {nsrc} source(s) — "
                                  f"pick a row to highlight its path")
+            if paths:
+                self._btn_rays.setText("Clear rays")
         else:
             self._sb.showMessage(f"Ray trace failed (rc={rc})")
 
@@ -6272,6 +6280,7 @@ class MainWindow(QMainWindow):
 
     def _clear_rays(self):
         self._gl.clear_ray_paths()
+        self._btn_rays.setText("Trace rays")
         if getattr(self, "_ray_dock", None) is not None:
             self._ray_tbl.setRowCount(0)
             self._ray_dock.hide()
