@@ -2808,6 +2808,7 @@ class MaterialPanel(QWidget):
 
         # ── save-all button (placed on the hard/soft row below) ──
         self._save_btn = QPushButton("🖫\uFE0E  Save all .mat")
+        self._save_btn.setFixedHeight(24)
         self._save_btn.clicked.connect(self.save_all)
         # The fitting buttons moved to the Run tab ("Fit impedances"); the button
         # objects are kept (hidden, not added to any layout) because run_fit_all /
