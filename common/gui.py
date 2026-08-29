@@ -75,8 +75,8 @@ PAL = {
     "bg":        "#1a1d23", "panel":   "#20242c", "border":  "#2e3340",
     "accent":    "#7c5cfc", "accent2": "#a48bff", "warn":    "#ffb74d",
     "ok":        "#a5d6a7", "err":     "#ef9a9a", "text":    "#cfd8dc",
-    "subtext":   "#78909c", "highlight":"#263238","btn":     "#2a3140",
-    "btn_hover": "#35404f", "layer_sel":"#251a55",
+    "subtext":   "#78909c", "highlight":"#263238","btn":     "#343d4c",
+    "btn_hover": "#434e60", "layer_sel":"#251a55",
 }
 
 # Line colours for the Results overlay plots, in order (add more as needed):
@@ -3936,6 +3936,13 @@ class PointTable(QWidget):
                 self._tbl.setItem(r, 0, QTableWidgetItem(str(r + 1)))  # default name
                 for c, v in enumerate(vals[:ncoord]):
                     self._tbl.setItem(r, self._coff + c, QTableWidgetItem(v))
+        npath = path + ".names"                         # restore names from the sidecar, if present
+        if os.path.isfile(npath):
+            with open(npath) as fn:
+                for r, nm in enumerate(fn):
+                    nm = nm.rstrip("\n")
+                    if r < self._tbl.rowCount() and nm:
+                        self._tbl.setItem(r, 0, QTableWidgetItem(nm))
 
     def save_file(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -3944,6 +3951,10 @@ class PointTable(QWidget):
             f.write("# " + hdr + "\n")
             for pt in self.get_points():
                 f.write("  ".join(f"{v:.6g}" for v in pt) + "\n")
+        # names go in a sidecar (one per line, row-matched) so the numeric file main3D parses
+        # stays untouched. spaces in names are fine — one name per line.
+        with open(path + ".names", "w") as fn:
+            fn.write("".join(nm + "\n" for nm in self.get_names()))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -4193,7 +4204,7 @@ class MainWindow(QMainWindow):
     def _apply_theme(self):
         pal = QPalette()
         for role, key in [
-            (QPalette.ColorRole.Window,          "bg"),
+            (QPalette.ColorRole.Window,          "panel"),   # tab content etc. sits on panel, not the darker bg
             (QPalette.ColorRole.WindowText,      "text"),
             (QPalette.ColorRole.Base,            "panel"),
             (QPalette.ColorRole.AlternateBase,   "highlight"),
@@ -4706,6 +4717,7 @@ class MainWindow(QMainWindow):
         out = os.path.join(self._proj_root, "output")
         fs = 44100                                     # allIRs saves broadband IRs at this rate
         FG, BG = PAL['text'], PAL['bg']
+        names = self._rec_tbl.get_names()              # legend follows the table's receiver names
         fig, (ax_t, ax_f) = plt.subplots(2, 1, figsize=(9, 7)); drew = False
         for i, rec in enumerate(recs):
             files = sorted(glob.glob(os.path.join(out, f"IR_broad_{rec}_*.npy")))
@@ -4716,9 +4728,10 @@ class MainWindow(QMainWindow):
             for a in arrs:
                 ir[:a.size] += a                       # total response at the receiver (all sources)
             col = PLOT_COLORS[i % len(PLOT_COLORS)]
-            ax_t.plot(np.arange(n) / fs, ir, lw=0.7, color=col, label=f"receiver {rec}")
+            name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
+            ax_t.plot(np.arange(n) / fs, ir, lw=0.7, color=col, label=name)
             H = np.abs(np.fft.rfft(ir)); fr = np.fft.rfftfreq(n, 1 / fs)
-            ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] + 1e-12), lw=0.8, color=col, label=f"receiver {rec}")
+            ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] + 1e-12), lw=0.8, color=col, label=name)
             drew = True
         if not drew:
             plt.close(fig); self._results.show_png(None); return
