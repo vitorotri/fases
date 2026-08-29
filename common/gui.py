@@ -1540,7 +1540,7 @@ class GLViewer(QOpenGLWidget):
         pen = QPen(col); pen.setWidthF(5.0); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         p0 = QPointF(x0, H - y0)
-        g = 0.2   # fixed gizmo length [m] on all 3 axes
+        g = 0.1   # fixed gizmo length [m] on all 3 axes
         for end in ((g, 0, 0), (0, g, 0), (0, 0, g)):
             try:
                 sx, sy, sz = gluProject(end[0], end[1], end[2], self._mv, self._proj, vp)
@@ -3998,20 +3998,29 @@ class SolverThread(QThread):
 
 
 class ResultsView(QWidget):
-    """Shows the per-receiver IR/FR plot PNG that allIRs.py writes (IR_rec<rec>.png in output/).
-    Image-based on purpose: setPixmap always repaints, so no live-canvas/draw_idle failure modes."""
+    """Floating plot window: a metric selector on top (IR+Spectrum, or an ISO-3382 param per band)
+    and the rendered PNG below. Image-based on purpose: setPixmap always repaints."""
+    metricChanged = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._proj_root = None
         self._pix = None
         lay = QVBoxLayout(self); lay.setContentsMargins(6, 6, 6, 6)
-        self._label = QLabel("Select a receiver in the Receivers tab.")
+        from PySide6.QtWidgets import QComboBox, QSizePolicy
+        self._metric = QComboBox()
+        self._metric.addItems(["IR + Spectrum", "T20", "T30", "EDT", "C50", "C80", "D50"])
+        self._metric.currentIndexChanged.connect(lambda _: self.metricChanged.emit())
+        lay.addWidget(self._metric)
+        self._label = QLabel("Select receiver(s) in the Receivers tab or the scene.")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setStyleSheet(f"color:{PAL['text']};background:{PAL['bg']};")
-        from PySide6.QtWidgets import QSizePolicy
         self._label.setMinimumSize(1, 1)           # don't let the pixmap's sizeHint trap the
         self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)  # window min after maximize
-        lay.addWidget(self._label)
+        lay.addWidget(self._label, 1)
+
+    def metric(self):
+        return self._metric.currentText()
 
     def set_project(self, root):
         self._proj_root = root
@@ -4284,6 +4293,7 @@ class MainWindow(QMainWindow):
         self._results.setWindowTitle("Results")
         self._results.resize(720, 560)
         self._results.hide()
+        self._results.metricChanged.connect(lambda: self._apply_results_selection(mirror_table=False))
         self._view_mode = "sim"
         self._panel_locked = False
 
@@ -4548,11 +4558,33 @@ class MainWindow(QMainWindow):
 
     def _on_allirs_done(self, rc):
         self._sb.showMessage("Broadband IRs ready." if rc == 0 else f"allIRs.py failed (rc={rc}).")
+        if rc == 0:
+            self._run_acouparams()                         # rebuild params.json from the fresh IRs
         if getattr(self, "_view_mode", None) == "results":
             if self._results_sel:                          # honour the current multi-selection
                 self._apply_results_selection(mirror_table=True)
             else:
                 self._results.show_receiver(self._current_receiver_row())
+
+    def _run_acouparams(self):
+        """Compute the ISO-3382 params (acouparams.py -> params.json) in output/, after allIRs."""
+        t = getattr(self, "_acou_thread", None)
+        if t is not None and t.isRunning():
+            return
+        script = self._find_common_script("acouparams.py")
+        if script is None:
+            return
+        self._acou_thread = SolverThread([sys.executable, script],
+                                         os.path.join(self._proj_root, "output"))
+        self._acou_thread.output.connect(self._log.append)
+        self._acou_thread.done.connect(self._on_acouparams_done)
+        self._acou_thread.start()
+
+    def _on_acouparams_done(self, rc):
+        if rc != 0:
+            self._sb.showMessage(f"acouparams.py failed (rc={rc}) — parameters unavailable."); return
+        if getattr(self, "_view_mode", None) == "results" and self._results.metric() != "IR + Spectrum":
+            self._apply_results_selection(mirror_table=False)   # re-render now params.json is fresh
 
     def _toggle_scene_theme(self):
         """Flip the viewport between Dark and Light and repaint."""
@@ -4709,12 +4741,13 @@ class MainWindow(QMainWindow):
                                          tbl.model().index(r, tbl.columnCount() - 1)),
                           QItemSelectionModel.SelectionFlag.Select)
             self._sel_sync = False
-        if len(recs) > 1:
-            self._render_overlay(recs)
-        elif len(recs) == 1:
-            self._results.show_receiver(recs[0])
+        if not recs:
+            self._results.show_png(None); return
+        metric = self._results.metric()
+        if metric == "IR + Spectrum":
+            self._render_overlay(recs) if len(recs) > 1 else self._results.show_receiver(recs[0])
         else:
-            self._results.show_png(None)
+            self._render_params(recs, metric)
 
     def _render_overlay(self, recs):
         """Overlay IR + frequency response of several receivers from the saved IR_broad_*.npy (no
@@ -4761,6 +4794,61 @@ class MainWindow(QMainWindow):
         path = os.path.join(out, "IR_overlay.png")
         fig.savefig(path, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
         self._results.show_png(path)
+
+    def _render_params(self, recs, param):
+        """Plot one ISO-3382 parameter vs octave band, one line per receiver, from params.json
+        (acouparams.py). Nulls (undefined bands) are dropped. GUI-themed."""
+        import json
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import ScalarFormatter
+        from PySide6.QtGui import QPixmap
+        out = os.path.join(self._proj_root, "output")
+        pj = os.path.join(out, "params.json")
+        if not os.path.isfile(pj):
+            self._results._label.setPixmap(QPixmap())
+            self._results._label.setText("Computing parameters… (acouparams.py)")
+            self._run_acouparams(); return
+        with open(pj) as f:
+            data = json.load(f)
+        names = self._rec_tbl.get_names()
+        FG, BG = PAL['text'], PAL['bg']
+        units = {"T20": "s", "T30": "s", "EDT": "s", "C50": "dB", "C80": "dB", "D50": ""}
+        fig, ax = plt.subplots(figsize=(8, 5)); drew = False; ref_bands = None
+        for i, rec in enumerate(recs):
+            d = data.get(str(rec))
+            if not d or param not in d:
+                continue
+            ref_bands = d["bands"]
+            xy = [(b, v) for b, v in zip(d["bands"], d[param]) if v is not None]
+            if not xy:
+                continue
+            xs, ys = zip(*xy)
+            col = PLOT_COLORS[i % len(PLOT_COLORS)]
+            name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
+            ax.semilogx(xs, ys, "o-", color=col, lw=1.3, label=name)
+            drew = True
+        if not drew:
+            plt.close(fig)
+            self._results._label.setPixmap(QPixmap())
+            self._results._label.setText(f"No {param} values for the selected receiver(s).")
+            return
+        ax.set_xticks(ref_bands); ax.get_xaxis().set_major_formatter(ScalarFormatter())
+        ax.set_xlabel("Octave band [Hz]")
+        ax.set_ylabel(f"{param} [{units[param]}]" if units[param] else param)
+        ax.set_title(f"Receiver comparison — {param} per octave band")
+        fig.patch.set_facecolor(BG); ax.set_facecolor(BG)
+        for sp in ax.spines.values(): sp.set_color(FG)
+        ax.tick_params(colors=FG, which='both')
+        ax.xaxis.label.set_color(FG); ax.yaxis.label.set_color(FG); ax.title.set_color(FG)
+        ax.grid(True, which='both', color=PAL['border'], alpha=0.6)
+        leg = ax.legend(fontsize=8)
+        leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
+        for t in leg.get_texts(): t.set_color(FG)
+        fig.tight_layout()
+        p = os.path.join(out, "IR_params.png")
+        fig.savefig(p, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
+        self._results.show_png(p)
 
     def _on_point_hovered(self, kind, idx):
         """G-mode hover over a point -> select its row in the matching table
@@ -5474,7 +5562,7 @@ class MainWindow(QMainWindow):
                 e.ignore(); return
             if ans == B.Save:
                 self._save_project()
-        for tn in ("_solver_thread", "_estimate_thread", "_rays_thread", "_allirs_thread"):
+        for tn in ("_solver_thread", "_estimate_thread", "_rays_thread", "_allirs_thread", "_acou_thread"):
             th = getattr(self, tn, None)               # stop background QThreads so Qt doesn't
             if th is not None and th.isRunning():      # abort with "Destroyed while running"
                 th.stop() if hasattr(th, "stop") else None
