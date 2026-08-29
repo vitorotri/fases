@@ -469,6 +469,7 @@ class GLViewer(QOpenGLWidget):
     pointRemoved  = Signal(str, int)                   # kind, index
     pointMoved    = Signal(str, int, float, float, float)  # kind, index, x, y, z
     pointHovered  = Signal(str, int)                   # kind, index (G-mode hover)
+    receiverPicked = Signal(int)                        # receiver clicked in Results mode (-1 = none)
     pointDragStarted = Signal()                        # a grab/drag just began
     coordsChanged = Signal(float, float, float)        # live HUD coords
     themeToggle   = Signal()                            # RMB "Dark/Light scene" chosen
@@ -530,6 +531,8 @@ class GLViewer(QOpenGLWidget):
         # in the scene corresponds to which table row.
         self._hl_src = -1
         self._hl_rec = -1
+        self._sel_recs = set()          # receivers multi-selected for Results overlay
+        self._results_pick = False      # LMB click picks/toggles a receiver instead of ray-pick
         self._glyph_queue = []   # per-frame source/receiver glyph overlay list
         self._grid_h = 0.0       # user grid spacing [m]; drives the i,j,k HUD indices
         self._hud_left = 0       # left inset [px] so the bottom-left HUD clears the tab panel
@@ -642,6 +645,13 @@ class GLViewer(QOpenGLWidget):
         self._hl_src = idx if kind == "source"   else -1
         self._hl_rec = idx if kind == "receiver" else -1
         self.update()
+
+    def set_selected_receivers(self, indices):
+        """Receivers highlighted as the Results multi-selection."""
+        self._sel_recs = set(int(i) for i in indices); self.update()
+
+    def set_results_pick(self, on):
+        self._results_pick = bool(on)
 
     def enter_placement_mode(self, mode):
         self._mode      = mode
@@ -1637,7 +1647,7 @@ class GLViewer(QOpenGLWidget):
 
     def _draw_receivers(self):
         for i, pt in enumerate(self._receivers):
-            hl  = (i == self._hl_rec)
+            hl  = (i == self._hl_rec) or (i in self._sel_recs)
             if self._outside_domain(pt[0], pt[1], pt[2]):
                 col = OUTSIDE_COLOR
             else:
@@ -1957,6 +1967,10 @@ class GLViewer(QOpenGLWidget):
             return
 
         if not moved and e.button() == Qt.MouseButton.LeftButton:
+            if self._results_pick:                       # Results mode: click toggles a receiver
+                kind, idx = self._find_nearest_point(e.position(), radius=30.0)
+                self.receiverPicked.emit(idx if kind == "receiver" else -1)
+                return
             self._do_ray_pick(e.position())
         if not moved and e.button() == Qt.MouseButton.RightButton:
             if not self._do_point_remove(e.position()):   # empty space -> scene menu
@@ -3984,6 +3998,9 @@ class ResultsView(QWidget):
         self._label = QLabel("Select a receiver in the Receivers tab.")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setStyleSheet(f"color:{PAL['text']};background:{PAL['bg']};")
+        from PySide6.QtWidgets import QSizePolicy
+        self._label.setMinimumSize(1, 1)           # don't let the pixmap's sizeHint trap the
+        self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)  # window min after maximize
         lay.addWidget(self._label)
 
     def set_project(self, root):
@@ -4246,11 +4263,16 @@ class MainWindow(QMainWindow):
         self._gl.pointMoved.connect(self._on_point_moved)
         self._gl.pointDragStarted.connect(self._remember_points_for_undo)
         self._gl.pointHovered.connect(self._on_point_hovered)
+        self._gl.receiverPicked.connect(self._on_scene_receiver_pick)
+        self._results_sel = set(); self._sel_sync = False   # shared Results receiver selection
         self._gl.pointRemoved.connect(self._on_point_removed)
         gl_vlay.addWidget(self._gl, stretch=1)      # GL stays in the layout (never re-parented)
         # Results plots are an OVERLAY on top of the scene (QOpenGLWidget crashes if stacked),
         # shown/hidden by the mode bar and positioned clear of the left panel in _layout_panel.
-        self._results = ResultsView(gl_wrap)
+        self._results = ResultsView(self)          # top-level floating window (native resize/maximize)
+        self._results.setWindowFlags(Qt.Window)
+        self._results.setWindowTitle("Results")
+        self._results.resize(720, 560)
         self._results.hide()
         self._view_mode = "sim"
         self._panel_locked = False
@@ -4425,10 +4447,6 @@ class MainWindow(QMainWindow):
         self._gl.set_hud_left(vis)
         if hasattr(self, "_float_prog"):               # progress bar rides the panel edge
             self._float_prog.move(vis + 16, self._float_prog.y())
-        if hasattr(self, "_results") and self._results.isVisible():   # overlay clear of the panel
-            self._results.setGeometry(vis, 0, max(1, self._gl_wrap.width() - vis),
-                                      self._gl_wrap.height())
-            self._results.raise_()
         if hasattr(self, "_mode_bar"):                 # mode selector docks top-right, above all
             self._mode_bar.adjustSize()
             self._mode_bar.move(self._gl_wrap.width() - self._mode_bar.width() - 12, 12)
@@ -4469,17 +4487,21 @@ class MainWindow(QMainWindow):
         """Switch the right-side area: 'sim' = 3D scene, 'results' = per-receiver IR/FR plots,
         'draw' = sketcher (separate script, added later)."""
         self._view_mode = mode
+        self._gl.set_results_pick(mode == "results")   # click-to-select receivers only in Results
+        if mode != "results":
+            self._gl.set_selected_receivers([])        # drop the multi-select highlight
         if mode == "sim":
             self._panel_locked = False
             self._results.hide()
             self._layout_panel()
             self._panel_idle.start()
         elif mode == "results":
-            self._panel_locked = True              # panel stays open in Results mode
-            self._panel_idle.stop(); self._show_panel()
+            self._panel_locked = False             # panel shrinks/idles normally; Results floats
             self._results.set_project(self._proj_root)
-            self._results.show()
-            self._layout_panel()                   # position overlay clear of the panel now
+            self._results.show(); self._results.raise_()
+            self._layout_panel()
+            self._panel_idle.start()
+            self._gl.set_selected_receivers(sorted(self._results_sel))
             self._ensure_results()                 # (re)compute broadband IRs, then plot
         elif mode == "draw":
             self._panel_locked = False
@@ -4512,7 +4534,10 @@ class MainWindow(QMainWindow):
     def _on_allirs_done(self, rc):
         self._sb.showMessage("Broadband IRs ready." if rc == 0 else f"allIRs.py failed (rc={rc}).")
         if getattr(self, "_view_mode", None) == "results":
-            self._results.show_receiver(self._current_receiver_row())
+            if self._results_sel:                          # honour the current multi-selection
+                self._apply_results_selection(mirror_table=True)
+            else:
+                self._results.show_receiver(self._current_receiver_row())
 
     def _toggle_scene_theme(self):
         """Flip the viewport between Dark and Light and repaint."""
@@ -4638,12 +4663,39 @@ class MainWindow(QMainWindow):
         tbl = self._src_tbl if kind == "source" else self._rec_tbl
         idx = tbl._tbl.currentRow()                    # SelectItems: selectedRows() is empty
         self._gl.set_highlight(kind if idx >= 0 else None, idx)
-        if kind == "receiver" and getattr(self, "_view_mode", None) == "results":
-            rows = sorted({ix.row() for ix in tbl._tbl.selectedIndexes()})
-            if len(rows) > 1:                          # Ctrl/Shift-select many -> overlay comparison
-                self._render_overlay(rows)
-            elif idx >= 0:                             # single -> the full allIRs per-receiver plot
-                self._results.show_receiver(idx)
+        if kind == "receiver" and getattr(self, "_view_mode", None) == "results" \
+                and not getattr(self, "_sel_sync", False):
+            self._results_sel = {ix.row() for ix in tbl._tbl.selectedIndexes()}
+            self._apply_results_selection(mirror_table=False)   # table already reflects it
+
+    def _on_scene_receiver_pick(self, idx):
+        """Click a receiver in the scene (Results mode) -> toggle it in the shared selection."""
+        if idx < 0 or getattr(self, "_view_mode", None) != "results":
+            return
+        self._results_sel ^= {idx}
+        self._apply_results_selection(mirror_table=True)
+
+    def _apply_results_selection(self, mirror_table=True):
+        """Render the current Results selection and keep scene highlight + table in sync.
+        0 -> hint, 1 -> full allIRs plot, >1 -> overlay comparison."""
+        recs = sorted(r for r in self._results_sel if r >= 0)
+        self._gl.set_selected_receivers(recs)
+        if mirror_table:
+            from PySide6.QtCore import QItemSelection, QItemSelectionModel
+            tbl = self._rec_tbl._tbl; sm = tbl.selectionModel()
+            self._sel_sync = True
+            sm.clearSelection()
+            for r in recs:
+                sm.select(QItemSelection(tbl.model().index(r, 0),
+                                         tbl.model().index(r, tbl.columnCount() - 1)),
+                          QItemSelectionModel.SelectionFlag.Select)
+            self._sel_sync = False
+        if len(recs) > 1:
+            self._render_overlay(recs)
+        elif len(recs) == 1:
+            self._results.show_receiver(recs[0])
+        else:
+            self._results.show_png(None)
 
     def _render_overlay(self, recs):
         """Overlay IR + frequency response of several receivers from the saved IR_broad_*.npy (no
@@ -5350,6 +5402,7 @@ class MainWindow(QMainWindow):
             if th is not None and th.isRunning():      # abort with "Destroyed while running"
                 th.stop() if hasattr(th, "stop") else None
                 th.wait(2000)
+        self._results.close()      # top-level floating window won't close itself with the app
         e.accept()
 
     def _load_obj(self):
