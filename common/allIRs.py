@@ -36,9 +36,10 @@ dt = float(hp[9])
 dt_half = 0.5 * dt
 fs_fv   = 1 / dt
 fs      = 44100                              # Hz — output sample rate
-# The FVM is only excited/valid to ~0.5*f_cutoff (source peak ~0.45*f_cutoff), and main3D emits GA
-# bands down to that point, so the actual FVM<->GA crossover is at half the user's cutoff.
-f_cutoff = 0.5 * f_cutoff_sim                 # Hz — actual FVM<->GA crossover (grid ceiling is f_cutoff_sim)
+# FVM<->GA crossover f_x. Fallback = 0.5*f_cutoff (PCS Gaussian roll-off); overridden below from the
+# actual source-pulse spectrum so it's also right for Ricker (bandpass) and any custom glob_f.
+XOVER_DROP_DB = 6.0                           # ponytail: crossover = pulse's upper -6 dB edge; tune
+f_cutoff = 0.5 * f_cutoff_sim                 # Hz (grid ceiling is f_cutoff_sim)
 
 # --- source deconvolution ---------------------------------------------------------------------
 # The FVM IR is h_room CONVOLVED with the radiated source pulse (band-limited, ~30 dB down at
@@ -63,6 +64,15 @@ if pulse_fs is None:
           "simulation with the current main3D to generate p_ref.bin.")
 else:
     print(f"[allIRs] p_ref.bin loaded ({pulse_fs.size} samples at fs) -> deconvolving source pulse.")
+    # crossover = the source pulse's upper -XOVER_DROP_DB edge (where the FVM stops being excited).
+    # Correct for PCS (~0.5*f_cutoff) AND Ricker (its own roll-off), no per-source-type constant.
+    _P = np.abs(np.fft.rfft(pulse_fs)); _f = np.fft.rfftfreq(pulse_fs.size, 1 / fs)
+    _pk = int(_P.argmax()); _thr = _P[_pk] * 10 ** (-XOVER_DROP_DB / 20)
+    _above = np.where((_f > _f[_pk]) & (_P >= _thr))[0]
+    _fx = float(_f[_above[-1]]) if _above.size else float(_f[_pk])
+    if 0 < _fx <= f_cutoff_sim:
+        f_cutoff = _fx
+    print(f"[allIRs] crossover f_x = {f_cutoff:.1f} Hz  (pulse peak {_f[_pk]:.1f} Hz)")
 
 # Fallback only (no p_ref.bin from an older run): source-pulse lag + energy scale instead of deconv.
 if src_opt == 1:                                  # Ricker wavelet
