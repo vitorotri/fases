@@ -32,7 +32,7 @@ import subprocess
 import numpy as np
 
 from PySide6.QtCore    import (Qt, QThread, Signal, QPoint, QPointF, QEvent,
-                              QSettings, QTimer, QSize, QVariantAnimation)
+                              QSettings, QTimer, QSize, QVariantAnimation, QUrl)
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor, QKeySequence, QPolygon,
                               QPixmap, QIcon, QPen, QShortcut)
@@ -197,7 +197,7 @@ OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 # program is installed elsewhere; it is the default shown in the Run tab's
 # "Binary:" field and is NOT overwritten by a project's saved manifest unless
 # that manifest points to a file that actually exists.
-SOLVER_BINARY = "/home/vitorotri/Documents/Github/phases/3D-solver/build/phases3D"
+SOLVER_BINARY = "/home/vitorotri/Documents/Github/fases/3D-solver/build/phases3D"
 
 # Predefined absorption-material catalogue used by the material table RMB menu.
 # Expected line format inside the text file:
@@ -206,7 +206,7 @@ SOLVER_BINARY = "/home/vitorotri/Documents/Github/phases/3D-solver/build/phases3
 #   rough_concrete 0.01 0.01 0.02 0.04 0.06 0.08 0.10 0.10
 # The GUI shows material_name as "material name" in the selector, but keeps the
 # file format underscore-based and human-editable.
-MATERIALS_FILE = "/home/vitorotri/Documents/Github/phases/common/materialsREF.txt"
+MATERIALS_FILE = "/home/vitorotri/Documents/Github/fases/common/materialsREF.txt"
 
 # ─────────────────────────────────────────────────────────────
 #  Project layout
@@ -4250,7 +4250,7 @@ class DraggableProgress(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FASES - Faithful Acoustic Solver for Extended Spaces")
+        self.setWindowTitle("F.A.S.E.S - Faithful Acoustic Solver for Extended Spaces")
         self.resize(1440, 860)
         self._proj_root  = None
         self._obj_path   = None
@@ -4532,6 +4532,8 @@ class MainWindow(QMainWindow):
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._undo_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self._undo_shortcut.activated.connect(self._undo_point_change)
+        QShortcut(QKeySequence.StandardKey.Save, self, activated=self._save_project)   # Ctrl+S
+        QShortcut(QKeySequence.StandardKey.Open, self, activated=self._open_project)   # Ctrl+O
 
     # ── point undo ───────────────────────────────────────────
     def _snapshot_point_state(self):
@@ -5372,12 +5374,167 @@ class MainWindow(QMainWindow):
             lambda ix: getattr(self, "_view_mode", None) == "results"
             and self._on_table_row_selected("receiver"))
         lay.addWidget(self._rec_tbl, 1)          # stretch so Load/Save pins to the bottom
+        self._aur_btn = QPushButton("🎧\uFE0E  Auralize ▴"); self._aur_btn.setFixedHeight(24)
+        self._aur_btn.clicked.connect(self._toggle_auralize_panel)
+        self._aur_panel = self._build_auralize_panel()
+        ptl = self._rec_tbl.layout()                      # drop Auralize button + panel ABOVE the
+        ptl.insertWidget(ptl.count() - 1, self._aur_btn)  # PointTable's own Add/Remove row
+        ptl.insertWidget(ptl.count() - 1, self._aur_panel)
         br = QHBoxLayout()
         for lbl, fn in [("🗁\uFE0E  Load rec.txt", self._load_rec),
                         ("🖫\uFE0E  Save rec.txt", self._save_rec)]:
             b = QPushButton(lbl); b.clicked.connect(fn); b.setFixedHeight(24); br.addWidget(b)
         lay.addLayout(br)
         return w
+
+    # ── Binaural auralization panel (Receivers tab) ──────────────
+    def _build_auralize_panel(self):
+        """Collapsible panel under the receiver table: head pose dials (az/el/roll) for the SELECTED
+        receiver, a SOFA + anechoic-audio picker, Convolve, and a blinking play/scrubber transport."""
+        from PySide6.QtWidgets import QDial
+        box = QGroupBox("Head pose and binaural render"); box.setVisible(False)
+        v = QVBoxLayout(box); v.setSpacing(6); v.setContentsMargins(8, 6, 8, 8)
+
+        dr = QHBoxLayout(); self._aur_dials = {}
+        for key, lo, hi, cap in [("az", 0, 360, "Azimuth ◠\uFE0E"), ("el", -90, 90, "Elevation ⦠\uFE0E"),
+                                 ("roll", -180, 180, "Roll ⭮\uFE0E")]:
+            col = QVBoxLayout()
+            c = QLabel(cap); c.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            c.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
+            d = QDial(); d.setRange(lo, hi); d.setValue(0); d.setNotchesVisible(True)
+            d.setWrapping(key == "az"); d.setFixedSize(88, 88)
+            val = QLabel("0°"); val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            d.valueChanged.connect(lambda x, wv=val: wv.setText(f"{x}°"))
+            col.addWidget(c); col.addWidget(d, 0, Qt.AlignmentFlag.AlignCenter); col.addWidget(val)
+            dr.addLayout(col); self._aur_dials[key] = d
+        v.addLayout(dr)
+
+        sr = QHBoxLayout(); sr.addWidget(QLabel("HRTF"))
+        self._aur_sofa = QLineEdit(QSettings("phases", "gui").value("last_sofa", "") or "")
+        bs = QPushButton("SOFA…"); bs.setFixedHeight(24); bs.clicked.connect(self._pick_sofa)
+        sr.addWidget(self._aur_sofa, 1); sr.addWidget(bs); v.addLayout(sr)
+
+        ar = QHBoxLayout(); ar.addWidget(QLabel("Audio"))
+        self._aur_dry = QLineEdit(QSettings("phases", "gui").value("last_dry", "") or "")
+        bd = QPushButton("Anechoic…"); bd.setFixedHeight(24); bd.clicked.connect(self._pick_dry)
+        ar.addWidget(self._aur_dry, 1); ar.addWidget(bd); v.addLayout(ar)
+
+        self._aur_conv = QPushButton("∗	Convolve"); self._aur_conv.setFixedHeight(26)
+        self._aur_conv.clicked.connect(self._run_convolve); v.addWidget(self._aur_conv)
+
+        tr = QHBoxLayout()
+        self._aur_play = QPushButton("▶"); self._aur_play.setFixedWidth(38)
+        self._aur_play.setEnabled(False); self._aur_play.clicked.connect(self._toggle_play)
+        self._aur_slider = QSlider(Qt.Horizontal); self._aur_slider.setEnabled(False)
+        self._aur_time = QLabel("0:00"); self._aur_time.setStyleSheet(f"color:{PAL['subtext']};")
+        tr.addWidget(self._aur_play); tr.addWidget(self._aur_slider, 1); tr.addWidget(self._aur_time)
+        v.addLayout(tr)
+        self._aur_setup_player()
+        return box
+
+    def _aur_setup_player(self):
+        """QtMultimedia player wiring (guarded — if unavailable, Convolve still writes the wav)."""
+        self._player = None
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+        except Exception:
+            return
+        self._audio_out = QAudioOutput()
+        self._player = QMediaPlayer(); self._player.setAudioOutput(self._audio_out)
+        self._player.positionChanged.connect(self._on_media_pos)
+        self._player.durationChanged.connect(lambda d: self._aur_slider.setRange(0, d))
+        self._player.playbackStateChanged.connect(self._on_media_state)
+        self._aur_slider.sliderMoved.connect(self._player.setPosition)
+        self._aur_blink = QTimer(self); self._aur_blink.timeout.connect(self._blink_play)
+        self._aur_blink_on = False
+
+    def _toggle_auralize_panel(self):
+        vis = not self._aur_panel.isVisible()
+        self._aur_panel.setVisible(vis)
+        self._aur_btn.setText("🎧\uFE0E  Auralize ▾" if vis else "🎧\uFE0E  Auralize ▴")
+
+    def _pick_sofa(self):
+        start = os.path.dirname(self._aur_sofa.text()) or os.path.expanduser("~")
+        f, _ = QFileDialog.getOpenFileName(self, "Pick HRTF SOFA", start, "SOFA (*.sofa)")
+        if f:
+            self._aur_sofa.setText(f); QSettings("phases", "gui").setValue("last_sofa", f)
+
+    def _pick_dry(self):
+        start = os.path.dirname(self._aur_dry.text()) or os.path.expanduser("~")
+        f, _ = QFileDialog.getOpenFileName(self, "Pick anechoic audio", start,
+                                           "Audio (*.wav *.flac *.aiff *.aif *.ogg)")
+        if f:
+            self._aur_dry.setText(f); QSettings("phases", "gui").setValue("last_dry", f)
+
+    def _run_convolve(self):
+        """Render the selected receiver to a binaural wav via binauralize.py (in output/)."""
+        if not self._proj_root:
+            self._sb.showMessage("Open a project first."); return
+        rec = self._current_receiver_row()
+        if rec < 0:
+            self._sb.showMessage("Select a receiver row first."); return
+        sofa, dry = self._aur_sofa.text().strip(), self._aur_dry.text().strip()
+        if not (sofa and os.path.isfile(sofa)):
+            self._sb.showMessage("Pick a valid .sofa file."); return
+        if not (dry and os.path.isfile(dry)):
+            self._sb.showMessage("Pick an anechoic audio file."); return
+        script = self._find_common_script("binauralize.py")
+        if script is None:
+            self._sb.showMessage("binauralize.py not found next to gui.py."); return
+        t = getattr(self, "_aur_thread", None)
+        if t is not None and t.isRunning():
+            return
+        out = os.path.join(self._proj_root, "output")
+        self._aur_wav = os.path.join(out, f"binaural_rec{rec}.wav")
+        pose = [str(self._aur_dials[k].value()) for k in ("az", "el", "roll")]
+        cmd = [sys.executable, script, sofa, "--rec", str(rec),
+               "--dry", dry, "--out", self._aur_wav, "--pose", *pose]
+        if self._player is not None:
+            self._player.setSource(QUrl())                       # release the file before overwrite
+        self._aur_conv.setEnabled(False); self._aur_play.setEnabled(False)
+        self._aur_slider.setEnabled(False)
+        self._aur_thread = SolverThread(cmd, out)
+        self._aur_thread.output.connect(self._log.append)
+        self._aur_thread.done.connect(self._on_convolve_done)
+        self._aur_thread.start()
+        self._sb.showMessage(f"Convolving receiver {rec}… (pose {'/'.join(pose)})")
+
+    def _on_convolve_done(self, rc):
+        self._aur_conv.setEnabled(True)
+        if rc != 0 or not os.path.isfile(getattr(self, "_aur_wav", "")):
+            self._sb.showMessage(f"Auralization failed (rc={rc}) — see log."); return
+        if self._player is None:
+            self._sb.showMessage(f"Wrote {os.path.basename(self._aur_wav)} "
+                                 "(QtMultimedia missing — open it externally)."); return
+        self._player.setSource(QUrl.fromLocalFile(self._aur_wav))
+        self._aur_play.setEnabled(True); self._aur_slider.setEnabled(True)
+        self._aur_blink.start(500)                                # blink until the user hits play
+        self._sb.showMessage("Binaural ready — press play.")
+
+    def _toggle_play(self):
+        if self._player is None:
+            return
+        from PySide6.QtMultimedia import QMediaPlayer
+        self._aur_blink.stop(); self._aur_play.setStyleSheet("")
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+        else:
+            self._player.play()
+
+    def _blink_play(self):
+        self._aur_blink_on = not self._aur_blink_on
+        self._aur_play.setStyleSheet(
+            f"background:{PAL['accent']};color:{PAL['bg']};" if self._aur_blink_on else "")
+
+    def _on_media_pos(self, p):
+        if not self._aur_slider.isSliderDown():
+            self._aur_slider.setValue(p)
+        self._aur_time.setText(f"{p // 60000}:{(p // 1000) % 60:02d}")
+
+    def _on_media_state(self, st):
+        from PySide6.QtMultimedia import QMediaPlayer
+        playing = st == QMediaPlayer.PlaybackState.PlayingState
+        self._aur_play.setText("⏸" if playing else "▶")
 
     # ── Run tab ──────────────────────────────────────────────
     def _build_run_tab(self):
