@@ -196,6 +196,7 @@ struct ISMPath {
     float amp    = 1.f;
     bool  curved = false;
     bool  approx = false;
+    std::array<float,3> doa {{0.f,0.f,0.f}};  // unit dir receiver->image-source (arrival DOA); empty for direct
     std::vector<ISMReflection> reflections;   // source->receiver; empty for direct
 };
 
@@ -590,6 +591,7 @@ inline static void ism_paths_for_pairs(
                 if(ism_validate_path(Sc,planes,tri2plane,nodes,leaf,source,receiver,cfg,hit_tris,cchain,len,amp,approx)){
                     seen_images.insert(img_key(nodes[(size_t)leaf].image));
                     ISMPath path; path.length=len; path.order=(int)hit_tris.size(); path.amp=amp; path.approx=approx;
+                    { const vec3 dd=ism_normalize(sub3(nodes[(size_t)leaf].image,receiver)); path.doa={{dd.x,dd.y,dd.z}}; }
                     path.reflections.reserve(hit_tris.size());
                     for(size_t k=0;k<hit_tris.size();++k){
                         const int gid=Sc.tris[(size_t)hit_tris[k]].group_id;
@@ -612,6 +614,7 @@ inline static void ism_paths_for_pairs(
 // lists have the same length = reflection order, in source->receiver order.
 struct ISMImagePath {
     float distance = 0.f;                                  // image-source -> receiver (total unfolded), 2a
+    std::array<float,3> doa {{0.f,0.f,0.f}};               // unit dir receiver->image-source (arrival DOA), world
     std::vector<float> cos_inc;                            // incidence cosine per crossed surface, 2b
     std::vector<float> angle_rad;                          // same angle in radians, 2b
     std::vector<std::array<float, ISM_NBANDS>> Z_re;       // impedance (real) per surface, per band, 2c
@@ -675,6 +678,7 @@ inline static ISMResult ism_solve(
                 }
                 ISMImagePath ip;
                 ip.distance = p.length;
+                ip.doa      = p.doa;
                 ip.amp      = p.amp;
                 ip.cos_inc.reserve(p.reflections.size());
                 ip.angle_rad.reserve(p.reflections.size());
