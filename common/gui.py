@@ -4384,6 +4384,7 @@ class MainWindow(QMainWindow):
         self._cfg['h'].valueChanged.connect(self._gl.set_grid_h)
         self._gl.set_grid_h(self._cfg['h'].value())
         self._restyle_scene_theme()        # initial hint styling
+        self._dirty = False; self._wire_dirty()   # track unsaved edits for the close prompt
 
         # ── auto-hide sliding tab panel (translate the fixed-width overlay) ──
         self._panel_open = True
@@ -4853,7 +4854,9 @@ class MainWindow(QMainWindow):
         pb = QHBoxLayout()
         for lbl, fn in [("\U0001F5C0\uFE0E  New",  self._new_project),
                         ("\U0001F5C1\uFE0E  Open", self._open_project),
+                        ("\U0001F5AB\uFE0E  Save as...", self._save_project_as),
                         ("\U0001F5AB\uFE0E  Save", self._save_project)]:
+                        
             b = QPushButton(lbl); b.clicked.connect(fn); pb.addWidget(b)
         pv.addLayout(pb)
         lay.addWidget(grp_proj)
@@ -5340,6 +5343,7 @@ class MainWindow(QMainWindow):
             self._groups   = []
             self._write_manifest()
             self._sb.showMessage(f"Created project: {root}  —  load an OBJ to add geometry.")
+        self._dirty = False        # fresh project is already written to disk
 
     def _open_project(self):
         """Open a project directory and restore its full state. Reads the
@@ -5397,7 +5401,25 @@ class MainWindow(QMainWindow):
         # Persist the manifest now so opening a project always records current
         # state (scene path included) even if no .mat/config was touched.
         self._write_manifest()
+        self._dirty = False        # freshly loaded == saved (loading fired valueChanged signals)
         self._sb.showMessage(f"Opened project: {d}")
+
+    def _mark_dirty(self, *a):
+        self._dirty = True
+
+    def _wire_dirty(self):
+        """Connect the edit sources to _mark_dirty so the close prompt only shows on unsaved work."""
+        md = self._mark_dirty
+        for sp in self._cfg.values():
+            sp.valueChanged.connect(md)
+        for w in (self._fps, self._pmin, self._pmax, *self._slice_sb.values()):
+            w.valueChanged.connect(md)
+        for c in self._pml.values():
+            c.toggled.connect(md)
+        self._bbox_chk.toggled.connect(md)
+        self._src_tbl.changed.connect(md)
+        self._rec_tbl.changed.connect(md)
+        self._mat_panel._tbl.cellChanged.connect(md)
 
     def _save_project(self):
         """Explicit, atomic save of the whole project: config, materials,
@@ -5410,12 +5432,41 @@ class MainWindow(QMainWindow):
         self._rec_tbl.save_file(os.path.join(self._proj_root, "input", "rec", "rec.txt"))
         self._mat_panel.save_all()
         self._write_manifest()
+        self._dirty = False
         self._sb.showMessage(f"Saved project → {self._proj_root}")
 
+    def _save_project_as(self):
+        """Save the current state to a NEW project folder (a new version) and switch to it."""
+        if not self._proj_root:
+            QMessageBox.warning(self, "No project", "Create or open a project first."); return
+        parent = QFileDialog.getExistingDirectory(self, "Save project as — choose location")
+        if not parent:
+            return
+        base = os.path.basename(os.path.normpath(self._proj_root))
+        name, ok = QInputDialog.getText(self, "Save project as", "New project name:", text=base + "_v2")
+        if not ok or not name.strip():
+            return
+        root = os.path.join(parent, name.strip())
+        if os.path.isdir(root) and os.listdir(root):
+            if QMessageBox.question(self, "Folder not empty",
+                    f"{root}\nalready exists and is not empty.\nSave into it anyway?"
+                ) != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            for sub in PROJECT_SUBDIRS:
+                os.makedirs(os.path.join(root, sub), exist_ok=True)
+        except OSError as ex:
+            QMessageBox.critical(self, "Create failed", str(ex)); return
+        self._proj_root = root
+        self._proj_label.setText(root)
+        self._results.set_project(root)
+        self._mat_panel.set_project(root)   # redirect .mat writes to the new project (keeps the table)
+        self._save_project()                # config, src, rec, mat, manifest -> new root (clears dirty)
+
     def closeEvent(self, e):
-        # Offer to save before quitting. Always ask when a project is open — a dirty
-        # flag that misses a change would lose work silently; one dialog never does.
-        if self._proj_root:
+        # Offer to save before quitting only if there are unsaved edits (_dirty). A save clears it,
+        # so clicking Save then closing won't nag.
+        if self._proj_root and getattr(self, "_dirty", False):
             B = QMessageBox.StandardButton
             ans = QMessageBox.question(self, "Save project?",
                     "Save the project before closing?", B.Save | B.Discard | B.Cancel, B.Save)
@@ -5595,6 +5646,8 @@ class MainWindow(QMainWindow):
             f.write(ln(f"{float(s[1]):.6g}", "slice y0 [m] (animation)"))
             f.write(ln(f"{float(s[2]):.6g}", "slice z0 [m] (animation)"))
             f.write(ln(self._fps.value(), "animation fps (frames capped to RAM in main3D)"))
+            f.write(ln(f"{self._pmin.value():.6g}", "animation pressure min [Pa] (GUI only)"))
+            f.write(ln(f"{self._pmax.value():.6g}", "animation pressure max [Pa] (GUI only)"))
 
     def _load_config(self):
         start = os.path.join(self._proj_root,"config") if self._proj_root else ""
@@ -5633,6 +5686,9 @@ class MainWindow(QMainWindow):
             self._sync_slice_fields(vals[18], vals[19], vals[20])
         if len(vals) > 21:
             self._fps.setValue(int(vals[21]))  # animation fps
+        if len(vals) > 23:
+            self._pmin.setValue(float(vals[22]))   # animation pressure range
+            self._pmax.setValue(float(vals[23]))
 
     def _save_src(self):
         if not self._proj_root: return
