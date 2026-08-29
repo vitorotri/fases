@@ -79,9 +79,18 @@ PAL = {
     "btn_hover": "#434e60", "layer_sel":"#251a55",
 }
 
-# Line colours for the Results overlay plots, in order (add more as needed):
-# blue-purple (accent), cyan-green (layers), pink-red, ...
-PLOT_COLORS = ["#7c5cfc", "#0ff091", "#ff5c7a"]
+# Line colours for the Results overlay/param plots, in order:
+# blue-purple (accent), cyan-green (layers), pink-red, fiery orange-red.
+PLOT_COLORS = ["#7c5cfc", "#0ff091", "#ff5c7a", "#ff5a1f"]
+
+
+def _plot_color(i):
+    """Colour for the i-th receiver: the hand-picked palette first, then distinct colours beyond it
+    by hopping hue with the golden ratio (well-spread for any count)."""
+    if i < len(PLOT_COLORS):
+        return PLOT_COLORS[i]
+    import matplotlib.pyplot as plt
+    return plt.get_cmap('hsv')(((i - len(PLOT_COLORS)) * 0.61803) % 1.0)
 
 LAYER_COLORS = [
 	(15/255,  240/255, 145/255)] #, aqua-cyan
@@ -4001,26 +4010,115 @@ class ResultsView(QWidget):
     """Floating plot window: a metric selector on top (IR+Spectrum, or an ISO-3382 param per band)
     and the rendered PNG below. Image-based on purpose: setPixmap always repaints."""
     metricChanged = Signal()
+    addSimRequested = Signal(str)      # path to another project's params.json (Summary compare)
+    clearSimRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._proj_root = None
         self._pix = None
+        self._export = None                        # tabular data of the current param view, or None
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)   # click -> keyboard focus for Ctrl+C
         lay = QVBoxLayout(self); lay.setContentsMargins(6, 6, 6, 6)
-        from PySide6.QtWidgets import QComboBox, QSizePolicy
+        from PySide6.QtWidgets import QComboBox, QSizePolicy, QPushButton, QHBoxLayout
+        top = QHBoxLayout()
         self._metric = QComboBox()
-        self._metric.addItems(["IR + Spectrum", "T20", "T30", "EDT", "C50", "C80", "D50"])
-        self._metric.currentIndexChanged.connect(lambda _: self.metricChanged.emit())
-        lay.addWidget(self._metric)
+        self._metric.addItems(["IR + Spectrum", "T20", "T30", "EDT", "C50", "C80", "D50", "Summary (avg)"])
+        self._metric.currentIndexChanged.connect(self._on_metric_changed)
+        top.addWidget(self._metric, 1)
+        self._add_sim_btn = QPushButton("➕ Add simulation…"); self._add_sim_btn.clicked.connect(self._add_sim)
+        self._clear_sim_btn = QPushButton("Clear compared"); self._clear_sim_btn.clicked.connect(self.clearSimRequested.emit)
+        self._add_sim_btn.hide(); self._clear_sim_btn.hide()     # only shown in Summary view
+        top.addWidget(self._add_sim_btn); top.addWidget(self._clear_sim_btn)
+        lay.addLayout(top)
         self._label = QLabel("Select receiver(s) in the Receivers tab or the scene.")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setStyleSheet(f"color:{PAL['text']};background:{PAL['bg']};")
         self._label.setMinimumSize(1, 1)           # don't let the pixmap's sizeHint trap the
         self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)  # window min after maximize
+        self._label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         lay.addWidget(self._label, 1)
+        from PySide6.QtGui import QShortcut, QKeySequence   # Ctrl+C works even when the combo has focus
+        QShortcut(QKeySequence.StandardKey.Copy, self, activated=self._copy_csv)
 
-    def metric(self):
+    def current_metric(self):
         return self._metric.currentText()
+
+    def set_export(self, data):
+        """Tabular data behind the current param plot (or None for IR/Spectrum -> export disabled)."""
+        self._export = data
+
+    def _csv_text(self, sep=","):
+        """Generic table export: {rowheader, columns:[...], rows:[(label,[vals]), ...]}."""
+        d = self._export
+        if not d:
+            return ""
+        def fmt(v):
+            return "" if v is None else f"{v:.5g}"
+        lines = [[d["rowheader"]] + list(d["columns"])]
+        for label, vals in d["rows"]:
+            lines.append([str(label)] + [fmt(v) for v in vals])
+        return "\n".join(sep.join(c) for c in lines)
+
+    def _copy_csv(self):
+        from PySide6.QtWidgets import QApplication
+        if self._export:                               # TAB-separated: spreadsheets split paste on tabs
+            QApplication.clipboard().setText(self._csv_text(sep="\t"))
+
+    def contextMenuEvent(self, e):
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        if self.current_metric() == "Summary (avg)":      # cross-simulation compare actions
+            m.addAction("Add simulation to compare…", self._add_sim)
+            m.addAction("Clear compared", self.clearSimRequested.emit)
+            m.addSeparator()
+        if self._export:
+            m.addAction("Copy as CSV", self._copy_csv)     # slots connected directly
+            m.addAction("Export CSV…", self._export_csv_file)
+            m.addAction("Export JSON…", self._export_json_file)
+        elif self.current_metric() != "Summary (avg)":
+            a = m.addAction("Export: switch to a parameter view (T20/T30/…)")
+            a.setEnabled(False)
+        m.exec(e.globalPos())
+        e.accept()
+
+    def _on_metric_changed(self, *_):
+        summary = self.current_metric() == "Summary (avg)"
+        self._add_sim_btn.setVisible(summary); self._clear_sim_btn.setVisible(summary)
+        self.metricChanged.emit()
+
+    def _add_sim(self):
+        """Pick a PROJECT FOLDER; resolve its params.json from the standard template path."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        d = QFileDialog.getExistingDirectory(self, "Add simulation — pick the project folder")
+        if not d:
+            return
+        for cand in (os.path.join(d, "output", "params.json"), os.path.join(d, "params.json")):
+            if os.path.isfile(cand):
+                self.addSimRequested.emit(cand); return
+        QMessageBox.warning(self, "No parameters",
+                            f"No output/params.json under:\n{d}\nOpen that project's Results first.")
+
+    def _export_csv_file(self):
+        from PySide6.QtWidgets import QFileDialog
+        if not self._export:
+            return
+        title = self._export.get("title", "results")
+        p, _ = QFileDialog.getSaveFileName(self, "Export CSV", f"{title}.csv", "CSV (*.csv)")
+        if p:
+            with open(p, "w") as f:
+                f.write(self._csv_text())
+
+    def _export_json_file(self):
+        from PySide6.QtWidgets import QFileDialog
+        import json
+        if not self._export:
+            return
+        title = self._export.get("title", "results")
+        p, _ = QFileDialog.getSaveFileName(self, "Export JSON", f"{title}.json", "JSON (*.json)")
+        if p:
+            with open(p, "w") as f:
+                json.dump(self._export, f, indent=1)
 
     def set_project(self, root):
         self._proj_root = root
@@ -4289,11 +4387,14 @@ class MainWindow(QMainWindow):
         # Results plots are an OVERLAY on top of the scene (QOpenGLWidget crashes if stacked),
         # shown/hidden by the mode bar and positioned clear of the left panel in _layout_panel.
         self._results = ResultsView(self)          # top-level floating window (native resize/maximize)
-        self._results.setWindowFlags(Qt.Window)
+        self._results.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)   # stays visible while
         self._results.setWindowTitle("Results")
         self._results.resize(720, 560)
         self._results.hide()
         self._results.metricChanged.connect(lambda: self._apply_results_selection(mirror_table=False))
+        self._results.addSimRequested.connect(self._add_compare_sim)
+        self._results.clearSimRequested.connect(self._clear_compare_sims)
+        self._compare = []                         # [(label, params_dict)] extra sims in the Summary view
         self._view_mode = "sim"
         self._panel_locked = False
 
@@ -4583,7 +4684,7 @@ class MainWindow(QMainWindow):
     def _on_acouparams_done(self, rc):
         if rc != 0:
             self._sb.showMessage(f"acouparams.py failed (rc={rc}) — parameters unavailable."); return
-        if getattr(self, "_view_mode", None) == "results" and self._results.metric() != "IR + Spectrum":
+        if getattr(self, "_view_mode", None) == "results" and self._results.current_metric() != "IR + Spectrum":
             self._apply_results_selection(mirror_table=False)   # re-render now params.json is fresh
 
     def _toggle_scene_theme(self):
@@ -4741,10 +4842,13 @@ class MainWindow(QMainWindow):
                                          tbl.model().index(r, tbl.columnCount() - 1)),
                           QItemSelectionModel.SelectionFlag.Select)
             self._sel_sync = False
+        metric = self._results.current_metric()
+        if metric == "Summary (avg)":                  # room-average, all receivers, cross-sim compare
+            self._render_summary(); return
         if not recs:
             self._results.show_png(None); return
-        metric = self._results.metric()
         if metric == "IR + Spectrum":
+            self._results.set_export(None)             # no tabular export for IR/Spectrum
             self._render_overlay(recs) if len(recs) > 1 else self._results.show_receiver(recs[0])
         else:
             self._render_params(recs, metric)
@@ -4768,7 +4872,7 @@ class MainWindow(QMainWindow):
             n = max(a.size for a in arrs); ir = np.zeros(n)
             for a in arrs:
                 ir[:a.size] += a                       # total response at the receiver (all sources)
-            col = PLOT_COLORS[i % len(PLOT_COLORS)]
+            col = _plot_color(i)
             name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
             ax_t.plot(np.arange(n) / fs, ir, lw=0.7, color=col, label=name)
             H = np.abs(np.fft.rfft(ir)); fr = np.fft.rfftfreq(n, 1 / fs)
@@ -4798,10 +4902,10 @@ class MainWindow(QMainWindow):
     def _render_params(self, recs, param):
         """Plot one ISO-3382 parameter vs octave band, one line per receiver, from params.json
         (acouparams.py). Nulls (undefined bands) are dropped. GUI-themed."""
+        self._results.set_export(None)                 # cleared until a table is successfully built
         import json
         import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from matplotlib.ticker import ScalarFormatter
         from PySide6.QtGui import QPixmap
         out = os.path.join(self._proj_root, "output")
         pj = os.path.join(out, "params.json")
@@ -4814,26 +4918,42 @@ class MainWindow(QMainWindow):
         names = self._rec_tbl.get_names()
         FG, BG = PAL['text'], PAL['bg']
         units = {"T20": "s", "T30": "s", "EDT": "s", "C50": "dB", "C80": "dB", "D50": ""}
-        fig, ax = plt.subplots(figsize=(8, 5)); drew = False; ref_bands = None
-        for i, rec in enumerate(recs):
-            d = data.get(str(rec))
-            if not d or param not in d:
-                continue
-            ref_bands = d["bands"]
-            xy = [(b, v) for b, v in zip(d["bands"], d[param]) if v is not None]
-            if not xy:
-                continue
-            xs, ys = zip(*xy)
-            col = PLOT_COLORS[i % len(PLOT_COLORS)]
-            name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
-            ax.semilogx(xs, ys, "o-", color=col, lw=1.3, label=name)
-            drew = True
-        if not drew:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        # grouped BARS (not lines): the values are octave-band only, no 1/3-octave points between,
+        # so a connecting line would imply values we don't have.
+        drawn = [(rec, data.get(str(rec))) for rec in recs
+                 if data.get(str(rec)) and param in data.get(str(rec))]
+        if not drawn:
             plt.close(fig)
             self._results._label.setPixmap(QPixmap())
-            self._results._label.setText(f"No {param} values for the selected receiver(s).")
-            return
-        ax.set_xticks(ref_bands); ax.get_xaxis().set_major_formatter(ScalarFormatter())
+            self._results._label.setText(f"No {param} values for the selected receiver(s)."); return
+        ref_bands = drawn[0][1]["bands"]
+        x = np.arange(len(ref_bands))
+        ng = len(drawn) + 1                             # receiver bars + one average bar
+        w = 0.8 / ng
+        mat = np.array([[v if v is not None else np.nan for v in d[param]] for _, d in drawn])
+        for i, (rec, d) in enumerate(drawn):
+            col = _plot_color(recs.index(rec))
+            name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
+            ax.bar(x + (i - (ng - 1) / 2) * w, mat[i], w, color=col, label=name)
+        # spatial average of the SELECTED receivers: ISO energy-mean for the dB params (C50/C80),
+        # plain arithmetic mean for times (T20/T30/EDT) and the D50 ratio. NaN bands are ignored.
+        with np.errstate(invalid='ignore', divide='ignore'):
+            if param in ("C50", "C80"):
+                avg = 10 * np.log10(np.nanmean(10 ** (mat / 10.0), axis=0))
+            else:
+                avg = np.nanmean(mat, axis=0)
+        ax.bar(x + (len(drawn) - (ng - 1) / 2) * w, avg, w, color="#d7dde3",
+               edgecolor=BG, label="avg (selected)")
+        # stash the table behind the plot for Ctrl+C / RMB export (rows = bands, cols = receivers + avg)
+        def _cell(v): return None if v is None or not np.isfinite(v) else float(v)
+        rec_names = [names[r] if r < len(names) and names[r] else f"receiver {r}" for r, _ in drawn]
+        self._results.set_export({
+            "title": param, "rowheader": "band [Hz]",
+            "columns": rec_names + ["avg (selected)"],
+            "rows": [(str(b), [_cell(d[param][j]) for _, d in drawn] + [_cell(avg[j])])
+                     for j, b in enumerate(ref_bands)]})
+        ax.set_xticks(x); ax.set_xticklabels([str(b) for b in ref_bands])
         ax.set_xlabel("Octave band [Hz]")
         ax.set_ylabel(f"{param} [{units[param]}]" if units[param] else param)
         ax.set_title(f"Receiver comparison — {param} per octave band")
@@ -4841,7 +4961,7 @@ class MainWindow(QMainWindow):
         for sp in ax.spines.values(): sp.set_color(FG)
         ax.tick_params(colors=FG, which='both')
         ax.xaxis.label.set_color(FG); ax.yaxis.label.set_color(FG); ax.title.set_color(FG)
-        ax.grid(True, which='both', color=PAL['border'], alpha=0.6)
+        ax.grid(False)                                  # no grid behind the bars
         leg = ax.legend(fontsize=8)
         leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
         for t in leg.get_texts(): t.set_color(FG)
@@ -4849,6 +4969,98 @@ class MainWindow(QMainWindow):
         p = os.path.join(out, "IR_params.png")
         fig.savefig(p, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
         self._results.show_png(p)
+
+    # ── Summary: single-number ratings, room-average, cross-simulation compare ──
+    _SUMMARY = {"T20": ([500, 1000], "T20 mid", "s"), "T30": ([500, 1000], "T30 mid", "s"),
+                "EDT": ([500, 1000], "EDT mid", "s"), "C50": ([500, 1000, 2000], "C50", "dB"),
+                "C80": ([500, 1000, 2000], "C80(3)", "dB"), "D50": ([500, 1000, 2000], "D50", "")}
+
+    def _room_avg(self, data, param):
+        """(bands, per-band room average over all receivers). Energy-mean for dB params."""
+        rows = [[v if v is not None else np.nan for v in d[param]]
+                for d in data.values() if isinstance(d, dict) and param in d]
+        if not rows:
+            return None, None
+        bands = next(d["bands"] for d in data.values() if isinstance(d, dict) and "bands" in d)
+        mat = np.array(rows)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            avg = (10 * np.log10(np.nanmean(10 ** (mat / 10.0), axis=0)) if param in ("C50", "C80")
+                   else np.nanmean(mat, axis=0))
+        return bands, avg
+
+    def _single_number(self, param, bands, band_avg):
+        """ISO single-number rating: mid (500-1k) for T/EDT, 500-2k for C/D; energy-mean for dB."""
+        idx = [bands.index(b) for b in self._SUMMARY[param][0] if b in bands]
+        vals = np.array([band_avg[i] for i in idx], float)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return None
+        return float(10 * np.log10(np.mean(10 ** (vals / 10.0)))) if param in ("C50", "C80") else float(vals.mean())
+
+    def _add_compare_sim(self, path):
+        import json
+        try:
+            data = json.load(open(path))
+        except Exception as ex:
+            self._sb.showMessage(f"Could not load {path}: {ex}"); return
+        label = os.path.basename(os.path.dirname(os.path.dirname(path)))   # .../PROJECT/output/params.json
+        self._compare.append((label or os.path.basename(path), data))
+        self._render_summary()
+
+    def _clear_compare_sims(self):
+        self._compare = []
+        self._render_summary()
+
+    def _render_summary(self):
+        """2x3 grid of single-number ratings, one bar per simulation (current + compared), by folder."""
+        import json
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Patch
+        from PySide6.QtGui import QPixmap
+        out = os.path.join(self._proj_root, "output")
+        pj = os.path.join(out, "params.json")
+        if not os.path.isfile(pj):
+            self._results._label.setPixmap(QPixmap())
+            self._results._label.setText("Computing parameters… (acouparams.py)")
+            self._run_acouparams(); return
+        series = [(os.path.basename(os.path.normpath(self._proj_root)), json.load(open(pj)))] + self._compare
+        params = list(self._SUMMARY)
+        FG, BG = PAL['text'], PAL['bg']
+        table = {}                                     # param -> [value per series]
+        for p in params:
+            vals = []
+            for _, data in series:
+                b, a = self._room_avg(data, p)
+                vals.append(self._single_number(p, b, a) if b is not None else None)
+            table[p] = vals
+        fig, axes = plt.subplots(2, 3, figsize=(10, 6))
+        for ax, p in zip(axes.ravel(), params):
+            ys = [v if v is not None else np.nan for v in table[p]]
+            ax.bar(range(len(series)), ys, color=[_plot_color(i) for i in range(len(series))])
+            lbl, unit = self._SUMMARY[p][1], self._SUMMARY[p][2]
+            ax.set_title(lbl, fontsize=10, color=FG)
+            ax.set_ylabel(unit, color=FG)
+            ax.set_xticks([]); ax.set_facecolor(BG); ax.grid(False)
+            for sp in ax.spines.values(): sp.set_color(FG)
+            ax.tick_params(colors=FG)
+        fig.patch.set_facecolor(BG)
+        handles = [Patch(color=_plot_color(i), label=lbl) for i, (lbl, _) in enumerate(series)]
+        leg = fig.legend(handles=handles, loc='lower center', ncol=min(4, len(series)), fontsize=8)
+        leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
+        for t in leg.get_texts(): t.set_color(FG)
+        fig.suptitle("Single-number ratings — simulation comparison", color=FG)
+        fig.tight_layout(rect=[0, 0.06, 1, 0.96])
+        p = os.path.join(out, "IR_summary.png")
+        fig.savefig(p, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
+        self._results.show_png(p)
+        # export: rows = parameters, columns = simulations
+        def _c(v): return None if v is None or not np.isfinite(v) else float(v)
+        self._results.set_export({
+            "title": "summary", "rowheader": "parameter",
+            "columns": [lbl for lbl, _ in series],
+            "rows": [(f"{self._SUMMARY[p][1]} [{self._SUMMARY[p][2]}]".strip(" []"),
+                      [_c(v) for v in table[p]]) for p in params]})
 
     def _on_point_hovered(self, kind, idx):
         """G-mode hover over a point -> select its row in the matching table
