@@ -3510,6 +3510,28 @@ class MaterialPanel(QWidget):
         self._write_all_soft()      # one central hard/soft registry
         self.status.emit(f"Saved {n} material file(s) → {self._mat_dir}")
 
+    def prune_orphans(self):
+        """Delete input/mat|fit|sctr files whose material name is no longer in the table, so renamed or
+        removed OBJ groups don't leave files forever. Keeps ALL.mat and any BoundingBox.*. NO-OP on an
+        empty table (means the OBJ isn't loaded yet — don't wipe everything)."""
+        if not self._mat_dir or self._tbl.rowCount() == 0:
+            return
+        keep = {self._tbl.item(r, 0).text() for r in range(self._tbl.rowCount()) if self._tbl.item(r, 0)}
+        removed = 0
+        for d, ext in ((self._mat_dir, ".mat"), (self._fit_dir, ".fit"), (self._sctr_dir, ".sctr")):
+            if not d:
+                continue
+            for f in glob.glob(os.path.join(d, "*" + ext)):
+                base = os.path.basename(f); stem = base[:-len(ext)]
+                if base == "ALL.mat" or _is_bbox(stem) or stem in keep:
+                    continue
+                try:
+                    os.remove(f); removed += 1
+                except OSError:
+                    pass
+        if removed:
+            self.status.emit(f"Pruned {removed} orphaned material file(s).")
+
     def stale_fits(self, config_path):
         """Material names whose current values no longer match their .fit — recomputes
         the same signature fminconFIT stamps as '# sig <hex>' (alphas + soft + the config
@@ -6078,6 +6100,7 @@ class MainWindow(QMainWindow):
         self._src_tbl.save_file(os.path.join(self._proj_root, "input", "src", "src.txt"))
         self._rec_tbl.save_file(os.path.join(self._proj_root, "input", "rec", "rec.txt"))
         self._mat_panel.save_all()
+        self._mat_panel.prune_orphans()      # drop .mat/.fit/.sctr for materials no longer in the OBJ
         self._write_manifest()
         self._dirty = False
         self._sb.showMessage(f"Saved project → {self._proj_root}")
