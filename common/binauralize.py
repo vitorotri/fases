@@ -64,8 +64,14 @@ def doa_to_azel(basis, d_world):
 
 # ---------------------------------------------------------------- HRTF set ---------------------------
 def load_hrtf(sofa_path):
-    """Read a SOFA HRIR set with pyfar -> {'az','el' (rad, N), 'hrir' (N,2,taps), 'fs'}. Resampled to
-    FS if needed. az/el derived from the source cartesian coords (version-proof)."""
+    """Read a SOFA HRIR set -> {'az','el' (rad, N), 'hrir' (N,2,taps) f32, 'unit' (N,3) f32, 'fs'}.
+    Resampled to FS if needed. CACHED: the parsed+resampled set is saved next to the .sofa as
+    <sofa>.<FS>.hrtfcache.npz and reused until the .sofa changes — the pyfar read + resample of a dense
+    grid (e.g. 64800 dirs) is the slow part (~seconds); the cache load is near-instant."""
+    cache = f"{sofa_path}.{FS}.hrtfcache.npz"
+    if os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(sofa_path):
+        d = np.load(cache)
+        return {"az": d["az"], "el": d["el"], "hrir": d["hrir"], "unit": d["unit"], "fs": FS}
     import pyfar as pf
     try:
         audio, src, _ = pf.io.read_sofa(sofa_path)
@@ -83,8 +89,14 @@ def load_hrtf(sofa_path):
         from fractions import Fraction
         r = Fraction(int(FS), int(round(fs))).limit_denominator(1000)
         hrir = resample_poly(hrir, r.numerator, r.denominator, axis=-1)
-    return {"az": az, "el": el, "hrir": hrir, "fs": FS,
-            "unit": np.stack([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)], 1)}
+    hrir = hrir.astype(np.float32)
+    unit = np.stack([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)], 1).astype(np.float32)
+    out = {"az": az.astype(np.float32), "el": el.astype(np.float32), "hrir": hrir, "unit": unit, "fs": FS}
+    try:
+        np.savez(cache, az=out["az"], el=out["el"], hrir=hrir, unit=unit)
+    except OSError:
+        pass                                                      # read-only dir: just skip the cache
+    return out
 
 
 def lookup_hrir(hrtf, az, el):
@@ -264,7 +276,12 @@ def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav):
             continue
         _, LIRp, HIRp = res
         arr = read_arrivals(f"ARR{rec}_{src}.bin")
-        print(f"[binauralize]  src{src}: {arr[0].size} arrivals, building BRIR…", flush=True)
+        if arr[0].size == 0:
+            print(f"[binauralize]  !! src{src}: 0 ISM arrivals — no direct/early reflections; the direct "
+                  "sound falls back to straight-ahead. Check the sim's '[ISM] src rec: N paths' line "
+                  "(occlusion / t_cross / coords).", flush=True)
+        else:
+            print(f"[binauralize]  src{src}: {arr[0].size} arrivals, building BRIR…", flush=True)
         b = brir(LIRp, HIRp, arr, hrtf, pose)
         if B is None:
             B = b
