@@ -240,31 +240,46 @@ def _sources_for(rec):
 
 
 def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav):
-    """Full binaural render for ONE receiver: sum all its sources' BRIRs, convolve the dry anechoic
-    mono file, write a peak-normalized stereo wav. Run from the project's output/ dir. Returns out_wav."""
+    """Full binaural render for ONE receiver: SUM all its sources' BRIRs (convolution is linear, so one
+    render on the summed BRIR == summing per-source renders, but far cheaper), convolve the dry anechoic
+    mono file once, write a peak-normalized stereo wav. Run from the project's output/ dir."""
+    import time
     import soundfile as sf
-    import allIRs
+    try:
+        import allIRs
+        allIRs._init()                                         # reads config/header/pulse (cwd=output/)
+    except FileNotFoundError as ex:
+        raise SystemExit(f"[binauralize] missing solver output ({ex}). Re-run the sim to completion — "
+                         "header.txt is deleted at startup and only rewritten at the END of a full run.")
+    t0 = time.time()
     hrtf = load_hrtf(sofa)
+    print(f"[binauralize] HRTF {hrtf['hrir'].shape} loaded ({time.time()-t0:.1f}s)", flush=True)
     pose = tuple(np.radians(pose_deg))
     dry = _read_audio(dry_path)
-    acc = None
+    print(f"[binauralize] dry {dry.size} samples ({dry.size/FS:.1f}s)", flush=True)
+    B = None
     for src in _sources_for(rec):
         res = allIRs.broadband_ir(rec, src)
         if res is None:
             continue
         _, LIRp, HIRp = res
-        y = render(dry, brir(LIRp, HIRp, read_arrivals(f"ARR{rec}_{src}.bin"), hrtf, pose))
-        if acc is None:
-            acc = y
-        else:                                                    # sum sources, zero-pad to the longer
-            n = max(acc.shape[1], y.shape[1])
-            acc = np.pad(acc, ((0, 0), (0, n - acc.shape[1]))) + np.pad(y, ((0, 0), (0, n - y.shape[1])))
-    if acc is None:
+        arr = read_arrivals(f"ARR{rec}_{src}.bin")
+        print(f"[binauralize]  src{src}: {arr[0].size} arrivals, building BRIR…", flush=True)
+        b = brir(LIRp, HIRp, arr, hrtf, pose)
+        if B is None:
+            B = b
+        else:                                                    # sum sources (zero-pad to the longer)
+            n = max(B.shape[1], b.shape[1])
+            B = np.pad(B, ((0, 0), (0, n - B.shape[1]))) + np.pad(b, ((0, 0), (0, n - b.shape[1])))
+    if B is None:
         raise FileNotFoundError(f"no ARR/broadband data for receiver {rec} in {os.getcwd()}")
+    print(f"[binauralize] BRIR {B.shape}, convolving dry signal…", flush=True)
+    acc = render(dry, B)
     pk = np.abs(acc).max()
     if pk > 0:
         acc = 0.98 * acc / pk
     sf.write(out_wav, acc.T.astype(np.float32), FS)
+    print(f"[binauralize] wrote {out_wav} ({time.time()-t0:.1f}s total)", flush=True)
     return out_wav
 
 
@@ -364,6 +379,13 @@ if __name__ == "__main__":
     a = ap.parse_args()
     pose = a.pose if a.pose is not None else (a.pose_pos + [0, 0, 0])[:3]
     if a.rec is not None:
+        if not (a.dry and a.out):
+            ap.error("--rec needs --dry AND --out (the --out path must live inside the project's output/)")
+        # allIRs.py reads ../config and ../output RELATIVE to cwd, so run in the project's output/
+        # (derived from --out). Lets manual runs work from anywhere; matches the GUI's cwd=output.
+        a.sofa, a.dry, a.out = (os.path.abspath(a.sofa), os.path.abspath(a.dry), os.path.abspath(a.out))
+        os.chdir(os.path.dirname(a.out))
+        print(f"[binauralize] cwd -> {os.getcwd()}", flush=True)
         p = auralize_receiver(a.rec, a.sofa, pose, a.dry, a.out)
         print(f"[binauralize] receiver {a.rec} pose {pose} -> {p}")
     else:

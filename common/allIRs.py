@@ -25,30 +25,16 @@ from scipy.signal import resample_poly
 
 octave_bands = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 
-# speed of sound + cutoff from config; dt from the solver's output/header.txt
-cfg = np.loadtxt("../config/config.txt")
-f_cutoff_sim = cfg[2]
-src_opt = int(cfg[15]) if len(cfg) > 15 else 0   # config line 16: 0=PCS, 1=Ricker, 2=Sinusoid
-
-hp = open("../output/header.txt").read().split()   # Nx Ny Nz Nt Lx Ly Lz pbin anim dt scene h tol/h
-dt = float(hp[9])
-
-dt_half = 0.5 * dt
-fs_fv   = 1 / dt
-fs      = 44100                              # Hz — output sample rate
-# FVM<->GA crossover f_x. Fallback = 0.5*f_cutoff (PCS Gaussian roll-off); overridden below from the
-# actual source-pulse spectrum so it's also right for Ricker (bandpass) and any custom glob_f.
-XOVER_DROP_DB = 6.0                           # ponytail: crossover = pulse's upper -6 dB edge; tune
-f_cutoff = 0.5 * f_cutoff_sim                 # Hz (grid ceiling is f_cutoff_sim)
-
-# --- source deconvolution ---------------------------------------------------------------------
-# The FVM IR is h_room CONVOLVED with the radiated source pulse (band-limited, ~30 dB down at
-# f_cutoff), while GA is a BARE impulse response. That mismatch (a spectral slope + a hole at the
-# crossover), not a scalar, is why the bands never met. main3D writes the actual pulse to
-# ../config/p_ref.bin; deconvolving it recovers the bare room IR so both bands share the same
-# density and meet at f_cutoff. p_ref is float64 at dt/2 spacing (2*fs_fv) -> resample to fs.
+fs = 44100                                    # Hz — output sample rate
+XOVER_DROP_DB = 6.0                            # ponytail: crossover = pulse's upper -6 dB edge; tune
 deconv_reg = 1e-2   # ponytail: Tikhonov floor. Raise if low band gets noisy near f_cutoff (pulse
                     # weak there), lower for a flatter recovery. Tune to the FVM noise floor.
+
+# Everything below is read from disk (config.txt, header.txt, p_ref.bin) and depends on cwd=output/.
+# It is loaded LAZILY on the first broadband_ir()/main() call, NOT at import — so `import allIRs` has
+# NO side effects and can't crash merely because a run was interrupted (e.g. header.txt missing).
+_ready = False
+cfg = f_cutoff_sim = src_opt = dt = dt_half = fs_fv = f_cutoff = pulse_fs = sigma_s = lag = None
 
 def _load_pulse():
     if not os.path.exists("../config/p_ref.bin"):
@@ -57,34 +43,51 @@ def _load_pulse():
     rr = Fraction(fs * dt / 2).limit_denominator(2000)     # 2*fs_fv -> fs
     return resample_poly(q, rr.numerator, rr.denominator)
 
-pulse_fs = _load_pulse()
-if pulse_fs is None:
-    print("[allIRs] !! ../config/p_ref.bin NOT FOUND -> source NOT deconvolved (fallback path). "
-          "The FVM band still carries the source pulse; bands will NOT match. Re-run the FVM "
-          "simulation with the current main3D to generate p_ref.bin.")
-else:
-    print(f"[allIRs] p_ref.bin loaded ({pulse_fs.size} samples at fs) -> deconvolving source pulse.")
-    # crossover = the source pulse's upper -XOVER_DROP_DB edge (where the FVM stops being excited).
-    # Correct for PCS (~0.5*f_cutoff) AND Ricker (its own roll-off), no per-source-type constant.
-    _P = np.abs(np.fft.rfft(pulse_fs)); _f = np.fft.rfftfreq(pulse_fs.size, 1 / fs)
-    _pk = int(_P.argmax()); _thr = _P[_pk] * 10 ** (-XOVER_DROP_DB / 20)
-    _above = np.where((_f > _f[_pk]) & (_P >= _thr))[0]
-    _fx = float(_f[_above[-1]]) if _above.size else float(_f[_pk])
-    if 0 < _fx <= f_cutoff_sim:
-        f_cutoff = _fx
-    print(f"[allIRs] crossover f_x = {f_cutoff:.1f} Hz  (pulse peak {_f[_pk]:.1f} Hz)")
-
-# Fallback only (no p_ref.bin from an older run): source-pulse lag + energy scale instead of deconv.
-if src_opt == 1:                                  # Ricker wavelet
-    sigma_s = 1.0 / (np.sqrt(2) * np.pi * 0.3 * f_cutoff_sim)
-else:                                             # PCS (0) — Sinusoid (2) has no pulse lag
-    sigma_s = 0.425 / f_cutoff_sim
-ts_ = np.ceil(8.5 * sigma_s / dt_half)
-lag = int(round(ts_ * dt_half * fs))
+def _init():
+    """Read config/header/pulse once (cwd must be the project's output/). Populates module globals.
+    Called at the top of broadband_ir()/main() so importing the module touches no files."""
+    global _ready, cfg, f_cutoff_sim, src_opt, dt, dt_half, fs_fv, f_cutoff, pulse_fs, sigma_s, lag
+    if _ready:
+        return
+    # speed of sound + cutoff from config; dt from the solver's output/header.txt
+    cfg = np.loadtxt("../config/config.txt")
+    f_cutoff_sim = cfg[2]
+    src_opt = int(cfg[15]) if len(cfg) > 15 else 0   # config line 16: 0=PCS, 1=Ricker, 2=Sinusoid
+    hp = open("../output/header.txt").read().split()   # Nx Ny Nz Nt Lx Ly Lz pbin anim dt scene h tol/h
+    dt = float(hp[9])
+    dt_half = 0.5 * dt
+    fs_fv = 1 / dt
+    # FVM<->GA crossover f_x. Fallback = 0.5*f_cutoff (PCS Gaussian roll-off); overridden below from the
+    # actual source-pulse spectrum so it's also right for Ricker (bandpass) and any custom glob_f.
+    f_cutoff = 0.5 * f_cutoff_sim                 # Hz (grid ceiling is f_cutoff_sim)
+    # main3D writes the radiated pulse to ../config/p_ref.bin; deconvolving it recovers the bare room
+    # IR so the FVM and GA bands share density and meet at f_cutoff. float64 at dt/2 -> resample to fs.
+    pulse_fs = _load_pulse()
+    if pulse_fs is None:
+        print("[allIRs] !! ../config/p_ref.bin NOT FOUND -> source NOT deconvolved (fallback path). "
+              "The FVM band still carries the source pulse; bands will NOT match. Re-run the FVM "
+              "simulation with the current main3D to generate p_ref.bin.")
+    else:
+        print(f"[allIRs] p_ref.bin loaded ({pulse_fs.size} samples at fs) -> deconvolving source pulse.")
+        _P = np.abs(np.fft.rfft(pulse_fs)); _f = np.fft.rfftfreq(pulse_fs.size, 1 / fs)
+        _pk = int(_P.argmax()); _thr = _P[_pk] * 10 ** (-XOVER_DROP_DB / 20)
+        _above = np.where((_f > _f[_pk]) & (_P >= _thr))[0]
+        _fx = float(_f[_above[-1]]) if _above.size else float(_f[_pk])
+        if 0 < _fx <= f_cutoff_sim:
+            f_cutoff = _fx
+        print(f"[allIRs] crossover f_x = {f_cutoff:.1f} Hz  (pulse peak {_f[_pk]:.1f} Hz)")
+    # Fallback only (no p_ref.bin from an older run): source-pulse lag instead of deconv.
+    if src_opt == 1:                                  # Ricker wavelet
+        sigma_s = 1.0 / (np.sqrt(2) * np.pi * 0.3 * f_cutoff_sim)
+    else:                                             # PCS (0) — Sinusoid (2) has no pulse lag
+        sigma_s = 0.425 / f_cutoff_sim
+    lag = int(round(np.ceil(8.5 * sigma_s / dt_half) * dt_half * fs))
+    _ready = True
 
 def broadband_ir(rec, src):
     """Broadband IR for one (rec, src) pair from the IR/HIR bins in cwd. Returns array at fs,
     or None if the low-freq IR for the pair is missing. Solver names them IR<rec>_<src>.bin."""
+    _init()
     low_files = sorted(f for f in glob.glob("IR*.bin")     # IR<rec>_<src>.bin
                        if f[2:].split(".")[0].split("_")[:2] == [str(rec), str(src)])
     high_files = sorted(f for f in glob.glob("HIR*.bin")   # HIR<rec>_<src>_<band>.bin
@@ -163,6 +166,7 @@ def discover_pairs():
 def main():
     import traceback
     print("[allIRs] cwd:", os.getcwd())
+    _init()
     pairs = discover_pairs()
     if not pairs:
         # nothing to do -> DON'T touch existing PNGs (deleting them here was wiping good output)

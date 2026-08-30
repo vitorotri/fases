@@ -484,6 +484,8 @@ class GLViewer(QOpenGLWidget):
     themeToggle   = Signal()                            # RMB "Dark/Light scene" chosen
     sliceChanged  = Signal(float, float, float)         # x0,y0,z0 world slice positions
     frameChanged  = Signal(int)                         # current anim frame -> drives the scrubber
+    fpvRequested     = Signal()                          # RMB "Enter receiver view" (first-person)
+    fpvExitRequested = Signal()                          # RMB "Go back" from receiver view
 
     # placement modes
     MODE_NONE  = 0
@@ -504,6 +506,7 @@ class GLViewer(QOpenGLWidget):
         self._free_y = 0.0        # Alt+LMB free tumble around screen Y
         self._roll  =  0.0        # Ctrl+LMB roll around view axis
         self._dist  =   6.0
+        self._fpv   = None          # first-person "inside a receiver" view: {eye,fwd,up} or None
         self._axes_visible = True   # grey infinite axes + origin 'o' (RMB menu toggles)
         self._pan   = np.zeros(3, np.float32)
         self._last_pos  = None
@@ -1073,19 +1076,41 @@ class GLViewer(QOpenGLWidget):
     def resizeGL(self, w, h):
         glViewport(0, 0, w, h)
 
+    def enter_fpv(self, eye, fwd, up):
+        """Teleport the camera INTO a receiver: eye at its position, looking along fwd (head forward),
+        up = head up. Navigation is frozen while active (see the mouse/wheel guards)."""
+        self._fpv = {"eye": np.asarray(eye, np.float32),
+                     "fwd": np.asarray(fwd, np.float32),
+                     "up":  np.asarray(up,  np.float32)}
+        self.update()
+
+    def exit_fpv(self):
+        self._fpv = None
+        self.update()
+
     def _setup_camera(self):
+        fpv = self._fpv
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         asp = self.width() / max(self.height(), 1)
-        near = max(self._dist * 0.001, 0.01)
-        far  = self._dist * 500.0
-        gluPerspective(45.0, asp, near, far)
+        near = 0.02 if fpv else max(self._dist * 0.001, 0.01)
+        far  = 2000.0 if fpv else self._dist * 500.0
+        gluPerspective(70.0 if fpv else 45.0, asp, near, far)   # wider FOV inside a head
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         # Headlight: with the modelview at identity (eye space), position the
         # light just behind the eye looking down -Z. It stays glued to the
         # camera regardless of how the scene is rotated below.
         glLightfv(GL_LIGHT0, GL_POSITION, [0.0, 0.0, 1.0, 0.0])
+        if fpv:                                                 # first-person: look from the receiver
+            e, f, u = fpv["eye"], fpv["fwd"], fpv["up"]; c = e + f
+            gluLookAt(float(e[0]), float(e[1]), float(e[2]),
+                      float(c[0]), float(c[1]), float(c[2]),
+                      float(u[0]), float(u[1]), float(u[2]))
+            self._mv   = glGetDoublev(GL_MODELVIEW_MATRIX)
+            self._proj = glGetDoublev(GL_PROJECTION_MATRIX)
+            self._view_dir = np.asarray(f, float) / (np.linalg.norm(f) or 1.0)
+            return
         # Standard arcball:
         #   1. pull camera back along Z
         #   2. apply view-space pan  (pan moves the scene left/right/up in screen space)
@@ -1860,11 +1885,13 @@ class GLViewer(QOpenGLWidget):
         self._drag_moved = False
         # If edit mode (E) is armed and LMB is pressed, grab the nearest
         # placed source/receiver instead of rotating the camera.
-        if (self._grab_held and e.button() == Qt.MouseButton.LeftButton
+        if (self._fpv is None and self._grab_held and e.button() == Qt.MouseButton.LeftButton
                 and self._mode == self.MODE_NONE):
             self._begin_point_drag(e.position())
 
     def mouseMoveEvent(self, e):
+        if self._fpv is not None:      # receiver view: no orbit / pan / placement
+            return
         # ── placement mode: mouse moves the cursor with NO button needed ──
         if self._mode != self.MODE_NONE:
             if self._axis_lock:
@@ -1982,10 +2009,12 @@ class GLViewer(QOpenGLWidget):
                 return
             self._do_ray_pick(e.position())
         if not moved and e.button() == Qt.MouseButton.RightButton:
-            if not self._do_point_remove(e.position()):   # empty space -> scene menu
+            if self._fpv is not None or not self._do_point_remove(e.position()):  # empty -> scene menu
                 self._scene_menu(e.position())
 
     def wheelEvent(self, e):
+        if self._fpv is not None:      # receiver view: zoom disabled
+            return
         steps = e.angleDelta().y() / 120.0   # 1 notch = 120 units
         f = 0.85 ** steps                     # 15% per notch
 
@@ -2149,13 +2178,21 @@ class GLViewer(QOpenGLWidget):
         return f"i={int(round(p[0]/h))}  j={int(round(p[1]/h))}  k={int(round(p[2]/h))}"
 
     def _scene_menu(self, qpos):
-        """RMB on empty space -> scene options (stacked)."""
+        """RMB on empty space -> scene options (stacked). Inside a receiver view, ONLY 'Go back'."""
         m = QMenu(self)
+        gpos = self.mapToGlobal(QPoint(int(qpos.x()), int(qpos.y())))
+        if self._fpv is not None:
+            gb = m.addAction("↩  Go back")
+            if m.exec(gpos) is gb:
+                self.fpvExitRequested.emit()
+            return
         ax = m.addAction("Hide axes" if self._axes_visible else "Show axes")
         th = m.addAction("Light scene" if not SCENE_LIGHT_MODE else "Dark scene")
         dh = m.addAction("Exit dollhouse view" if getattr(self, "_dollhouse", False)
                          else "Dollhouse view")
-        chosen = m.exec(self.mapToGlobal(QPoint(int(qpos.x()), int(qpos.y()))))
+        m.addSeparator()
+        ev = m.addAction("🎧︎  Enter receiver view")
+        chosen = m.exec(gpos)
         if chosen is ax:
             self._axes_visible = not self._axes_visible
             self.update()
@@ -2164,6 +2201,8 @@ class GLViewer(QOpenGLWidget):
         elif chosen is dh:
             self._dollhouse = not getattr(self, "_dollhouse", False)
             self.update()
+        elif chosen is ev:
+            self.fpvRequested.emit()
 
     def _find_nearest_point(self, qpos, radius=30.0):
         """Return (kind, idx) of the nearest source/receiver within `radius`
@@ -4381,6 +4420,8 @@ class MainWindow(QMainWindow):
         self._gl.pointDragStarted.connect(self._remember_points_for_undo)
         self._gl.pointHovered.connect(self._on_point_hovered)
         self._gl.receiverPicked.connect(self._on_scene_receiver_pick)
+        self._gl.fpvRequested.connect(self._enter_receiver_view)
+        self._gl.fpvExitRequested.connect(self._gl.exit_fpv)
         self._results_sel = set(); self._sel_sync = False   # shared Results receiver selection
         self._gl.pointRemoved.connect(self._on_point_removed)
         gl_vlay.addWidget(self._gl, stretch=1)      # GL stays in the layout (never re-parented)
@@ -5448,6 +5489,25 @@ class MainWindow(QMainWindow):
         self._aur_blink = QTimer(self); self._aur_blink.timeout.connect(self._blink_play)
         self._aur_blink_on = False
 
+    def _enter_receiver_view(self):
+        """Teleport the scene camera into the selected receiver, facing the az/el/roll dials — the SAME
+        world head frame the auralization uses, so what you see matches what you hear."""
+        rec = self._current_receiver_row()
+        if rec < 0 or rec >= len(self._gl._receivers):
+            self._sb.showMessage("Select a receiver row first."); return
+        p = self._gl._receivers[rec]
+        eye = np.array([float(p[0]), float(p[1]), float(p[2])])
+        az, el, roll = (math.radians(self._aur_dials[k].value()) for k in ("az", "el", "roll"))
+        ca, sa, ce, se = math.cos(az), math.sin(az), math.cos(el), math.sin(el)
+        fwd = np.array([ce * ca, ce * sa, se])                 # head forward (matches head_basis)
+        left = np.cross([0, 0, 1.0], fwd); n = np.linalg.norm(left)
+        left = left / n if n > 1e-6 else np.array([0, 1.0, 0])
+        u0 = np.cross(fwd, left)
+        cr, sr = math.cos(roll), math.sin(roll)
+        up = sr * left + cr * u0                               # roll about the forward axis
+        self._gl.enter_fpv(eye, fwd, up)
+        self._sb.showMessage(f"Inside receiver {rec} — RMB → Go back to exit.")
+
     def _toggle_auralize_panel(self):
         vis = not self._aur_panel.isVisible()
         self._aur_panel.setVisible(vis)
@@ -5931,7 +5991,8 @@ class MainWindow(QMainWindow):
                 e.ignore(); return
             if ans == B.Save:
                 self._save_project()
-        for tn in ("_solver_thread", "_estimate_thread", "_rays_thread", "_allirs_thread", "_acou_thread"):
+        for tn in ("_solver_thread", "_estimate_thread", "_rays_thread", "_allirs_thread",
+                   "_acou_thread", "_aur_thread"):
             th = getattr(self, tn, None)               # stop background QThreads so Qt doesn't
             if th is not None and th.isRunning():      # abort with "Destroyed while running"
                 th.stop() if hasattr(th, "stop") else None
