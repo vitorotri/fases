@@ -486,6 +486,7 @@ class GLViewer(QOpenGLWidget):
     frameChanged  = Signal(int)                         # current anim frame -> drives the scrubber
     fpvRequested     = Signal()                          # RMB "Enter receiver view" (first-person)
     fpvExitRequested = Signal()                          # RMB "Go back" from receiver view
+    fpvPoseChanged   = Signal(float, float, float)       # FPV mouselook -> az,el,roll (deg) to the dials
 
     # placement modes
     MODE_NONE  = 0
@@ -1076,17 +1077,36 @@ class GLViewer(QOpenGLWidget):
     def resizeGL(self, w, h):
         glViewport(0, 0, w, h)
 
-    def enter_fpv(self, eye, fwd, up):
-        """Teleport the camera INTO a receiver: eye at its position, looking along fwd (head forward),
-        up = head up. Navigation is frozen while active (see the mouse/wheel guards)."""
+    def enter_fpv(self, eye, az, el, roll):
+        """Teleport the camera INTO a receiver: eye at its position, aimed by the head pose (az/el/roll
+        deg, same world head frame the auralization uses). Position/zoom frozen; LMB looks, Ctrl+LMB
+        rolls (see mouseMoveEvent), feeding the angles back to the dials."""
         self._fpv = {"eye": np.asarray(eye, np.float32),
-                     "fwd": np.asarray(fwd, np.float32),
-                     "up":  np.asarray(up,  np.float32)}
+                     "az": float(az), "el": float(el), "roll": float(roll)}
+        self.update()
+
+    def set_fpv_pose(self, az, el, roll):
+        """Re-aim the frozen camera from outside (dials / Restore), without re-emitting fpvPoseChanged."""
+        if self._fpv is None:
+            return
+        self._fpv["az"], self._fpv["el"], self._fpv["roll"] = float(az), float(el), float(roll)
         self.update()
 
     def exit_fpv(self):
         self._fpv = None
         self.update()
+
+    def _fpv_basis(self):
+        """(eye, fwd, up) world vectors from the stored az/el/roll — matches head_basis in binauralize."""
+        f = self._fpv
+        az, el, roll = math.radians(f["az"]), math.radians(f["el"]), math.radians(f["roll"])
+        ca, sa, ce, se = math.cos(az), math.sin(az), math.cos(el), math.sin(el)
+        fwd = np.array([ce * ca, ce * sa, se])
+        left = np.cross([0, 0, 1.0], fwd); n = np.linalg.norm(left)
+        left = left / n if n > 1e-6 else np.array([0, 1.0, 0])
+        u0 = np.cross(fwd, left)
+        cr, sr = math.cos(roll), math.sin(roll)
+        return f["eye"], fwd, sr * left + cr * u0
 
     def _setup_camera(self):
         fpv = self._fpv
@@ -1103,7 +1123,7 @@ class GLViewer(QOpenGLWidget):
         # camera regardless of how the scene is rotated below.
         glLightfv(GL_LIGHT0, GL_POSITION, [0.0, 0.0, 1.0, 0.0])
         if fpv:                                                 # first-person: look from the receiver
-            e, f, u = fpv["eye"], fpv["fwd"], fpv["up"]; c = e + f
+            e, f, u = self._fpv_basis(); c = e + f
             gluLookAt(float(e[0]), float(e[1]), float(e[2]),
                       float(c[0]), float(c[1]), float(c[2]),
                       float(u[0]), float(u[1]), float(u[2]))
@@ -1890,7 +1910,18 @@ class GLViewer(QOpenGLWidget):
             self._begin_point_drag(e.position())
 
     def mouseMoveEvent(self, e):
-        if self._fpv is not None:      # receiver view: no orbit / pan / placement
+        if self._fpv is not None:      # receiver view: LMB looks, Ctrl+LMB rolls, position frozen
+            if self._mouse_btn == Qt.MouseButton.LeftButton and self._last_pos is not None:
+                dx = e.position().x() - self._last_pos.x()
+                dy = e.position().y() - self._last_pos.y()
+                if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    self._fpv["roll"] = max(-180.0, min(180.0, self._fpv["roll"] + dx * 0.3))
+                else:
+                    self._fpv["az"] = (self._fpv["az"] - dx * 0.3) % 360.0      # drag right -> look right
+                    self._fpv["el"] = max(-89.0, min(89.0, self._fpv["el"] - dy * 0.3))
+                self.fpvPoseChanged.emit(self._fpv["az"], self._fpv["el"], self._fpv["roll"])
+                self._last_pos = e.position()
+                self.update()
             return
         # ── placement mode: mouse moves the cursor with NO button needed ──
         if self._mode != self.MODE_NONE:
@@ -1970,6 +2001,11 @@ class GLViewer(QOpenGLWidget):
         moved = getattr(self, '_drag_moved', False)
         self._mouse_btn = None
         self._last_pos  = None
+
+        if self._fpv is not None:      # receiver view: no layer pick / point pick / placement — only
+            if not moved and e.button() == Qt.MouseButton.RightButton:  # the RMB Go-back menu
+                self._scene_menu(e.position())
+            return
 
         # Finish a point drag: emit the final position so the table updates,
         # then auto-disarm "edit positions" mode (one move per E activation).
@@ -3717,13 +3753,25 @@ def _tsv_copy_selection(tbl):
     QApplication.clipboard().setText("\n".join(rows))
 
 
+class _PointTableWidget(QTableWidget):
+    """Name column (0) opens its editor ONLY on a double-click; the numeric columns keep single-click
+    editing. Selection/highlight is untouched (that's independent of editing in Qt)."""
+    def edit(self, index, trigger, event):
+        if (index.isValid() and index.column() == 0
+                and trigger != QAbstractItemView.EditTrigger.DoubleClicked):
+            return False        # Name cell: block single-click/selected-click edits, allow selection
+        return super().edit(index, trigger, event)
+
+
 class PointTable(QWidget):
     changed = Signal()
 
-    def __init__(self, has_amplitude=False, has_freq=False, parent=None):
+    def __init__(self, has_amplitude=False, has_freq=False, has_pose=False, parent=None):
         super().__init__(parent)
         self._has_amp = has_amplitude
         self._has_freq = has_freq         # per-source characteristic frequency f0 (sources only)
+        self._has_pose = has_pose         # per-receiver head pose [az,el,roll] deg (receivers only)
+        self.poses = []                   # row-matched [az,el,roll]; saved to a .poses sidecar
         self._freq_max = None             # optional clamp on the f0 column (set to f_cutoff)
         # Column 0 is an editable Name (defaults to the row number). The numeric
         # columns follow; get_points()/save_file deliberately skip the name so
@@ -3735,7 +3783,7 @@ class PointTable(QWidget):
         self._freq_col = (len(cols) - 1) if has_freq else None   # last column when present
         self._coff = 1            # numeric coordinates start at this column
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
-        self._tbl = QTableWidget(0, len(cols))
+        self._tbl = _PointTableWidget(0, len(cols))
         self._tbl.setHorizontalHeaderLabels(cols)
         hh = self._tbl.horizontalHeader()
         # Name column a bit wider (interactive), coordinate columns share the rest.
@@ -3791,6 +3839,8 @@ class PointTable(QWidget):
         for c, v in enumerate(vals):
             self._tbl.setItem(r, self._coff + c, QTableWidgetItem(f"{v:.4g}"))
         self._tbl.blockSignals(False)
+        if self._has_pose:
+            self.poses.insert(r, [0, 0, 0])     # new row -> default head pose
         self.changed.emit()
 
     def add_point(self, x, y, z, amp=1.0):
@@ -3850,7 +3900,10 @@ class PointTable(QWidget):
 
     def _remove(self):
         rows = sorted({i.row() for i in self._tbl.selectedItems()}, reverse=True)
-        for r in rows: self._tbl.removeRow(r)
+        for r in rows:
+            self._tbl.removeRow(r)
+            if self._has_pose and r < len(self.poses):    # keep poses row-matched
+                del self.poses[r]
         self.changed.emit()
 
     # ── copy / paste (spreadsheet + whitespace txt, both ways) ──
@@ -3950,6 +4003,15 @@ class PointTable(QWidget):
         return [(self._tbl.item(r, 0).text() if self._tbl.item(r, 0) else str(r + 1))
                 for r in range(self._tbl.rowCount())]
 
+    def get_pose(self, row):
+        """[az,el,roll] deg for a row (default [0,0,0] if unset). Padded to rowCount on access."""
+        return list(self.poses[row]) if 0 <= row < len(self.poses) else [0, 0, 0]
+
+    def set_pose(self, row, triplet):
+        while len(self.poses) <= row:          # grow to reach `row`
+            self.poses.append([0, 0, 0])
+        self.poses[row] = [float(triplet[0]), float(triplet[1]), float(triplet[2])]
+
     def set_points(self, pts, emit_changed=True):
         """Replace all rows from numeric tuples (x, y, z[, p0]). Names reset to
         the row number. Used by Ctrl+Z point undo."""
@@ -3990,6 +4052,15 @@ class PointTable(QWidget):
                     nm = nm.rstrip("\n")
                     if r < self._tbl.rowCount() and nm:
                         self._tbl.setItem(r, 0, QTableWidgetItem(nm))
+        if self._has_pose:                              # head poses from the .poses sidecar
+            self.poses = [[0, 0, 0] for _ in range(self._tbl.rowCount())]
+            ppath = path + ".poses"
+            if os.path.isfile(ppath):
+                with open(ppath) as fp:
+                    for r, ln in enumerate(fp):
+                        v = ln.split()
+                        if r < len(self.poses) and len(v) >= 3:
+                            self.poses[r] = [float(v[0]), float(v[1]), float(v[2])]
 
     def save_file(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -4002,6 +4073,10 @@ class PointTable(QWidget):
         # stays untouched. spaces in names are fine — one name per line.
         with open(path + ".names", "w") as fn:
             fn.write("".join(nm + "\n" for nm in self.get_names()))
+        if self._has_pose:                              # head poses, row-matched (az el roll deg)
+            with open(path + ".poses", "w") as fp:
+                fp.write("".join(f"{a:g} {e:g} {r:g}\n"
+                                 for a, e, r in (self.get_pose(i) for i in range(self._tbl.rowCount()))))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -4422,6 +4497,7 @@ class MainWindow(QMainWindow):
         self._gl.receiverPicked.connect(self._on_scene_receiver_pick)
         self._gl.fpvRequested.connect(self._enter_receiver_view)
         self._gl.fpvExitRequested.connect(self._gl.exit_fpv)
+        self._gl.fpvPoseChanged.connect(self._on_fpv_pose)
         self._results_sel = set(); self._sel_sync = False   # shared Results receiver selection
         self._gl.pointRemoved.connect(self._on_point_removed)
         gl_vlay.addWidget(self._gl, stretch=1)      # GL stays in the layout (never re-parented)
@@ -5405,10 +5481,11 @@ class MainWindow(QMainWindow):
                       "Or add rows manually below.")
         info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         info.setWordWrap(True); lay.addWidget(info)
-        self._rec_tbl = PointTable(has_amplitude=False)
+        self._rec_tbl = PointTable(has_amplitude=False, has_pose=True)
         self._rec_tbl.changed.connect(self._refresh_gl_points)
         self._rec_tbl._tbl.itemSelectionChanged.connect(
             lambda: self._on_table_row_selected("receiver"))
+        self._rec_tbl._tbl.itemSelectionChanged.connect(self._load_selected_rec_pose)
         # re-clicking the already-selected row emits no selectionChanged; use clicked so you can
         # always jump the Results plot back to a receiver you viewed before.
         self._rec_tbl._tbl.clicked.connect(
@@ -5446,9 +5523,12 @@ class MainWindow(QMainWindow):
             d.setWrapping(key == "az"); d.setFixedSize(88, 88)
             val = QLabel("0°"); val.setAlignment(Qt.AlignmentFlag.AlignCenter)
             d.valueChanged.connect(lambda x, wv=val: wv.setText(f"{x}°"))
+            d.valueChanged.connect(self._on_pose_dial_changed)
             col.addWidget(c); col.addWidget(d, 0, Qt.AlignmentFlag.AlignCenter); col.addWidget(val)
             dr.addLayout(col); self._aur_dials[key] = d
         v.addLayout(dr)
+        self._pose_loading = False        # guard: suppress store while loading dials programmatically
+        self._rendered_pose = {}          # {rec_row: [az,el,roll]} the last Convolve used, for Restore
 
         sr = QHBoxLayout(); sr.addWidget(QLabel("HRTF"))
         self._aur_sofa = QLineEdit(QSettings("phases", "gui").value("last_sofa", "") or "")
@@ -5464,11 +5544,15 @@ class MainWindow(QMainWindow):
         self._aur_conv.clicked.connect(self._run_convolve); v.addWidget(self._aur_conv)
 
         tr = QHBoxLayout()
-        self._aur_play = QPushButton("▶"); self._aur_play.setFixedWidth(38)
+        self._aur_play = QPushButton("▶︎"); self._aur_play.setFixedSize(44, 26)
         self._aur_play.setEnabled(False); self._aur_play.clicked.connect(self._toggle_play)
+        self._aur_restore = QPushButton("↺"); self._aur_restore.setFixedSize(30, 26)
+        self._aur_restore.setToolTip("Restore the head pose the current wav was rendered with")
+        self._aur_restore.setEnabled(False); self._aur_restore.clicked.connect(self._restore_rendered_pose)
         self._aur_slider = QSlider(Qt.Horizontal); self._aur_slider.setEnabled(False)
         self._aur_time = QLabel("0:00"); self._aur_time.setStyleSheet(f"color:{PAL['subtext']};")
-        tr.addWidget(self._aur_play); tr.addWidget(self._aur_slider, 1); tr.addWidget(self._aur_time)
+        tr.addWidget(self._aur_play); tr.addWidget(self._aur_restore)
+        tr.addWidget(self._aur_slider, 1); tr.addWidget(self._aur_time)
         v.addLayout(tr)
         self._aur_setup_player()
         return box
@@ -5497,16 +5581,59 @@ class MainWindow(QMainWindow):
             self._sb.showMessage("Select a receiver row first."); return
         p = self._gl._receivers[rec]
         eye = np.array([float(p[0]), float(p[1]), float(p[2])])
-        az, el, roll = (math.radians(self._aur_dials[k].value()) for k in ("az", "el", "roll"))
-        ca, sa, ce, se = math.cos(az), math.sin(az), math.cos(el), math.sin(el)
-        fwd = np.array([ce * ca, ce * sa, se])                 # head forward (matches head_basis)
-        left = np.cross([0, 0, 1.0], fwd); n = np.linalg.norm(left)
-        left = left / n if n > 1e-6 else np.array([0, 1.0, 0])
-        u0 = np.cross(fwd, left)
-        cr, sr = math.cos(roll), math.sin(roll)
-        up = sr * left + cr * u0                               # roll about the forward axis
-        self._gl.enter_fpv(eye, fwd, up)
-        self._sb.showMessage(f"Inside receiver {rec} — RMB → Go back to exit.")
+        az, el, roll = (self._aur_dials[k].value() for k in ("az", "el", "roll"))
+        self._gl.enter_fpv(eye, az, el, roll)                  # GL builds the head frame from the angles
+        self._sb.showMessage(f"Inside receiver {rec} — LMB look · Ctrl+LMB roll · RMB → Go back.")
+
+    # ── per-receiver head pose (dials <-> receiver <-> FPV mouselook) ──
+    def _set_dials(self, az, el, roll):
+        """Set the three dials without triggering the store handler (used when loading a pose)."""
+        self._pose_loading = True
+        self._aur_dials["az"].setValue(int(round(az)) % 360)
+        self._aur_dials["el"].setValue(int(round(el)))
+        self._aur_dials["roll"].setValue(int(round(roll)))
+        self._pose_loading = False
+
+    def _load_selected_rec_pose(self):
+        """Selecting a receiver shows ITS stored pose in the dials; enable Restore if it has a wav pose."""
+        if not hasattr(self, "_aur_dials"):        # selection can fire during project load pre-panel
+            return
+        row = self._current_receiver_row()
+        if row < 0:
+            return
+        self._set_dials(*self._rec_tbl.get_pose(row))
+        if hasattr(self, "_aur_restore"):
+            self._aur_restore.setEnabled(row in getattr(self, "_rendered_pose", {}))
+
+    def _on_pose_dial_changed(self, *_):
+        """A dial moved: store it on the selected receiver and, if we're inside that receiver, steer
+        the frozen camera to match."""
+        if getattr(self, "_pose_loading", False):
+            return
+        pose = [self._aur_dials[k].value() for k in ("az", "el", "roll")]
+        row = self._current_receiver_row()
+        if row >= 0:
+            self._rec_tbl.set_pose(row, pose); self._mark_dirty()
+        if self._gl._fpv is not None:
+            self._gl.set_fpv_pose(*pose)
+
+    def _on_fpv_pose(self, az, el, roll):
+        """FPV mouselook changed the head aim -> reflect it in the dials + store on the receiver."""
+        self._set_dials(az, el, roll)
+        row = self._current_receiver_row()
+        if row >= 0:
+            self._rec_tbl.set_pose(row, [self._aur_dials[k].value() for k in ("az", "el", "roll")])
+            self._mark_dirty()
+
+    def _restore_rendered_pose(self):
+        """Snap dials (and the FPV camera) back to the pose the current wav was rendered with."""
+        row = self._current_receiver_row()
+        p = getattr(self, "_rendered_pose", {}).get(row)
+        if p is None:
+            self._sb.showMessage("No rendered pose for this receiver yet — Convolve first."); return
+        self._set_dials(*p)
+        self._on_pose_dial_changed()          # store + steer the camera if inside
+        self._sb.showMessage(f"Restored the rendered pose (az {p[0]}, el {p[1]}, roll {p[2]}).")
 
     def _toggle_auralize_panel(self):
         vis = not self._aur_panel.isVisible()
@@ -5546,7 +5673,10 @@ class MainWindow(QMainWindow):
             return
         out = os.path.join(self._proj_root, "output")
         self._aur_wav = os.path.join(out, f"binaural_rec{rec}.wav")
-        pose = [str(self._aur_dials[k].value()) for k in ("az", "el", "roll")]
+        pose_i = [self._aur_dials[k].value() for k in ("az", "el", "roll")]
+        self._rendered_pose[rec] = pose_i                        # stamp: the pose this wav uses (Restore)
+        self._aur_restore.setEnabled(True)
+        pose = [str(x) for x in pose_i]
         cmd = [sys.executable, script, sofa, "--rec", str(rec),
                "--dry", dry, "--out", self._aur_wav, "--pose", *pose]
         if self._player is not None:
@@ -5594,7 +5724,7 @@ class MainWindow(QMainWindow):
     def _on_media_state(self, st):
         from PySide6.QtMultimedia import QMediaPlayer
         playing = st == QMediaPlayer.PlaybackState.PlayingState
-        self._aur_play.setText("⏸" if playing else "▶")
+        self._aur_play.setText("⏸" if playing else "▶︎")
 
     # ── Run tab ──────────────────────────────────────────────
     def _build_run_tab(self):
@@ -5991,6 +6121,15 @@ class MainWindow(QMainWindow):
                 e.ignore(); return
             if ans == B.Save:
                 self._save_project()
+        # Tear the audio player down FIRST: the QtMultimedia/FFmpeg backend stalls for seconds on
+        # destruction if it still holds a decoded source / open audio device. Stop, drop the source,
+        # DETACH the output (forces the device closed), then pump the event loop so the backend
+        # actually releases before Qt destroys the widgets — otherwise close hangs.
+        if getattr(self, "_aur_blink", None) is not None:
+            self._aur_blink.stop()
+        if getattr(self, "_player", None) is not None:
+            self._player.stop(); self._player.setSource(QUrl()); self._player.setAudioOutput(None)
+            QApplication.processEvents()
         for tn in ("_solver_thread", "_estimate_thread", "_rays_thread", "_allirs_thread",
                    "_acou_thread", "_aur_thread"):
             th = getattr(self, tn, None)               # stop background QThreads so Qt doesn't
@@ -5999,6 +6138,10 @@ class MainWindow(QMainWindow):
                 th.wait(2000)
         self._results.close()      # top-level floating window won't close itself with the app
         e.accept()
+        # QtMultimedia's FFmpeg backend spawns threads that keep the PROCESS alive after the window
+        # closes ("won't exit until I kill the terminal"). State is saved and our threads/player are
+        # stopped above, so force the process down rather than hang on that backend's teardown.
+        os._exit(0)
 
     def _load_obj(self):
         # input/scene/ is no longer auto-created (the scene can live anywhere and
