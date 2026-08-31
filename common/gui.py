@@ -422,6 +422,90 @@ def feature_edges(verts, tris, angle_thresh_deg=5.0, weld_tol=1e-5):
     return np.array(out, np.int32) if out else np.zeros((0, 2), np.int32)
 
 
+def merge_coplanar_groups(verts, groups, angle_thresh_deg=5.0, weld_tol=1e-5):
+    """Union non-bbox groups joined by a HIDDEN (non-crease) shared edge -> a surface split across
+    per-triangle groups becomes ONE selectable layer. Uses the SAME angle as the wireframe crease test
+    (feature_edges), so the invariant holds: if the diagonal line is hidden, the layer is merged. Two
+    surfaces meeting at a real crease (> angle) stay separate. Returns a new [{name, tris}] list;
+    bbox groups pass through unchanged."""
+    from collections import defaultdict
+    q = np.round(verts / weld_tol).astype(np.int64)
+    _, inv = np.unique(q, axis=0, return_inverse=True)
+    cos_thr = math.cos(math.radians(angle_thresh_deg))
+    n = len(groups)
+    gi = [i for i, g in enumerate(groups) if not _is_bbox(g["name"]) and len(g["tris"])]
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+
+    if gi:
+        all_tris = np.concatenate([np.asarray(groups[i]["tris"]) for i in gi])
+        tri_grp = np.concatenate([np.full(len(groups[i]["tris"]), i, np.int32) for i in gi])
+        fn = face_normals(verts, all_tris)
+        wt = inv[all_tris]
+        edge_tris = defaultdict(list)
+        for ti, (a, b, c) in enumerate(wt):
+            for e in ((a, b), (b, c), (c, a)):
+                edge_tris[frozenset(e)].append(ti)
+        for tl in edge_tris.values():
+            for k in range(1, len(tl)):                  # any hidden (non-crease) edge fuses the groups
+                t0, t1 = tl[0], tl[k]
+                if tri_grp[t0] != tri_grp[t1] and abs(float(fn[t0] @ fn[t1])) >= cos_thr:
+                    parent[find(int(tri_grp[t0]))] = find(int(tri_grp[t1]))
+    order, merged = [], {}
+    for i, g in enumerate(groups):
+        r = find(i)
+        if r not in merged:
+            merged[r] = {"name": g["name"], "tris": [np.asarray(g["tris"])]}
+            order.append(r)
+        else:
+            merged[r]["tris"].append(np.asarray(g["tris"]))
+    return [{"name": merged[r]["name"],
+             "tris": np.concatenate(merged[r]["tris"]) if merged[r]["tris"] else np.zeros((0, 3), np.int32)}
+            for r in order]
+
+
+def global_feature_edges(verts, groups, angle_thresh_deg=5.0, weld_tol=1e-5):
+    """Per-group feature edges computed with GLOBAL adjacency across every non-bbox group. This hides a
+    coplanar triangulation diagonal even when its two triangles live in DIFFERENT groups (e.g. an OBJ
+    grouped one-triangle-per-group) — per-group feature_edges can't, since each group sees the diagonal
+    as its own boundary. Returns a list parallel to `groups` of (K,2) original vertex-index arrays."""
+    out = [np.zeros((0, 2), np.int32) for _ in groups]
+    gi_list = [i for i, g in enumerate(groups) if not _is_bbox(g["name"]) and len(g["tris"])]
+    if not gi_list:
+        return out
+    all_tris = np.concatenate([groups[i]["tris"] for i in gi_list])
+    tri_grp = np.concatenate([np.full(len(groups[i]["tris"]), i, np.int32) for i in gi_list])
+    q = np.round(verts / weld_tol).astype(np.int64)
+    _, inv = np.unique(q, axis=0, return_inverse=True)
+    wtris = inv[all_tris]
+    fn = face_normals(verts, all_tris)
+    cos_thr = math.cos(math.radians(angle_thresh_deg))
+    edge_tris, rep = {}, {}
+    for ti, (a, b, c) in enumerate(wtris):
+        tri = all_tris[ti]
+        for (oa, ob), (x, y) in zip(((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])),
+                                    ((a, b), (b, c), (c, a))):
+            key = (x, y) if x < y else (y, x)
+            edge_tris.setdefault(key, []).append(ti)
+            rep.setdefault(key, (int(oa), int(ob)))
+    per = {i: [] for i in gi_list}
+    for key, tl in edge_tris.items():
+        feat = len(tl) == 1 or any(abs(float(np.dot(fn[tl[0]], fn[tl[k]]))) < cos_thr
+                                   for k in range(1, len(tl)))
+        if not feat:
+            continue                                     # coplanar interior diagonal -> hide
+        for ti in set(tl):
+            per[int(tri_grp[ti])].append(rep[key])
+    for i, elist in per.items():
+        if elist:
+            out[i] = np.unique(np.array(elist, np.int32), axis=0)
+    return out
+
+
 # ─────────────────────────────────────────────────────────────
 #  Ray / triangle math
 # ─────────────────────────────────────────────────────────────
@@ -595,11 +679,17 @@ class GLViewer(QOpenGLWidget):
                 "name":    g["name"],
                 "tris":    g["tris"],
                 "normals": face_normals(verts, g["tris"]) if len(g["tris"]) else None,
-                "edges":   feature_edges(verts, g["tris"]) if len(g["tris"]) else None,
+                "edges":   None,                         # filled globally below
                 "color":   color,
                 "visible": True,
                 "is_bbox": is_bbox,
             })
+        # feature edges with GLOBAL adjacency: hides coplanar diagonals even across per-triangle groups.
+        # The bbox is its own thing (keep its box outline via per-group edges).
+        gedges = global_feature_edges(verts, self._groups)
+        for gi, grp in enumerate(self._groups):
+            grp["edges"] = (feature_edges(verts, grp["tris"]) if grp["is_bbox"] and len(grp["tris"])
+                            else gedges[gi])
         if len(verts):
             mn, mx = verts.min(0), verts.max(0)
             ctr  = (mn + mx) * 0.5
@@ -4758,7 +4848,8 @@ class MainWindow(QMainWindow):
         if mode != "results":
             self._gl.set_selected_receivers([])        # drop the multi-select highlight
         if mode != "draw" and getattr(self, "_sketch", None) is not None:
-            self._sketch.hide()                        # sketch is its own window; hide off draw mode
+            self._save_sketch_json()                   # persist the sketch, then hide (own window)
+            self._sketch.hide()
         if mode == "sim":
             self._panel_locked = False
             self._results.hide()
@@ -4783,16 +4874,46 @@ class MainWindow(QMainWindow):
             from sketch2d import SketchWindow      # lives next to gui.py in common/
             self._sketch = SketchWindow(self)
             self._sketch.canvas.objReady.connect(self._on_sketch_obj)
+        if not self._sketch.canvas.shapes:         # empty -> restore this project's saved sketch
+            self._load_sketch_json()
         self._sketch.show(); self._sketch.raise_(); self._sketch.activateWindow()
 
+    def _sketch_json_path(self):
+        return (os.path.join(self._proj_root, "input", "scene", "sketch.json")
+                if self._proj_root else None)
+
+    def _load_sketch_json(self):
+        import json
+        p = self._sketch_json_path()
+        if p and os.path.isfile(p):
+            try:
+                self._sketch.canvas.load_shapes(json.load(open(p)))
+            except Exception:
+                pass
+
+    def _save_sketch_json(self):
+        """Persist the editable sketch. Guard against overwriting a saved sketch with an empty one."""
+        import json
+        p = self._sketch_json_path()
+        sk = getattr(self, "_sketch", None)
+        if not (p and sk and sk.canvas.shapes):
+            return
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        try:
+            with open(p, "w") as f:
+                json.dump(sk.canvas.dump_shapes(), f)
+        except OSError:
+            pass
+
     def _on_sketch_obj(self, obj_text):
-        """Extruded sketch -> write input/scene/sketch.obj and load it through the normal OBJ pipeline."""
+        """Extruded sketch -> write input/scene/sketch.obj (+ the .json sidecar) and load the OBJ."""
         if not self._proj_root:
             self._sb.showMessage("Open a project first to save the sketched OBJ."); return
         d = os.path.join(self._proj_root, "input", "scene"); os.makedirs(d, exist_ok=True)
         path = os.path.join(d, "sketch.obj")
         with open(path, "w") as f:
             f.write(obj_text)
+        self._save_sketch_json()
         self._load_obj_path(path)
         self._sb.showMessage("Extruded → loaded. Switch to Simulation to view / name surfaces.")
 
@@ -6214,6 +6335,7 @@ class MainWindow(QMainWindow):
                       f"(by {shift}): {os.path.basename(shifted)}")
                 path = shifted
             verts, groups = parse_obj(path)
+            groups = merge_coplanar_groups(verts, groups)   # fuse per-triangle splits of a flat surface
         except Exception as ex:
             QMessageBox.critical(self, "OBJ error", str(ex)); return
         self._obj_path = path
