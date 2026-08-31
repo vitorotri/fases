@@ -4757,6 +4757,8 @@ class MainWindow(QMainWindow):
         self._gl.set_results_pick(mode == "results")   # click-to-select receivers only in Results
         if mode != "results":
             self._gl.set_selected_receivers([])        # drop the multi-select highlight
+        if mode != "draw" and getattr(self, "_sketch", None) is not None:
+            self._sketch.hide()                        # sketch is its own window; hide off draw mode
         if mode == "sim":
             self._panel_locked = False
             self._results.hide()
@@ -4773,7 +4775,26 @@ class MainWindow(QMainWindow):
         elif mode == "draw":
             self._panel_locked = False
             self._results.hide()
-            self._sb.showMessage("Draw mode: the sketcher script isn't wired yet.")
+            self._open_sketch()
+
+    def _open_sketch(self):
+        """Open the 2D domain sketcher (its own top-level window). Created once, reused."""
+        if getattr(self, "_sketch", None) is None:
+            from sketch2d import SketchWindow      # lives next to gui.py in common/
+            self._sketch = SketchWindow(self)
+            self._sketch.canvas.objReady.connect(self._on_sketch_obj)
+        self._sketch.show(); self._sketch.raise_(); self._sketch.activateWindow()
+
+    def _on_sketch_obj(self, obj_text):
+        """Extruded sketch -> write input/scene/sketch.obj and load it through the normal OBJ pipeline."""
+        if not self._proj_root:
+            self._sb.showMessage("Open a project first to save the sketched OBJ."); return
+        d = os.path.join(self._proj_root, "input", "scene"); os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "sketch.obj")
+        with open(path, "w") as f:
+            f.write(obj_text)
+        self._load_obj_path(path)
+        self._sb.showMessage("Extruded → loaded. Switch to Simulation to view / name surfaces.")
 
     def _current_receiver_row(self):
         r = self._rec_tbl._tbl.currentRow()            # currentRow works with SelectItems tables
