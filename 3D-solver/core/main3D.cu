@@ -127,6 +127,9 @@ int main(int argc, char *argv[]){
     t_max = conf_arr[1]; // maximum simulation time [s]
     f_cutoff = conf_arr[2]; // [Hz] (cutoff frequency)
     
+    const float f_x = 0.5f * f_cutoff; // FVM<->GA crossover frequency
+    if (f_x < 63.0) ga_only = true; // simulate only GA
+    
     // PML keys
     U_PML = (float)conf_arr[6];
     D_PML = (float)conf_arr[7];
@@ -1412,12 +1415,11 @@ int main(int argc, char *argv[]){
 	scene_free(&sc); // free scene here: ism_solve and rt_build are its last users
 
 	
-	// The FVM is only excited/valid up to ~0.5*f_cutoff (source peak ~0.45*f_cutoff), so the FVM<->GA
+	// With PCS, the FVM is only excited/valid up to ~0.5*f_cutoff (source peak ~0.45*f_cutoff), so the FVM<->GA
 	// crossover sits at f_x = 0.5*f_cutoff, NOT at f_cutoff (which stays the grid/mesh ceiling). Emit
 	// GA octave bands down to the one containing f_x so the GA reaches the crossover. allIRs filters
 	// at the same f_x.
-	const float f_x = 0.5f * f_cutoff;   // FVM<->GA crossover frequency
-	// determine number of valid bands for ISM / Ray-Tracing (easier array allocation later on)
+	// Determine number of valid bands for ISM / Ray-Tracing (easier array allocation later on)
 	int N_bands = 8; // number of bands for ISM / Ray-Tracing, start with total
 	for (int i = 0; i < 8; i++){
 		if (f_x <= octave_bands[i]){
@@ -1536,7 +1538,7 @@ int main(int argc, char *argv[]){
 			// shoebox and more numerous at higher order) must get INDEPENDENT random signs so
 			// they add incoherently (sqrt(K)), not coherently (K -> the spurious 2x-direct peak).
 			// Keying on tau shared one sign across them; key on aid instead.
-			unsigned aid = 0;
+			//unsigned aid = 0;
 			// Antithetic sign: consecutive arrivals pair up as (+base,-base) so the count is
 			// exactly 50/50 (+-1) -> kills the low-order positive lean, without an ordering/comb
 			// pattern (base is random per pair). Coincident arrivals land in different pairs, so
