@@ -9,3 +9,5 @@ f_0 for the sources is:
 
 	PCS: resonance frequency
 	Ricker: central frequency
+	
+If PCS / Ricker is used with omni src, no need for calibration if user has weighted/single value Lp,1m.
