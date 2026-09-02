@@ -115,7 +115,16 @@ def broadband_ir(rec, src):
     # dt/fs_fv from header.txt to resample+deconvolve; if the header is gone (FVM never finished) we
     # CAN'T use any stray IR*.bin, so treat the pair as GA-only regardless.
     have_low = bool(low_files) and fs_fv is not None
-    if low_files and fs_fv is None:
+    # f_cutoff_sim >= 63 Hz means the user asked for a WAVE-based (FVM) low band. If it's genuinely
+    # missing here the FVM run is incomplete -> warn LOUD so a broken run isn't silently downgraded to
+    # GA-only. Below 63 Hz there IS no FVM band by design, so GA-only is expected and quiet.
+    wave_expected = f_cutoff_sim >= octave_bands[0]
+    if wave_expected and not have_low:
+        why = "header.txt missing (FVM run not finished)" if low_files else "no IR<rec>_<src>.bin (low)"
+        print(f"[allIRs] !! rec{rec} src{src}: f_cutoff={f_cutoff_sim:.0f} Hz expects a WAVE-based low "
+              f"band but {why} -> FVM output incomplete; falling back to GA-only. Re-run the FVM sim "
+              "for the wave band.")
+    elif low_files and fs_fv is None:      # GA-only run with a stray old low IR + no header
         print(f"[allIRs] rec{rec} src{src}: IR (low) present but no header.txt (dt unknown) -> "
               "low band skipped, building from GA bands only.")
     if have_low:

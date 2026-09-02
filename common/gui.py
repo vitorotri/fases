@@ -364,6 +364,53 @@ def parse_obj(path: str):
     return verts, groups
 
 
+# GENERIC (non-axis-aligned) ray directions for the point-in-mesh test. Room walls are axis-aligned, so
+# an axis ray (+x/+y/+z) runs coplanar with wall triangles and passes through shared edges/vertices
+# constantly -> parity miscounts, and it does so differently at every grid spacing (the split bug the
+# user hit). These irrational-ish dirs almost never graze an edge or lie in an axis-aligned triangle.
+MESH_RAY_DIRS = np.array([(0.531, 0.673, 0.514),
+                          (0.271, -0.638, 0.721),
+                          (-0.802, 0.301, 0.515)], np.float64)
+
+
+def mesh_ray_geom(verts, tris, ray_dirs=MESH_RAY_DIRS):
+    """Precompute Möller–Trumbore constants for `tris` (Nx3 vertex indices) over each ray direction.
+    Returns (a, e1, e2, dirs) where dirs is a list of (rd, pv, inv, ok) per normalized direction."""
+    verts = np.asarray(verts, np.float64)
+    T = np.asarray(tris)
+    a = verts[T[:, 0]]; e1 = verts[T[:, 1]] - a; e2 = verts[T[:, 2]] - a
+    dirs = []
+    for rd in ray_dirs:
+        rd = np.asarray(rd, np.float64); rd = rd / np.linalg.norm(rd)
+        pv = np.cross(rd, e2)
+        det = np.einsum('ij,ij->i', e1, pv)
+        ok = np.abs(det) > 1e-9
+        inv = np.zeros_like(det); inv[ok] = 1.0 / det[ok]
+        dirs.append((rd, pv, inv, ok))
+    return a, e1, e2, dirs
+
+
+def mesh_inside_vote(pts, geom):
+    """Point-in-mesh by ray parity (odd forward crossings = inside), MAJORITY-VOTED over the generic ray
+    directions in `geom` (>=2 => inside). Generic dirs dodge the axis-aligned-mesh coplanarity/edge-graze
+    that split the room at some grid spacings; the vote covers the rare remaining graze. `geom` is the
+    tuple from mesh_ray_geom. ponytail: O(pts*tris*ndirs) Python loop, fine at load."""
+    a, e1, e2, dirs = geom
+    out = np.zeros(len(pts), bool)
+    for i, ro in enumerate(np.asarray(pts, np.float64)):
+        tv = ro - a
+        qv = np.cross(tv, e1)                     # depends on point only -> reuse across directions
+        votes = 0
+        for rd, pv, inv, ok in dirs:
+            u = np.einsum('ij,ij->i', tv, pv) * inv
+            v = (qv @ rd) * inv
+            t = np.einsum('ij,ij->i', e2, qv) * inv
+            hit = ok & (u >= 0) & (u <= 1) & (v >= 0) & (u + v <= 1) & (t > 1e-6)
+            votes += int(hit.sum()) & 1
+        out[i] = votes >= 2
+    return out
+
+
 def write_obj(path, verts, groups):
     """Write (verts, groups) back as a plain OBJ: one `v` per vertex, then `g name`
     + triangle `f` (1-based) per group. Used to persist the coplanar-MERGED group set
@@ -852,6 +899,12 @@ class GLViewer(QOpenGLWidget):
             jj, ii = np.meshgrid(np.arange(hgt), np.arange(wid), indexing='ij')
             wcen = self._cells_world(ax, wid, hgt, ii.ravel() + 0.5, jj.ravel() + 0.5)
             inside = self._inside_obj(wcen).reshape(hgt, wid)
+            try:                                   # DEBUG: a frozen arm = a disconnected mask component
+                from scipy.ndimage import label   # 4-connectivity matches slice2d's orthogonal faces
+                print(f"[anim] plane {ax}: {int(inside.sum())} inside cells, "
+                      f"{label(inside)[1]} 4-conn component(s) @ {hgt}x{wid}", flush=True)
+            except Exception:
+                pass
             if not inside.any():
                 continue
             # strided, jittered particle lattice trimmed to the room interior
@@ -1041,7 +1094,9 @@ class GLViewer(QOpenGLWidget):
         return w
 
     def _obj_geom(self):
-        """Cached Möller constants for all non-bbox triangles, for the inside-mesh test."""
+        """Cached Möller constants for all non-bbox triangles, over the generic ray directions
+        (module-level mesh_ray_geom / MESH_RAY_DIRS). Generic dirs dodge the axis-aligned-mesh degeneracy
+        that made a single +x (or +x/+y/+z) ray miscount and split the room at some grid spacings."""
         if getattr(self, "_obj_geom_cache", None) is not None:
             return self._obj_geom_cache
         verts = np.asarray(self._verts, np.float64)
@@ -1049,33 +1104,16 @@ class GLViewer(QOpenGLWidget):
              if not g.get("is_bbox") and len(g["tris"])]
         if not T or len(verts) == 0:
             self._obj_geom_cache = None; return None
-        T = np.concatenate(T, 0)
-        a = verts[T[:, 0]]; e1 = verts[T[:, 1]] - a; e2 = verts[T[:, 2]] - a
-        rd = np.array([1.0, 0.0, 0.0])
-        pv = np.cross(rd, e2)
-        det = np.einsum('ij,ij->i', e1, pv)
-        ok = np.abs(det) > 1e-9
-        inv = np.zeros_like(det); inv[ok] = 1.0 / det[ok]
-        self._obj_geom_cache = (a, e1, e2, pv, inv, ok, rd)
+        self._obj_geom_cache = mesh_ray_geom(verts, np.concatenate(T, 0))
         return self._obj_geom_cache
 
     def _inside_obj(self, pts):
-        """Point-in-mesh by +x ray parity (odd crossings = inside). Assumes a watertight shell.
-        ponytail: O(points * triangles), fine at load for room-sized meshes; add a BVH if huge."""
+        """Point-in-mesh, majority-voted over generic rays — see mesh_inside_vote. Returns all-True when
+        there is no mesh geometry (nothing to mask against)."""
         G = self._obj_geom()
         if G is None:
             return np.ones(len(pts), bool)
-        a, e1, e2, pv, inv, ok, rd = G
-        out = np.zeros(len(pts), bool)
-        for i, ro in enumerate(pts):
-            tv = ro - a
-            u = np.einsum('ij,ij->i', tv, pv) * inv
-            qv = np.cross(tv, e1)
-            v = (qv @ rd) * inv
-            t = np.einsum('ij,ij->i', e2, qv) * inv
-            hit = ok & (u >= 0) & (u <= 1) & (v >= 0) & (u + v <= 1) & (t > 1e-6)
-            out[i] = (int(hit.sum()) & 1) == 1
-        return out
+        return mesh_inside_vote(pts, G)
 
     def _particle_tex(self):
         """Lazy radial-alpha disc so points render as round balls (POINT_SMOOTH is square on
@@ -1638,7 +1676,7 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glDepthMask(GL_FALSE)             # translucent: don't occlude the mesh behind
         for ax, q in quads.items():
-            if not self._plane_vis[ax]:
+            if not self._plane_vis[ax.lower()]:   # quads/AXIS_COLORS keyed 'X'/'Y'/'Z'; _plane_vis 'x'/'y'/'z'
                 continue                  # plane toggled off in the Scene tab
             if self._axis_lock and self._axis_lock != ax:
                 continue                  # editing one axis -> only that plane
@@ -7216,6 +7254,10 @@ class MainWindow(QMainWindow):
         # Re-enable launching, fill/hide the progress bar, report status.
         self._set_running(False)
         if rc == 0:
+            # New run wrote fresh pressure*.bin + config.txt (maybe a different source type). Drop the
+            # cached animation so the next play RELOADS it — else playback reuses the previous sim (e.g.
+            # a PCS/Ricker anim after switching to Sinusoid), only fixed by restarting the GUI.
+            self._gl.clear_animation()
             self._float_prog.setValue(100)
             # A completed FULL run makes the current wave inputs the reusable baseline,
             # so the next Simulate with only GA changes will auto-skip the FVM.
