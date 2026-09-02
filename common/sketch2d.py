@@ -168,7 +168,9 @@ def extrude_obj(shapes):
     roof), with a flat cap over the inner region — no vertical column. Floor is the full outer at
     z_bottom (shared; sub floor-steps later). Coplanar floor/ceiling = ONE face; only non-planar
     (sloped) surfaces are triangulated (per-triangle groups). None if nothing closed.
-    Winding assumes inward room normals; ponytail: flip if the solver treats faces as 1-sided."""
+    Winding is irrelevant to the solver (verified): FVM signs by +X parity ray (parsing3D.h), ISM
+    canonicalizes normals (ism_canon_normal) + plane reflection, RT skips normal orientation
+    (raytrace3D.h:58) and flips N to face the ray. So face order here never needs flipping."""
     closed = [s for s in shapes if s["closed"] and len(s["pts"]) >= 3]
     if not closed:
         return None
@@ -239,6 +241,24 @@ def extrude_obj(shapes):
     return "\n".join(lines) + "\n"
 
 
+def _drop_out_of_range(shapes):
+    """Remove vertices flung far past the scene — corrupt saves clamp coords to the spinbox +-1e4 max,
+    which then extrudes a wall shooting to 10000 and wrecks the contour. Bound = 50x the median extent
+    (min 100 m), so a legitimately large room survives. Returns (cleaned_shapes, n_dropped); shapes left
+    with too few points (closed<3, open<1) are removed."""
+    ext = sorted(max(abs(p[0]), abs(p[1])) for sh in shapes for p in sh["pts"])
+    if not ext:
+        return shapes, 0
+    bound = max(100.0, 50.0 * ext[len(ext) // 2])                  # median -> robust to <50% junk
+    out, dropped = [], 0
+    for sh in shapes:
+        keep = [p for p in sh["pts"] if abs(p[0]) <= bound and abs(p[1]) <= bound]
+        dropped += len(sh["pts"]) - len(keep)
+        if len(keep) >= (3 if sh.get("closed") else 1):
+            sh = dict(sh); sh["pts"] = keep; out.append(sh)
+    return out, dropped
+
+
 class _Canvas(QWidget):
     selectionChanged = Signal()
     objReady = Signal(str)          # extruded OBJ text -> gui.py writes + loads it
@@ -247,6 +267,8 @@ class _Canvas(QWidget):
         super().__init__(parent)
         self.setMinimumSize(500, 400)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)  # hover coords without a button held
+        self._hover = None           # world (x,y) under cursor, for the readout
         self.shapes = []             # [{"pts": [[x,y,z], ...], "closed": bool}]
         self.sel = None              # (shape_idx, pt_idx) or None
         self._undo = []              # snapshots (shapes, sel), pushed BEFORE each mutation
@@ -254,6 +276,9 @@ class _Canvas(QWidget):
         self._last = None            # last mouse pos (screen)
         self.scale = 40.0            # px per metre
         self.off = QPointF(260.0, 360.0)   # world origin on screen
+        self.h = 0.5                 # grid spacing [m]; gui sets it from _grid_h. Fine line per h,
+        #                              thick per 10*h. Scene is drawn in the POSITIVE quadrant only
+        #                              (parser shifts to positive anyway — draw there from the start).
 
     # world <-> screen (y up)
     def _w2s(self, x, y):
@@ -283,7 +308,11 @@ class _Canvas(QWidget):
         return copy.deepcopy(self.shapes)
 
     def load_shapes(self, data):
-        self.shapes = data or []
+        data, dropped = _drop_out_of_range(data or [])            # self-heal a corrupt save (see helper)
+        if dropped:
+            print(f"[sketch2d] dropped {dropped} out-of-range vertex/vertices from a corrupt sketch — "
+                  "contour repaired. Re-save (extrude / leave draw mode) to persist the repair.")
+        self.shapes = data
         self.sel = None; self._undo = []
         self.selectionChanged.emit(); self.update()
 
@@ -291,6 +320,7 @@ class _Canvas(QWidget):
     def mousePressEvent(self, e):
         self._last = e.position()
         wx, wy = self._s2w(e.position().x(), e.position().y())
+        wx, wy = max(0.0, wx), max(0.0, wy)                         # positive quadrant only
         ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
         alt = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
         tol = HIT_PX / self.scale
@@ -336,9 +366,10 @@ class _Canvas(QWidget):
             self._drag = ("pan",)
 
     def mouseMoveEvent(self, e):
-        if self._drag is None:
-            return
         p = e.position()
+        self._hover = self._s2w(p.x(), p.y())                       # live cursor coords (raw, may be <0)
+        if self._drag is None:
+            self.update(); return
         if self._drag[0] == "pan":
             self.off += p - self._last; self._last = p; self.update(); return
         dx = (p.x() - self._last.x()) / self.scale
@@ -346,10 +377,12 @@ class _Canvas(QWidget):
         if self._drag[0] == "pt":
             _, si, idx = self._drag
             pt = self.shapes[si]["pts"][idx]
-            pt[0] = round(pt[0] + dx, 4); pt[1] = round(pt[1] + dy, 4)
+            pt[0] = round(max(0.0, pt[0] + dx), 4); pt[1] = round(max(0.0, pt[1] + dy), 4)  # positive only
             self.selectionChanged.emit()
         elif self._drag[0] == "shape":
             sh = self.shapes[self._drag[1]]
+            dx = max(dx, -min(p[0] for p in sh["pts"]))             # clamp translation: keep whole shape
+            dy = max(dy, -min(p[1] for p in sh["pts"]))             # in the positive quadrant (rigid)
             for pt in sh["pts"]:                                    # move the whole shape in xy
                 pt[0] = round(pt[0] + dx, 4); pt[1] = round(pt[1] + dy, 4)
         self._last = p; self.update()
@@ -399,6 +432,9 @@ class _Canvas(QWidget):
         p = e.position()
         wx, wy = self._s2w(p.x(), p.y())
         self.scale *= 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
+        self.scale = min(max(self.scale, 0.2), 5000.0)             # floor stops a tiny-scale drag/click
+        #                                                            from flinging points to ~10000 (source
+        #                                                            of the corruption the sanitizer cleans)
         self.off = QPointF(p.x() - wx * self.scale, p.y() + wy * self.scale)  # zoom about the cursor
         self.update()
 
@@ -421,14 +457,75 @@ class _Canvas(QWidget):
             return
         super().keyPressEvent(e)
 
+    def fit_view(self):
+        """Center the origin and pick a scale so the drawn scene fits with margin (default scale if
+        empty). Called on show so opening the sketcher always frames the scene."""
+        W, Hpx = self.width(), self.height()
+        if W <= 0 or Hpx <= 0:
+            return                                                 # not laid out yet; showEvent can fire early
+        self.off = QPointF(W / 2.0, Hpx / 2.0)                     # origin in the center
+        ext = sorted(max(abs(p[0]), abs(p[1])) for sh in self.shapes for p in sh["pts"])
+        if ext:
+            mx = ext[int(0.9 * (len(ext) - 1))]                   # 90th pct: frame the DRAWING, shrug off
+            if mx > 0:                                            # a few stray far points (corrupt saves)
+                self.scale = 0.42 * min(W, Hpx) / mx             # scene spans ~84% of the half-extent
+        self.scale = min(max(self.scale, 0.2), 5000.0)            # never a degenerate zoom
+        self.update()
+
+    def showEvent(self, e):
+        super().showEvent(e); self.fit_view()
+
     # ── paint ──────────────────────────────────────────────
     def paintEvent(self, _):
-        qp = QPainter(self); qp.setRenderHint(QPainter.RenderHint.Antialiasing)
-        qp.fillRect(self.rect(), QColor("#1a1d23"))
-        qp.setPen(QPen(QColor("#2e3340"), 1))                       # x/y axes at the world origin
+        qp = QPainter(self)                                        # end() in finally: a paint exception must
+        try:                                                       # never leave an active painter (that
+            self._paint(qp)                                        # hard-closes the whole app)
+        finally:
+            qp.end()
+
+    def _paint(self, qp):
         o = self.off
-        qp.drawLine(0, int(o.y()), self.width(), int(o.y()))
-        qp.drawLine(int(o.x()), 0, int(o.x()), self.height())
+        W, Hpx = self.width(), self.height()
+        qp.fillRect(self.rect(), QColor("#1a1d23"))
+        h = self.h
+        # COARSEN the iteration unit so drawn lines stay >=6px apart. A fine solver h (mm), or a tiny
+        # scale from a stray far point, would make h*scale sub-pixel -> the loop runs W/step (tens of
+        # thousands) times PER paint -> freeze. Cap the coarsening; if it can't reach 6px, SKIP the grid.
+        unit = h; steps = 0
+        while h > 0 and unit * self.scale < 6.0 and steps < 24:    # 1*h, 10*h, 100*h... until visible
+            unit *= 10; steps += 1
+        if h > 0 and self.scale > 0 and unit * self.scale >= 6.0:  # only draw when lines are visibly spaced
+            ratio = int(round(unit / h))                           # 1 => per-h (thick every 10th); >=10 => all 10h+
+            sp = unit * self.scale                                 # px between drawn lines (>=6) -> loop <= W/6
+            i0 = int((0 - o.x()) // sp); i1 = int((W - o.x()) // sp) + 1   # // floors (both signs)
+            j0 = int((o.y() - Hpx) // sp); j1 = int(o.y() // sp) + 1
+
+            def grid_pass(fine, thick, axis):
+                for i in range(i0, i1 + 1):
+                    sx = int(o.x() + i * sp)
+                    qp.setPen(axis if i == 0 else thick if (i * ratio) % 10 == 0 else fine)
+                    qp.drawLine(sx, 0, sx, Hpx)
+                for j in range(j0, j1 + 1):
+                    sy = int(o.y() - j * sp)
+                    qp.setPen(axis if j == 0 else thick if (j * ratio) % 10 == 0 else fine)
+                    qp.drawLine(0, sy, W, sy)
+
+            grid_pass(QPen(QColor("#202329"), 1), QPen(QColor("#282d35"), 1),   # whole plane: DIM (negatives)
+                      QPen(QColor("#3a424d"), 1))
+            xL = int(min(max(0.0, o.x()), W)); yB = int(min(max(0.0, o.y()), Hpx))
+            qp.save(); qp.setClipRect(xL, 0, W - xL, yB)           # positive quadrant = drawable -> BRIGHT
+            grid_pass(QPen(QColor("#2b313a"), 1), QPen(QColor("#3c4552"), 1),
+                      QPen(QColor("#5a6675"), 1))
+            qp.restore()
+        # origin marker + live cursor readout
+        op = self._w2s(0.0, 0.0)
+        qp.setPen(QPen(QColor("#6a7684"), 1)); qp.setBrush(Qt.BrushStyle.NoBrush)
+        qp.drawEllipse(op, 3, 3)
+        qp.drawText(int(op.x()) + 6, int(op.y()) + 14, "0")
+        if self._hover is not None:
+            qp.setPen(QColor("#cfd8dc"))
+            qp.drawText(8, Hpx - 8, f"x {self._hover[0]:.3g} m    y {self._hover[1]:.3g} m")
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)         # shapes/points antialiased
         for si, sh in enumerate(self.shapes):
             sp = [self._w2s(p[0], p[1]) for p in sh["pts"]]
             col = QColor("#7c5cfc") if sh["closed"] else QColor("#e0a54f")  # boundary vs interior line
@@ -517,6 +614,11 @@ def _selfcheck():
     assert extrude_obj([{"pts": sloped, "closed": True}]).count("g ceiling") > 1, "sloped ceiling triangulated"
     assert extrude_obj([{"pts": sq, "closed": False}]) is None, "open -> no obj"
     assert len(_triangulate_xy([[0, 0], [4, 0], [4, 4], [2, 4], [2, 2], [0, 2]])) == 4, "ear-clip concave L"
+    clean, nd = _drop_out_of_range([{"pts": [[0, 0, 0, 3], [2, 0, 0, 3], [2, 2, 0, 3],
+                                             [10000, 10000, 0, 3]], "closed": True}])   # 1 stray vertex
+    assert nd == 1 and len(clean) == 1 and len(clean[0]["pts"]) == 3, "sanitizer drops far vertex, keeps room"
+    assert _drop_out_of_range([{"pts": [[0, 0, 0, 3], [5, 0, 0, 3], [5, 5, 0, 3]], "closed": True}])[1] == 0, \
+        "sanitizer keeps a clean room untouched"
     try:                                                # sub-region path needs mapbox_earcut
         import mapbox_earcut  # noqa: F401
         sub = {"pts": [[.5, .5, 0, 5], [1.5, .5, 0, 5], [1.5, 1.5, 0, 5], [.5, 1.5, 0, 5]], "closed": True}

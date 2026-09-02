@@ -899,12 +899,6 @@ class GLViewer(QOpenGLWidget):
             jj, ii = np.meshgrid(np.arange(hgt), np.arange(wid), indexing='ij')
             wcen = self._cells_world(ax, wid, hgt, ii.ravel() + 0.5, jj.ravel() + 0.5)
             inside = self._inside_obj(wcen).reshape(hgt, wid)
-            try:                                   # DEBUG: a frozen arm = a disconnected mask component
-                from scipy.ndimage import label   # 4-connectivity matches slice2d's orthogonal faces
-                print(f"[anim] plane {ax}: {int(inside.sum())} inside cells, "
-                      f"{label(inside)[1]} 4-conn component(s) @ {hgt}x{wid}", flush=True)
-            except Exception:
-                pass
             if not inside.any():
                 continue
             # strided, jittered particle lattice trimmed to the room interior
@@ -4927,6 +4921,8 @@ class MainWindow(QMainWindow):
             from sketch2d import SketchWindow      # lives next to gui.py in common/
             self._sketch = SketchWindow(self)
             self._sketch.canvas.objReady.connect(self._on_sketch_obj)
+        if self._gl._grid_h > 0:                   # background grid = solver grid spacing h
+            self._sketch.canvas.h = self._gl._grid_h
         if not self._sketch.canvas.shapes:         # empty -> restore this project's saved sketch
             self._load_sketch_json()
         self._sketch.show(); self._sketch.raise_(); self._sketch.activateWindow()
