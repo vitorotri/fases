@@ -53,20 +53,28 @@ def _init():
     cfg = np.loadtxt("../config/config.txt")
     f_cutoff_sim = cfg[2]
     src_opt = int(cfg[15]) if len(cfg) > 15 else 0   # config line 16: 0=PCS, 1=Ricker, 2=Sinusoid
-    hp = open("../output/header.txt").read().split()   # Nx Ny Nz Nt Lx Ly Lz pbin anim dt scene h tol/h
-    dt = float(hp[9])
-    dt_half = 0.5 * dt
-    fs_fv = 1 / dt
+    # header.txt (dt) is written only when the FVM solver finishes. A GA-only run (f_cutoff_sim below
+    # the FVM band, e.g. < 63 Hz) never runs FVM -> no header, no low IR. dt/fs_fv feed only the (absent)
+    # low band, so tolerate the miss and let broadband_ir build from the GA octaves alone.
+    if os.path.exists("../output/header.txt"):
+        hp = open("../output/header.txt").read().split()   # Nx Ny Nz Nt Lx Ly Lz pbin anim dt scene h tol/h
+        dt = float(hp[9])
+        dt_half = 0.5 * dt
+        fs_fv = 1 / dt
+    else:
+        dt = dt_half = fs_fv = None
+        print("[allIRs] no ../output/header.txt (FVM did not run) -> GA-only: building from GA bands.")
     # FVM<->GA crossover f_x. Fallback = 0.5*f_cutoff (PCS Gaussian roll-off); overridden below from the
     # actual source-pulse spectrum so it's also right for Ricker (bandpass) and any custom glob_f.
     f_cutoff = 0.5 * f_cutoff_sim                 # Hz (grid ceiling is f_cutoff_sim)
     # main3D writes the radiated pulse to ../config/p_ref.bin; deconvolving it recovers the bare room
     # IR so the FVM and GA bands share density and meet at f_cutoff. float64 at dt/2 -> resample to fs.
-    pulse_fs = _load_pulse()
+    pulse_fs = _load_pulse() if dt is not None else None
     if pulse_fs is None:
-        print("[allIRs] !! ../config/p_ref.bin NOT FOUND -> source NOT deconvolved (fallback path). "
-              "The FVM band still carries the source pulse; bands will NOT match. Re-run the FVM "
-              "simulation with the current main3D to generate p_ref.bin.")
+        if dt is not None:               # only warn about a missing pulse when there IS a low band
+            print("[allIRs] !! ../config/p_ref.bin NOT FOUND -> source NOT deconvolved (fallback path). "
+                  "The FVM band still carries the source pulse; bands will NOT match. Re-run the FVM "
+                  "simulation with the current main3D to generate p_ref.bin.")
     else:
         print(f"[allIRs] p_ref.bin loaded ({pulse_fs.size} samples at fs) -> deconvolving source pulse.")
         _P = np.abs(np.fft.rfft(pulse_fs)); _f = np.fft.rfftfreq(pulse_fs.size, 1 / fs)
@@ -76,36 +84,54 @@ def _init():
         if 0 < _fx <= f_cutoff_sim:
             f_cutoff = _fx
         print(f"[allIRs] crossover f_x = {f_cutoff:.1f} Hz  (pulse peak {_f[_pk]:.1f} Hz)")
-    # Fallback only (no p_ref.bin from an older run): source-pulse lag instead of deconv.
-    if src_opt == 1:                                  # Ricker wavelet
-        sigma_s = 1.0 / (np.sqrt(2) * np.pi * 0.3 * f_cutoff_sim)
-    else:                                             # PCS (0) — Sinusoid (2) has no pulse lag
-        sigma_s = 0.425 / f_cutoff_sim
-    lag = int(round(np.ceil(8.5 * sigma_s / dt_half) * dt_half * fs))
+    # Fallback only (no p_ref.bin from an older run): source-pulse lag instead of deconv. Needs dt,
+    # so skip it for a GA-only run (no low band to lag-align anyway).
+    if dt is not None:
+        if src_opt == 1:                              # Ricker wavelet
+            sigma_s = 1.0 / (np.sqrt(2) * np.pi * 0.3 * f_cutoff_sim)
+        else:                                         # PCS (0) — Sinusoid (2) has no pulse lag
+            sigma_s = 0.425 / f_cutoff_sim
+        lag = int(round(np.ceil(8.5 * sigma_s / dt_half) * dt_half * fs))
+    else:
+        sigma_s = lag = None
     _ready = True
 
 def broadband_ir(rec, src):
-    """Broadband IR for one (rec, src) pair from the IR/HIR bins in cwd. Returns array at fs,
-    or None if the low-freq IR for the pair is missing. Solver names them IR<rec>_<src>.bin."""
+    """Broadband IR for one (rec, src) pair from the IR/HIR bins in cwd. Returns (broadband, low, high)
+    arrays at fs, or None only if BOTH the low IR and the GA bands are missing. Solver names them
+    IR<rec>_<src>.bin (low) and HIR<rec>_<src>_<band>.bin (high). A GA-only run (f_cutoff_sim below the
+    FVM band, e.g. < 63 Hz) writes NO low IR -> the low stream comes back as zeros and the GA octaves
+    alone form the broadband IR."""
     _init()
     low_files = sorted(f for f in glob.glob("IR*.bin")     # IR<rec>_<src>.bin
                        if f[2:].split(".")[0].split("_")[:2] == [str(rec), str(src)])
     high_files = sorted(f for f in glob.glob("HIR*.bin")   # HIR<rec>_<src>_<band>.bin
                         if f[3:].split(".")[0].split("_")[:2] == [str(rec), str(src)])
-    if not low_files:
-        return None
+    if not low_files and not high_files:
+        return None                                        # nothing for this pair
 
-    # low band: resample FVM rate -> fs, then deconvolve the source pulse -> bare room IR
-    LIR = np.fromfile(low_files[0], np.float32)
-    r = Fraction(fs / fs_fv).limit_denominator(2000)
-    LIR = resample_poly(LIR, r.numerator, r.denominator)   # anti-aliased
-    if pulse_fs is not None:
-        n = LIR.size
-        Q = np.fft.rfft(pulse_fs, n=n)
-        eps = deconv_reg * np.max(np.abs(Q) ** 2)          # Tikhonov: caps gain where pulse is weak
-        LIR = np.fft.irfft(np.fft.rfft(LIR) * np.conj(Q) / (np.abs(Q) ** 2 + eps), n=n)
-    else:                                                  # older run without p_ref.bin
-        LIR = np.roll(LIR * (fs_fv / fs), -lag)
+    # GA-only run: no FVM low band -> LIR stays empty (pads to zeros below) and the lowest present
+    # octave runs to DC instead of high-passing at f_cutoff (nothing lives below it). The low band needs
+    # dt/fs_fv from header.txt to resample+deconvolve; if the header is gone (FVM never finished) we
+    # CAN'T use any stray IR*.bin, so treat the pair as GA-only regardless.
+    have_low = bool(low_files) and fs_fv is not None
+    if low_files and fs_fv is None:
+        print(f"[allIRs] rec{rec} src{src}: IR (low) present but no header.txt (dt unknown) -> "
+              "low band skipped, building from GA bands only.")
+    if have_low:
+        # low band: resample FVM rate -> fs, then deconvolve the source pulse -> bare room IR
+        LIR = np.fromfile(low_files[0], np.float32)
+        r = Fraction(fs / fs_fv).limit_denominator(2000)
+        LIR = resample_poly(LIR, r.numerator, r.denominator)   # anti-aliased
+        if pulse_fs is not None:
+            n = LIR.size
+            Q = np.fft.rfft(pulse_fs, n=n)
+            eps = deconv_reg * np.max(np.abs(Q) ** 2)          # Tikhonov: caps gain where pulse is weak
+            LIR = np.fft.irfft(np.fft.rfft(LIR) * np.conj(Q) / (np.abs(Q) ** 2 + eps), n=n)
+        else:                                                  # older run without p_ref.bin
+            LIR = np.roll(LIR * (fs_fv / fs), -lag)
+    else:
+        LIR = np.zeros(0)
 
     # ONE power-complementary filterbank: FVM is the band below f_cutoff, each GA octave a band
     # above it. Every input is filtered EXACTLY ONCE (the lowest GA band high-passes at f_cutoff and
@@ -123,14 +149,20 @@ def broadband_ir(rec, src):
         if lp_e: w *= _shoulder(f, lp_e, False)
         return np.fft.irfft(np.fft.rfft(ir) * np.sqrt(w), n=ir.size)
 
-    LIR = _filt(LIR, None, f_cutoff)                       # FVM: single low-pass at f_cutoff
+    if have_low:
+        LIR = _filt(LIR, None, f_cutoff)                   # FVM: single low-pass at f_cutoff
+    present_fcs = [int(hf.split("_")[-1].split(".")[0]) for hf in high_files]
+    lowest_fc = min(present_fcs) if present_fcs else None
     H_IRs = []
     for hf in high_files:
         fc = int(hf.split("_")[-1].split(".")[0])          # band from HIR..._<band>.bin
-        if fc * 2 ** 0.5 <= f_cutoff:                      # octave fully below crossover -> FVM has it
+        if have_low and fc * 2 ** 0.5 <= f_cutoff:         # octave fully below crossover -> FVM has it
             continue
         arr = np.fromfile(hf, np.float32)
-        hp_e = max(f_cutoff, fc / 2 ** 0.5)                # lowest kept band high-passes AT f_cutoff
+        if not have_low and fc == lowest_fc:               # GA-only: lowest octave runs to DC (no FVM below)
+            hp_e = None
+        else:
+            hp_e = max(f_cutoff, fc / 2 ** 0.5)            # lowest kept band high-passes AT f_cutoff
         lp_e = None if fc == octave_bands[-1] else fc * 2 ** 0.5   # top band runs to Nyquist
         H_IRs.append(_filt(arr, hp_e, lp_e))
 
@@ -141,7 +173,7 @@ def broadband_ir(rec, src):
     # Match GA to FVM by SPECTRAL DENSITY across the crossover (peak-matching a delta to a
     # band-limited pulse leaves a ~bandwidth-ratio offset, ~40 dB here). Compare FVM just below
     # f_cutoff to GA just above; median over a wide octave is robust (no narrow-band blow-up).
-    if HIRp.any():
+    if have_low and LIRp.any() and HIRp.any():             # nothing to match against in a GA-only run
         f = np.fft.rfftfreq(N, 1 / fs)
         lo = (f >= f_cutoff / 2) & (f < f_cutoff)          # FVM strong here
         hi = (f > f_cutoff) & (f <= f_cutoff * 2)          # GA strong here
@@ -154,12 +186,17 @@ def broadband_ir(rec, src):
 
 
 def discover_pairs():
-    """Every (rec, src) with a low-freq IR<rec>_<src>.bin present, sorted."""
+    """Every (rec, src) with a low IR<rec>_<src>.bin OR a GA band HIR<rec>_<src>_<band>.bin present,
+    sorted. GA-only runs (no low IR) are still discovered so their broadband IR gets built."""
     pairs = set()
     for f in glob.glob("IR*.bin"):
         m = re.match(r"IR(\d+)_(\d+)\.bin$", f)
         if m:
             pairs.add((int(m.group(1)), int(m.group(2))))   # (rec, src)
+    for f in glob.glob("HIR*.bin"):
+        m = re.match(r"HIR(\d+)_(\d+)_\d+\.bin$", f)
+        if m:
+            pairs.add((int(m.group(1)), int(m.group(2))))
     return sorted(pairs)
 
 
@@ -247,9 +284,44 @@ def _selfcheck():
     assert np.corrcoef(h, hr)[0, 1] > 0.98, "deconvolution self-check failed"
 
 
-if __name__ == "__main__":
+def _selfcheck_ga_only():
+    # GA-only run (f_cutoff_sim < 63 Hz -> no low IR AND no header.txt, since FVM never ran):
+    # _init must tolerate the missing header and broadband_ir must build from the HIR bands alone,
+    # returning zeros for the low stream instead of None / crashing.
+    import tempfile, shutil
+    global _ready
+    rng = np.random.default_rng(0)
+    cwd0 = os.getcwd()
+    d = tempfile.mkdtemp()
     try:
-        _selfcheck()
-    except Exception as ex:                 # never let a self-check block the actual plots
-        print(f"[allIRs] self-check warning: {ex}")
+        os.makedirs(os.path.join(d, "config")); os.makedirs(os.path.join(d, "output"))
+        np.savetxt(os.path.join(d, "config", "config.txt"),
+                   np.array([0, 0, 50.0] + [0] * 13, float))          # cfg[2]=f_cutoff_sim=50 (<63)
+        os.chdir(os.path.join(d, "output"))                           # NO header.txt
+        for band in (500, 1000):                                      # two GA octaves only
+            (rng.standard_normal(2000).astype(np.float32)).tofile(f"HIR0_0_{band}.bin")
+        _ready = False
+        res = broadband_ir(0, 0)
+        assert res is not None, "GA-only pair dropped (should build from HIR alone)"
+        bb, LIRp, HIRp = res
+        assert not LIRp.any() and HIRp.any(), "GA-only: low stream zero, high stream carries the IR"
+        assert np.allclose(bb, HIRp), "GA-only broadband == high band"
+        assert (0, 0) in discover_pairs(), "GA-only pair not discovered"
+        # stray low IR from an old FVM run + no header (dt unknown) -> must still fall back to GA-only,
+        # not crash on fs_fv=None (the exact failure the user hit).
+        (rng.standard_normal(2000).astype(np.float32)).tofile("IR0_0.bin")
+        _ready = False
+        bb2, LIRp2, HIRp2 = broadband_ir(0, 0)
+        assert not LIRp2.any() and HIRp2.any(), "stray IR + no header -> low skipped, GA used"
+        print("[allIRs] GA-only self-check OK")
+    finally:
+        os.chdir(cwd0); _ready = False; shutil.rmtree(d, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    for _chk in (_selfcheck, _selfcheck_ga_only):    # keep independent: a deconv flake can't mask GA-only
+        try:
+            _chk()
+        except Exception as ex:             # never let a self-check block the actual plots
+            print(f"[allIRs] self-check warning: {ex}")
     main()
