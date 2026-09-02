@@ -39,15 +39,13 @@ def _point_in_poly(x, y, pts):
 
 
 def _nearest_point(shapes, wx, wy, tol):
-    """(shape_idx, kind, idx) of the closest point within tol, or None. kind = 'pt' (boundary) or
-    'int' (interior height point)."""
+    """(shape_idx, idx) of the closest boundary vertex within tol, or None."""
     best, bd = None, tol * tol
     for si, sh in enumerate(shapes):
-        for kind, lst in (("pt", sh["pts"]), ("int", sh.get("interior", ()))):
-            for i, p in enumerate(lst):
-                d = (p[0] - wx) ** 2 + (p[1] - wy) ** 2
-                if d <= bd:
-                    bd, best = d, (si, kind, i)
+        for i, p in enumerate(sh["pts"]):
+            d = (p[0] - wx) ** 2 + (p[1] - wy) ** 2
+            if d <= bd:
+                bd, best = d, (si, i)
     return best
 
 
@@ -84,12 +82,11 @@ def _signed_area(pts):
     return 0.5 * a
 
 
-def _triangulate_xy(pts, interior=()):
-    """Ear-clip the boundary polygon's xy projection, then insert each interior point as a Steiner
-    vertex (split its containing triangle into 3). -> [(i,j,k), ...] CCW index triples into the combined
-    list pts+interior. Handles concave (L-shapes). ponytail: O(n^2) ear clip + O(tris) per interior."""
+def _triangulate_xy(pts):
+    """Ear-clip the polygon's xy projection -> [(i,j,k), ...] CCW index triples. Handles concave
+    (L-shapes) that a fan would tear. ponytail: O(n^2) ear clip; faces have a handful of verts."""
     n = len(pts)
-    xy = [(p[0], p[1]) for p in pts] + [(p[0], p[1]) for p in interior]
+    xy = [(p[0], p[1]) for p in pts]
 
     def cross(o, a, b):
         return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
@@ -123,14 +120,6 @@ def _triangulate_xy(pts, interior=()):
                 break
         if len(V) == 3:
             tris.append((V[0], V[1], V[2]))
-
-    for k in range(len(interior)):                   # Steiner insert: split the containing triangle
-        idx, (px, py) = n + k, xy[n + k]
-        for ti, (i0, i1, i2) in enumerate(tris):
-            if in_tri((px, py), xy[i0], xy[i1], xy[i2]):
-                tris[ti] = (i0, i1, idx)             # keep CCW winding on all three children
-                tris += [(i1, i2, idx), (i2, i0, idx)]
-                break
     return tris
 
 
@@ -152,54 +141,25 @@ def _tri_with_holes(verts_xy, ring_ends):
     return [(int(idx[i]), int(idx[i + 1]), int(idx[i + 2])) for i in range(0, len(idx), 3)]
 
 
-def _merge_coplanar(tris, verts):
-    """Merge coplanar triangles into polygon faces -> [[i,...], ...] boundary loops (one per coplanar
-    connected region). A flat surface collapses to one face; a hip roof -> one face per planar facet.
-    Clusters triangles by their supporting PLANE (normal within 2deg + same offset), NO adjacency
-    requirement, so a facet merges however earcut tiled it; then boundary-extracts each cluster into
-    loop(s) (a coplanar-connected region -> one loop). Robust to float noise and awkward triangulations."""
-    import math
-    from collections import defaultdict
-    if not tris:
-        return []
-
-    def plane(t):
-        a, b, c = verts[t[0]], verts[t[1]], verts[t[2]]
-        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
-        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
-        nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
-        L = (nx * nx + ny * ny + nz * nz) ** 0.5 or 1.0
-        nx, ny, nz = nx / L, ny / L, nz / L
-        return (nx, ny, nz, nx * a[0] + ny * a[1] + nz * a[2])
-
-    cos_thr, dtol = math.cos(math.radians(2.0)), 1e-3
-    clusters = []                                        # [ (nx,ny,nz,d), [tris] ]
-    for t in tris:
-        nx, ny, nz, d = plane(t)
-        for cl in clusters:
-            mx, my, mz, md = cl[0]
-            if nx * mx + ny * my + nz * mz >= cos_thr and abs(d - md) < dtol:  # same plane (& winding)
-                cl[1].append(t); break
-        else:
-            clusters.append([(nx, ny, nz, d), [t]])
-    faces = []
-    for _pl, ts in clusters:
-        cnt = defaultdict(int)
-        for t in ts:
-            for e in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
-                cnt[frozenset(e)] += 1
-        nxt = {}                                          # directed boundary edges (used once)
-        for t in ts:
-            for e in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
-                if cnt[frozenset(e)] == 1:
-                    nxt[e[0]] = e[1]
-        while nxt:                                        # chain boundary edges into loop(s)
-            s = next(iter(nxt)); loop = [s]; c = nxt.pop(s)
-            while c != s and c in nxt:
-                loop.append(c); c = nxt.pop(c)
-            if len(loop) >= 3:
-                faces.append(loop)
-    return faces
+def _delaunay_region(boundary, interior, zi):
+    """Delaunay-triangulate boundary + interior points in xy; z from column `zi` (3=z_top, 2=z_bottom).
+    Triangles whose centroid falls OUTSIDE the boundary polygon are dropped (concave outlines). Interior
+    lonely points / open lines become Steiner points wired to the border by the Delaunay net -> a shaped
+    ceiling (ridge, peak, valley). Returns (verts3, tris). ponytail: unconstrained Delaunay — a drawn
+    interior LINE is honoured as its vertices, not a forced edge; add the `triangle` CDT lib if a segment
+    must be guaranteed. Needs scipy (already a pipeline dep)."""
+    import numpy as np
+    from scipy.spatial import Delaunay
+    pts = list(boundary) + list(interior)
+    xy = np.array([[p[0], p[1]] for p in pts], np.float64)
+    verts3 = [(p[0], p[1], p[zi]) for p in pts]
+    tris = []
+    for a, b, c in Delaunay(xy).simplices:
+        cx = (xy[a, 0] + xy[b, 0] + xy[c, 0]) / 3.0
+        cy = (xy[a, 1] + xy[b, 1] + xy[c, 1]) / 3.0
+        if _point_in_poly(cx, cy, boundary):
+            tris.append((int(a), int(b), int(c)))
+    return verts3, tris
 
 
 def extrude_obj(shapes):
@@ -222,24 +182,25 @@ def extrude_obj(shapes):
     def ccw(pts):
         return pts if _signed_area(pts) >= 0 else list(reversed(pts))
 
-    def emit_faces(name, ring, verts3, tris, reverse):
-        """Merge coplanar tris -> emit one face per planar facet. Single facet keeps the bare `name`;
-        multiple facets get `name_k`. reverse flips winding (ceilings face down)."""
-        faces = _merge_coplanar(tris, verts3)
-        for k, loop in enumerate(faces):
-            gi = [ring[i] for i in loop]
-            if reverse:
-                gi = gi[::-1]
-            F.append((name if len(faces) == 1 else f"{name}_{k + 1}", gi))
-
     def emit_poly(name, pts3, reverse):
+        """Coplanar polygon -> ONE face; non-planar -> per-triangle. The GUI's merge_coplanar_groups
+        fuses coplanar triangles/facets into single layers at load, so sketch2d stays dumb here."""
+        zs = [p[2] for p in pts3]
         ring = [vert(p[0], p[1], p[2]) for p in pts3]
-        emit_faces(name, ring, pts3, _triangulate_xy(pts3), reverse)
+        if max(zs) - min(zs) < 1e-6:
+            F.append((name, ring[::-1] if reverse else ring))
+        else:
+            for k, (a, b, c) in enumerate(_triangulate_xy(pts3)):
+                tri = [ring[a], ring[c], ring[b]] if reverse else [ring[a], ring[b], ring[c]]
+                F.append((f"{name}_{k + 1}", tri))
 
     multi = len(outers) > 1
     for oi, O in enumerate(outers):
         ob = ccw(O["pts"])
         subs = [ccw(s["pts"]) for s in closed if s is not O and _poly_inside(s["pts"], O["pts"])]
+        # open shapes inside this outer = interior ceiling controls (lonely points / open lines)
+        interior = [p for s in shapes if not s["closed"] and _poly_inside(s["pts"], O["pts"])
+                    for p in s["pts"]]
         osfx = f"_{oi}" if multi else ""
 
         emit_poly(f"floor{osfx}", [(p[0], p[1], p[2]) for p in ob], reverse=False)   # full floor @ z_b
@@ -259,10 +220,16 @@ def extrude_obj(shapes):
                     rxy.append((p[0], p[1])); rz.append(p[3])    # inner ring at the SUB height -> slope
                 ends.append(len(rxy))
             av = [vert(rxy[i][0], rxy[i][1], rz[i]) for i in range(len(rxy))]
-            v3 = [(rxy[i][0], rxy[i][1], rz[i]) for i in range(len(rxy))]
-            emit_faces(f"ceiling{osfx}", av, v3, _tri_with_holes(rxy, ends), reverse=True)  # merged facets
+            for k, (a, b, c) in enumerate(_tri_with_holes(rxy, ends)):   # gui merges coplanar facets
+                F.append((f"ceiling{osfx}_{k + 1}", [av[a], av[c], av[b]]))   # reversed -> faces down
             for sj, sb in enumerate(subs):                       # flat cap over each inner region
                 emit_poly(f"ceiling_region{osfx}_r{sj + 1}", [(p[0], p[1], p[3]) for p in sb], reverse=True)
+            # ponytail: interior ceiling points ignored when sub-regions present — sub annulus owns the roof
+        elif interior:
+            cv, ct = _delaunay_region(ob, interior, 3)           # ceiling shaped by interior pts/lines
+            cverts = [vert(x, y, z) for x, y, z in cv]
+            for k, (a, b, c) in enumerate(ct):
+                F.append((f"ceiling{osfx}_{k + 1}", [cverts[a], cverts[c], cverts[b]]))   # faces down
         else:
             emit_poly(f"ceiling{osfx}", [(p[0], p[1], p[3]) for p in ob], reverse=True)
 
@@ -283,7 +250,7 @@ class _Canvas(QWidget):
         self.shapes = []             # [{"pts": [[x,y,z], ...], "closed": bool}]
         self.sel = None              # (shape_idx, pt_idx) or None
         self._undo = []              # snapshots (shapes, sel), pushed BEFORE each mutation
-        self._drag = None            # ("pt", si, pi) | ("shape", si) | ("pan",) | None
+        self._drag = None            # ("pt", si, idx) | ("shape", si) | ("pan",) | None
         self._last = None            # last mouse pos (screen)
         self.scale = 40.0            # px per metre
         self.off = QPointF(260.0, 360.0)   # world origin on screen
@@ -306,13 +273,10 @@ class _Canvas(QWidget):
     def _active(self):
         """Index of the open (unclosed) shape to append to, else None."""
         for i in range(len(self.shapes) - 1, -1, -1):
-            if not self.shapes[i]["closed"]:
+            sh = self.shapes[i]
+            if not sh["closed"] and not sh.get("done"):      # finished interior lines are skipped
                 return i
         return None
-
-    def _ptlist(self, si, kind):
-        """The boundary ('pt') or interior ('int') point list of a shape."""
-        return self.shapes[si].setdefault("interior", []) if kind == "int" else self.shapes[si]["pts"]
 
     def dump_shapes(self):
         """JSON-able copy of the sketch (for the .json sidecar so it can be re-edited later)."""
@@ -337,19 +301,19 @@ class _Canvas(QWidget):
                 self._snap()
                 si, idx, zb, zt = hit                               # xy at the CLICK, z's from the edge
                 self.shapes[si]["pts"].insert(idx, [round(wx, 4), round(wy, 4), round(zb, 4), round(zt, 4)])
-                self.sel = (si, "pt", idx); self.selectionChanged.emit(); self.update()
+                self.sel = (si, idx); self.selectionChanged.emit(); self.update()
             return
         if b == Qt.MouseButton.RightButton and ctrl:                # remove nearest point
             hit = _nearest_point(self.shapes, wx, wy, tol)
             if hit:
                 self._snap()
-                si, kind, idx = hit
-                del self._ptlist(si, kind)[idx]
-                if kind == "pt" and len(self.shapes[si]["pts"]) < 2:  # no lonely boundary point left
+                si, idx = hit
+                del self.shapes[si]["pts"][idx]
+                if len(self.shapes[si]["pts"]) < 2:               # no lonely boundary point left
                     del self.shapes[si]
                 self.sel = None; self.selectionChanged.emit(); self.update()
             return
-        if b == Qt.MouseButton.LeftButton:                          # vertex drag / add / interior / shape
+        if b == Qt.MouseButton.LeftButton:                          # vertex drag / add point / shape drag
             hit = _nearest_point(self.shapes, wx, wy, tol)
             if hit:                                                 # on a point -> select + drag it
                 self.sel = hit; self._snap(); self._drag = ("pt",) + hit
@@ -357,7 +321,7 @@ class _Canvas(QWidget):
             elif self._active() is not None:                        # drawing an open shape -> append
                 self._snap(); si = self._active()
                 self.shapes[si]["pts"].append([round(wx, 4), round(wy, 4), 0.0, 0.0])
-                self.sel = (si, "pt", len(self.shapes[si]["pts"]) - 1); self.selectionChanged.emit()
+                self.sel = (si, len(self.shapes[si]["pts"]) - 1); self.selectionChanged.emit()
             else:
                 inside = next((si for si, sh in enumerate(self.shapes)
                                if sh["closed"] and _point_in_poly(wx, wy, sh["pts"])), None)
@@ -366,7 +330,7 @@ class _Canvas(QWidget):
                 else:                                               # start a new shape; LMB inside a
                     self._snap()                                    # closed one begins a nested sub-region
                     self.shapes.append({"pts": [[round(wx, 4), round(wy, 4), 0.0, 0.0]], "closed": False})
-                    self.sel = (len(self.shapes) - 1, "pt", 0); self.selectionChanged.emit()
+                    self.sel = (len(self.shapes) - 1, 0); self.selectionChanged.emit()
             self.update(); return
         if b == Qt.MouseButton.MiddleButton:                        # pan
             self._drag = ("pan",)
@@ -380,13 +344,13 @@ class _Canvas(QWidget):
         dx = (p.x() - self._last.x()) / self.scale
         dy = -(p.y() - self._last.y()) / self.scale
         if self._drag[0] == "pt":
-            _, si, kind, idx = self._drag
-            pt = self._ptlist(si, kind)[idx]
+            _, si, idx = self._drag
+            pt = self.shapes[si]["pts"][idx]
             pt[0] = round(pt[0] + dx, 4); pt[1] = round(pt[1] + dy, 4)
             self.selectionChanged.emit()
         elif self._drag[0] == "shape":
             sh = self.shapes[self._drag[1]]
-            for pt in sh["pts"] + sh.get("interior", []):           # move boundary + interior together
+            for pt in sh["pts"]:                                    # move the whole shape in xy
                 pt[0] = round(pt[0] + dx, 4); pt[1] = round(pt[1] + dy, 4)
         self._last = p; self.update()
 
@@ -421,7 +385,8 @@ class _Canvas(QWidget):
             txt = extrude_obj(self.shapes)
         except ImportError:                              # sub-regions need earcut
             QMessageBox.warning(self, "Missing dependency",
-                                "Nested sub-regions need mapbox_earcut:\n\n    pip install mapbox_earcut")
+                                "Nested sub-regions / interior ceilings need mapbox_earcut + scipy:\n\n"
+                                "    pip install mapbox_earcut scipy")
             return
         except Exception as ex:                          # surface any geometry error instead of silence
             QMessageBox.warning(self, "Extrude failed", f"{type(ex).__name__}: {ex}")
@@ -444,6 +409,11 @@ class _Canvas(QWidget):
             if si is not None and len(self.shapes[si]["pts"]) > 2:
                 self._snap(); self.shapes[si]["closed"] = True; self.update()
             return
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):       # finish open line -> interior ceiling ctrl
+            si = self._active()
+            if si is not None and self.shapes[si]["pts"]:
+                self._snap(); self.shapes[si]["done"] = True; self.update()
+            return
         if ctrl and e.key() == Qt.Key.Key_Z:                        # undo
             if self._undo:
                 self.shapes, self.sel = self._undo.pop()
@@ -461,22 +431,17 @@ class _Canvas(QWidget):
         qp.drawLine(int(o.x()), 0, int(o.x()), self.height())
         for si, sh in enumerate(self.shapes):
             sp = [self._w2s(p[0], p[1]) for p in sh["pts"]]
-            qp.setPen(QPen(QColor("#7c5cfc"), 2))
+            col = QColor("#7c5cfc") if sh["closed"] else QColor("#e0a54f")  # boundary vs interior line
+            qp.setPen(QPen(col, 2))
             for i in range(len(sp) - 1):
                 qp.drawLine(sp[i], sp[i + 1])
             if sh["closed"] and len(sp) > 1:
                 qp.drawLine(sp[-1], sp[0])
             for pi, s in enumerate(sp):
-                selp = self.sel == (si, "pt", pi)
+                selp = self.sel == (si, pi)
                 qp.setPen(Qt.PenStyle.NoPen)
                 qp.setBrush(QBrush(QColor("#0ff091") if selp else QColor("#cfd8dc")))
                 r = 5 if selp else 4
-                qp.drawEllipse(s, r, r)
-            for ii, p in enumerate(sh.get("interior", ())):        # interior height points (orange)
-                selp = self.sel == (si, "int", ii)
-                qp.setPen(Qt.PenStyle.NoPen)
-                qp.setBrush(QBrush(QColor("#0ff091") if selp else QColor("#ff9f43")))
-                s = self._w2s(p[0], p[1]); r = 5 if selp else 4
                 qp.drawEllipse(s, r, r)
 
 
@@ -495,9 +460,10 @@ class SketchWindow(QWidget):
         form.addRow("x (m)", self._sx); form.addRow("y (m)", self._sy)
         form.addRow("z bottom", self._szb); form.addRow("z top", self._szt)
         panel = QWidget(); panel.setLayout(form); panel.setFixedWidth(160)
-        hint = QLabel("LMB add/drag pt · LMB inside closed = draw inner sub-region · Alt+LMB drag shape · "
-                      "Ctrl+LMB insert on edge · Ctrl+RMB del · Ctrl+K close · Ctrl+Z undo · "
-                      "RMB extrude/update · MMB pan · wheel zoom")
+        hint = QLabel("LMB add/drag pt · LMB inside closed = draw interior · Enter finish line (interior "
+                      "ceiling: raise z top for a ridge/peak) · Ctrl+K close = sub-region · Alt+LMB drag "
+                      "shape · Ctrl+LMB insert on edge · Ctrl+RMB del · Ctrl+Z undo · RMB extrude/update · "
+                      "MMB pan · wheel zoom")
         hint.setWordWrap(True); hint.setStyleSheet("color:#8a94a6;font-size:11px;")
         side = QVBoxLayout()
         side.addWidget(QLabel("Selected point")); side.addWidget(panel)
@@ -518,7 +484,7 @@ class SketchWindow(QWidget):
         for s in (self._sx, self._sy, self._szb, self._szt):
             s.blockSignals(True); s.setEnabled(on)
         if on:
-            p = self.canvas._ptlist(sel[0], sel[1])[sel[2]]
+            p = self.canvas.shapes[sel[0]]["pts"][sel[1]]
             self._sx.setValue(p[0]); self._sy.setValue(p[1])
             self._szb.setValue(p[2]); self._szt.setValue(p[3])
         for s in (self._sx, self._sy, self._szb, self._szt):
@@ -528,8 +494,8 @@ class SketchWindow(QWidget):
         sel = self.canvas.sel
         if sel is None:
             return
-        self.canvas._ptlist(sel[0], sel[1])[sel[2]] = [self._sx.value(), self._sy.value(),
-                                                       self._szb.value(), self._szt.value()]
+        self.canvas.shapes[sel[0]]["pts"][sel[1]] = [self._sx.value(), self._sy.value(),
+                                                     self._szb.value(), self._szt.value()]
         self.canvas.update()
 
 
@@ -537,7 +503,7 @@ def _selfcheck():
     sq = [[0, 0, 0, 3], [2, 0, 0, 3], [2, 2, 0, 3], [0, 2, 0, 3]]   # [x,y,zb,zt]
     assert _point_in_poly(1, 1, sq) and not _point_in_poly(3, 1, sq), "point-in-poly"
     shapes = [{"pts": sq, "closed": True}]
-    assert _nearest_point(shapes, 0.05, 0.05, 0.2) == (0, "pt", 0), "nearest hit"
+    assert _nearest_point(shapes, 0.05, 0.05, 0.2) == (0, 0), "nearest hit"
     assert _nearest_point(shapes, 5, 5, 0.2) is None, "nearest miss"
     assert _poly_inside([[.5, .5], [1.5, .5], [1.5, 1.5], [.5, 1.5]], sq), "nesting: inside"
     assert not _poly_inside([[5, 5], [6, 5], [6, 6]], sq), "nesting: outside"
@@ -558,6 +524,13 @@ def _selfcheck():
         assert "g step" not in o2 and "g ceiling_region" in o2 and " 5\n" in o2, "sub = sloped, no column"
     except ImportError:
         print("(mapbox_earcut not installed -> sub-region test skipped)")
+    try:                                                # interior ceiling point needs scipy
+        from scipy.spatial import Delaunay  # noqa: F401
+        peak = {"pts": [[1, 1, 0, 5]], "closed": False, "done": True}   # lonely interior pt, high z_top
+        o3 = extrude_obj([{"pts": sq, "closed": True}, peak])
+        assert o3.count("g ceiling") > 1 and " 5\n" in o3, "interior point shapes the ceiling"
+    except ImportError:
+        print("(scipy not installed -> interior-ceiling test skipped)")
     print("sketch2d self-check OK")
 
 

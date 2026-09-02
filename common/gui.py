@@ -364,6 +364,21 @@ def parse_obj(path: str):
     return verts, groups
 
 
+def write_obj(path, verts, groups):
+    """Write (verts, groups) back as a plain OBJ: one `v` per vertex, then `g name`
+    + triangle `f` (1-based) per group. Used to persist the coplanar-MERGED group set
+    so the solver reads the SAME layers the GUI shows (main3D opens <layer>.fit per OBJ
+    group; a merged-away group would have no .fit -> crash)."""
+    with open(path, "w") as f:
+        f.write("# merged scene — written by gui.py (groups match GUI layers)\n")
+        for x, y, z in verts:
+            f.write(f"v {x:.6g} {y:.6g} {z:.6g}\n")
+        for g in groups:
+            f.write(f"g {g['name']}\n")
+            for a, b, c in np.asarray(g["tris"]):
+                f.write(f"f {a+1} {b+1} {c+1}\n")
+
+
 def face_normals(verts, tris):
     if len(tris) == 0:
         return np.zeros((0,3), np.float32)
@@ -6335,7 +6350,16 @@ class MainWindow(QMainWindow):
                       f"(by {shift}): {os.path.basename(shifted)}")
                 path = shifted
             verts, groups = parse_obj(path)
+            raw_n = len(groups)
             groups = merge_coplanar_groups(verts, groups)   # fuse per-triangle splits of a flat surface
+            if len(groups) != raw_n:
+                # the file's groups no longer match what the GUI shows/materials. Persist the merged
+                # set to a derived copy (never the user's original) so the solver reads the same layers
+                # — else main3D looks up a .fit for a merged-away group and crashes.
+                base0, ext0 = os.path.splitext(path)
+                merged_path = base0 + "_merged" + ext0
+                write_obj(merged_path, verts, groups)
+                path = merged_path
         except Exception as ex:
             QMessageBox.critical(self, "OBJ error", str(ex)); return
         self._obj_path = path
