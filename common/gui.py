@@ -5740,11 +5740,16 @@ class MainWindow(QMainWindow):
         """QtMultimedia player wiring (guarded — if unavailable, Convolve still writes the wav)."""
         self._player = None
         try:
-            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
         except Exception:
             return
         self._audio_out = QAudioOutput()
+        self._audio_out.setDevice(QMediaDevices.defaultAudioOutput())   # current default, not just startup's
         self._player = QMediaPlayer(); self._player.setAudioOutput(self._audio_out)
+        # QAudioOutput binds the default device once; it does NOT follow later changes. Re-point it at the
+        # current default whenever the device list changes -> BT headphones connected after launch get sound.
+        self._media_devices = QMediaDevices(self)
+        self._media_devices.audioOutputsChanged.connect(self._use_default_audio_out)
         self._player.positionChanged.connect(self._on_media_pos)
         self._player.durationChanged.connect(lambda d: self._aur_slider.setRange(0, d))
         self._player.playbackStateChanged.connect(self._on_media_state)
@@ -5880,6 +5885,15 @@ class MainWindow(QMainWindow):
         self._aur_blink.start(500)                                # blink until the user hits play
         self._sb.showMessage("Binaural ready — press play.")
 
+    def _use_default_audio_out(self):
+        """Point the player at the CURRENT system default output. QAudioOutput binds the default at
+        construction and doesn't follow later changes, so a BT headset paired after launch never gets
+        sound otherwise. Called on device-list changes and right before each play."""
+        if self._player is None:
+            return
+        from PySide6.QtMultimedia import QMediaDevices
+        self._audio_out.setDevice(QMediaDevices.defaultAudioOutput())
+
     def _toggle_play(self):
         if self._player is None:
             return
@@ -5888,6 +5902,7 @@ class MainWindow(QMainWindow):
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
         else:
+            self._use_default_audio_out()                        # follow whatever is default right now
             self._player.play()
 
     def _blink_play(self):
