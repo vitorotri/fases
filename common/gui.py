@@ -698,6 +698,9 @@ class GLViewer(QOpenGLWidget):
 
         # placement state
         self._mode      = self.MODE_NONE
+        self._props     = []          # props3d.Prop list (placed primitives/assets); drawn + exported
+        self._prop_sel  = -1          # selected prop index (panel highlight), or -1
+        self._ortho     = False       # orthographic top-down projection (plan view for placement)
         self._axis_lock = None          # 'X','Y','Z' or None
         self._place_pos = np.zeros(3, np.float32)  # frozen base position
         self._cursor_world = np.zeros(3, np.float32)
@@ -1252,7 +1255,11 @@ class GLViewer(QOpenGLWidget):
         asp = self.width() / max(self.height(), 1)
         near = 0.02 if fpv else max(self._dist * 0.001, 0.01)
         far  = 2000.0 if fpv else self._dist * 500.0
-        gluPerspective(70.0 if fpv else 45.0, asp, near, far)   # wider FOV inside a head
+        if self._ortho and not fpv:                             # orthographic plan/placement view
+            half = max(self._dist * 0.5, 1e-3)
+            glOrtho(-half * asp, half * asp, -half, half, -self._dist * 500.0, self._dist * 500.0)
+        else:
+            gluPerspective(70.0 if fpv else 45.0, asp, near, far)   # wider FOV inside a head
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         # Headlight: with the modelview at identity (eye space), position the
@@ -1310,6 +1317,7 @@ class GLViewer(QOpenGLWidget):
         self._draw_gizmo()   # replaces grid + world axes
         self._draw_axes()    # before the mesh so the wireframe paints on top (less z-fighting)
         self._draw_mesh()
+        self._draw_props()
         self._draw_slices()
         self._draw_anim()
         self._draw_particles()
@@ -1602,6 +1610,57 @@ class GLViewer(QOpenGLWidget):
             glDisable(GL_BLEND)
 
         glEnable(GL_LIGHTING)
+
+    _TOP_PITCH = 0.0    # ortho snap: pitch 0 / yaw 0 = look down +Z onto the XY plane (X right, Y up)
+
+    def set_ortho(self, on, top_down=True):
+        """Orthographic projection toggle. top_down also snaps the camera to a plan view (look down z)."""
+        self._ortho = bool(on)
+        if on and top_down:
+            self._free_x = self._free_y = self._roll = 0.0
+            self._pitch = self._TOP_PITCH; self._yaw = 0.0
+        self.update()
+
+    def _layer_color(self, name):
+        """Stable per-layer hue (PYTHONHASHSEED-independent) so props on the same layer share a color."""
+        import colorsys
+        h = (sum(ord(c) for c in name) * 47) % 360
+        return colorsys.hsv_to_rgb(h / 360.0, 0.45, 0.95)
+
+    def _draw_props(self):
+        """Filled + wire pass for placed props (props3d.Prop). Grouped by layer color; selected prop
+        brighter with a thicker wire. ponytail: world() re-bakes each frame — fine for a few props,
+        cache verts if a scene ever holds hundreds."""
+        if not self._props:
+            return
+        glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE)
+        glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE)
+        for i, p in enumerate(self._props):
+            verts, tris = p.world()
+            sel = (i == self._prop_sel)
+            r, g, b = self._layer_color(p.layer)
+            glColor4f(r, g, b, 1.0 if sel else 0.9)
+            glBegin(GL_TRIANGLES)
+            for a, bb, c in tris:
+                glVertex3f(*verts[a]); glVertex3f(*verts[bb]); glVertex3f(*verts[c])
+            glEnd()
+            glColor4f(*WIRE_COLOR); glLineWidth(2.0 if sel else 1.0)
+            glBegin(GL_LINES)
+            for a, bb, c in tris:
+                for u, v in ((a, bb), (bb, c), (c, a)):
+                    glVertex3f(*verts[u]); glVertex3f(*verts[v])
+            glEnd()
+        glEnable(GL_LIGHTING)
+
+    def add_prop(self, prop):
+        self._props.append(prop); self._prop_sel = len(self._props) - 1; self.update()
+
+    def remove_prop(self, i):
+        if 0 <= i < len(self._props):
+            del self._props[i]; self._prop_sel = min(self._prop_sel, len(self._props) - 1); self.update()
+
+    def select_prop(self, i):
+        self._prop_sel = i if 0 <= i < len(self._props) else -1; self.update()
 
     def _draw_domain_box(self):
         """
@@ -2106,7 +2165,13 @@ class GLViewer(QOpenGLWidget):
         if True:
             if self._mouse_btn == Qt.MouseButton.LeftButton:
                 mods = e.modifiers()
-                if mods & Qt.KeyboardModifier.AltModifier:
+                if self._ortho:
+                    # Top-down plan view stays FIXED: LMB pans instead of orbiting (switch to
+                    # Perspective via RMB to rotate). Keeps the XY view locked for placement.
+                    sc = self._dist * 0.002
+                    self._pan[0] += dx * sc
+                    self._pan[1] -= dy * sc
+                elif mods & Qt.KeyboardModifier.AltModifier:
                     # Free tumble: hold Alt while dragging with LMB.
                     # This deliberately does NOT clamp, so you can inspect the
                     # room from any orientation, including over/under the ceiling.
@@ -2363,6 +2428,7 @@ class GLViewer(QOpenGLWidget):
         th = m.addAction("Light scene" if not SCENE_LIGHT_MODE else "Dark scene")
         dh = m.addAction("Exit dollhouse view" if getattr(self, "_dollhouse", False)
                          else "Dollhouse view")
+        oo = m.addAction("Perspective view" if self._ortho else "Top-down (ortho) view")
         m.addSeparator()
         ev = m.addAction("🎧︎  Enter receiver view")
         chosen = m.exec(gpos)
@@ -2374,6 +2440,8 @@ class GLViewer(QOpenGLWidget):
         elif chosen is dh:
             self._dollhouse = not getattr(self, "_dollhouse", False)
             self.update()
+        elif chosen is oo:                                  # scene-wide plan view (props + src/rec later)
+            self.set_ortho(not self._ortho)
         elif chosen is ev:
             self.fpvRequested.emit()
 
@@ -4897,6 +4965,8 @@ class MainWindow(QMainWindow):
         if mode != "draw" and getattr(self, "_sketch", None) is not None:
             self._save_sketch_json()                   # persist the sketch, then hide (own window)
             self._sketch.hide()
+        if mode != "draw" and getattr(self, "_propswin", None) is not None:
+            self._save_props_json(); self._propswin.hide()
         if mode == "sim":
             self._panel_locked = False
             self._results.hide()
@@ -4914,6 +4984,7 @@ class MainWindow(QMainWindow):
             self._panel_locked = False
             self._results.hide()
             self._open_sketch()
+            self._open_props()
 
     def _open_sketch(self):
         """Open the 2D domain sketcher (its own top-level window). Created once, reused."""
@@ -4926,6 +4997,41 @@ class MainWindow(QMainWindow):
         if not self._sketch.canvas.shapes:         # empty -> restore this project's saved sketch
             self._load_sketch_json()
         self._sketch.show(); self._sketch.raise_(); self._sketch.activateWindow()
+
+    def _open_props(self):
+        """Props placement window (own top-level, reused), opened alongside the sketcher in Draw mode."""
+        self._load_props_json()
+        if getattr(self, "_propswin", None) is None:
+            self._propswin = PropsWindow(self._gl, self)
+        else:
+            self._propswin._refresh()
+        self._propswin.show(); self._propswin.raise_()
+
+    def _props_json_path(self):
+        return (os.path.join(self._proj_root, "input", "scene", "props.json")
+                if self._proj_root else None)
+
+    def _load_props_json(self):
+        import json, props3d
+        p = self._props_json_path()
+        if p and os.path.isfile(p) and not self._gl._props:   # don't clobber unsaved in-session props
+            try:
+                self._gl._props = [props3d.Prop.from_dict(d) for d in json.load(open(p))]
+                self._gl._prop_sel = -1; self._gl.update()
+            except Exception:
+                pass
+
+    def _save_props_json(self):
+        import json
+        p = self._props_json_path()
+        if not (p and self._gl._props):
+            return
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        try:
+            with open(p, "w") as f:
+                json.dump([pr.to_dict() for pr in self._gl._props], f)
+        except OSError:
+            pass
 
     def _sketch_json_path(self):
         return (os.path.join(self._proj_root, "input", "scene", "sketch.json")
@@ -4960,9 +5066,13 @@ class MainWindow(QMainWindow):
             self._sb.showMessage("Open a project first to save the sketched OBJ."); return
         d = os.path.join(self._proj_root, "input", "scene"); os.makedirs(d, exist_ok=True)
         path = os.path.join(d, "sketch.obj")
+        if self._gl._props:                        # bake placed props into the scene OBJ, grouped by layer
+            import props3d
+            nv = sum(1 for ln in obj_text.splitlines() if ln.startswith("v "))
+            obj_text = obj_text.rstrip("\n") + "\n" + props3d.export_groups(self._gl._props, start=nv + 1)
         with open(path, "w") as f:
             f.write(obj_text)
-        self._save_sketch_json()
+        self._save_sketch_json(); self._save_props_json()
         self._load_obj_path(path)
         self._sb.showMessage("Extruded → loaded. Switch to Simulation to view / name surfaces.")
 
@@ -7265,6 +7375,109 @@ class MainWindow(QMainWindow):
         self._sb.showMessage(f"Solver finished  (rc={rc})")
         # hide the floating bar shortly after completion
         QTimer.singleShot(1500, self._float_prog.hide)
+
+
+# ─────────────────────────────────────────────────────────────
+class PropsWindow(QWidget):
+    """Place primitives/assets as 3D scene props, assign a layer, transform them. Own top-level window
+    (opened in Draw mode, mirrors SketchWindow). Edits gl._props in place; gl draws + exports them."""
+    def __init__(self, gl, parent=None):
+        super().__init__(parent)
+        import props3d
+        from PySide6.QtWidgets import QComboBox
+        self.gl = gl; self.p3 = props3d
+        self.setWindowTitle("Props — place objects")
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.resize(340, 600)
+        root = QVBoxLayout(self)
+
+        root.addWidget(QLabel("Add primitive"))
+        grid = QGridLayout()
+        for k, name in enumerate(props3d.PRIMITIVES):
+            b = QPushButton(name); b.clicked.connect(lambda _=False, n=name: self._add("primitive", n))
+            grid.addWidget(b, k // 3, k % 3)
+        root.addLayout(grid)
+
+        assets = props3d.list_assets()
+        arow = QHBoxLayout()
+        self._asset = QComboBox(); self._asset.addItems(assets or ["(drop .obj in assets/)"])
+        self._asset.setEnabled(bool(assets))
+        ab = QPushButton("Add asset"); ab.setEnabled(bool(assets))
+        ab.clicked.connect(lambda: self._add("asset", self._asset.currentText()))
+        arow.addWidget(self._asset, 1); arow.addWidget(ab)
+        root.addLayout(arow)
+
+        root.addWidget(QLabel("Placed props"))
+        self._list = QListWidget(); self._list.currentRowChanged.connect(self._on_select)
+        root.addWidget(self._list, 1)
+        delb = QPushButton("Delete selected"); delb.clicked.connect(self._delete)
+        root.addWidget(delb)
+
+        form = QFormLayout()
+        self._pos = [self._spin(step=0.1) for _ in range(3)]
+        self._rot = [self._spin(step=5.0) for _ in range(3)]
+        self._scl = [self._spin(1.0, step=0.1) for _ in range(3)]
+        form.addRow("pos x y z", self._triple(self._pos))
+        form.addRow("rot x y z", self._triple(self._rot))
+        form.addRow("scale x y z", self._triple(self._scl))
+        self._layer = QLineEdit(props3d.DEFAULT_LAYER)
+        form.addRow("layer", self._layer)
+        root.addLayout(form)
+        for s in self._pos + self._rot + self._scl:
+            s.valueChanged.connect(self._apply)
+        self._layer.editingFinished.connect(self._apply)
+        self._refresh()
+
+    def _spin(self, val=0.0, step=0.1):
+        s = QDoubleSpinBox(); s.setRange(-1e4, 1e4); s.setDecimals(3)
+        s.setSingleStep(step); s.setValue(val); s.setFixedWidth(78); return s
+
+    def _triple(self, spins):
+        w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
+        for s in spins:
+            h.addWidget(s)
+        return w
+
+    def _add(self, kind, source):
+        if kind == "primitive" and source not in self.p3.PRIMITIVES:
+            return
+        layer = self._layer.text().strip() or self.p3.DEFAULT_LAYER
+        self.gl.add_prop(self.p3.Prop(kind, source, layer=layer))
+        self._refresh(); self._list.setCurrentRow(len(self.gl._props) - 1)
+
+    def _refresh(self):
+        self._list.blockSignals(True); self._list.clear()
+        for p in self.gl._props:
+            self._list.addItem(f"{p.source}  [{p.layer}]")
+        self._list.blockSignals(False)
+        self._list.setCurrentRow(self.gl._prop_sel)
+
+    def _on_select(self, row):
+        self.gl.select_prop(row)
+        if not (0 <= row < len(self.gl._props)):
+            return
+        p = self.gl._props[row]
+        for grp, vals in ((self._pos, p.pos), (self._rot, p.rot), (self._scl, p.scale)):
+            for s, v in zip(grp, vals):
+                s.blockSignals(True); s.setValue(float(v)); s.blockSignals(False)
+        self._layer.blockSignals(True); self._layer.setText(p.layer); self._layer.blockSignals(False)
+
+    def _apply(self, *_):
+        row = self._list.currentRow()
+        if not (0 <= row < len(self.gl._props)):
+            return
+        p = self.gl._props[row]
+        p.pos = [s.value() for s in self._pos]
+        p.rot = [s.value() for s in self._rot]
+        p.scale = [s.value() for s in self._scl]
+        p.layer = self._layer.text().strip() or self.p3.DEFAULT_LAYER
+        self._list.item(row).setText(f"{p.source}  [{p.layer}]")
+        self.gl.update()
+
+    def _delete(self):
+        row = self._list.currentRow()
+        if 0 <= row < len(self.gl._props):
+            self.gl.remove_prop(row); self._refresh()
 
 
 # ─────────────────────────────────────────────────────────────
