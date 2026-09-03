@@ -170,8 +170,133 @@ def dummy(head_r=0.12, torso_r=0.16, torso_h=0.7, shoulder=1.3):
     return _merge([(tv, tt), (hv, ht)])
 
 
-PRIMITIVES = {"plane": plane, "box": box, "cylinder": cylinder,
-              "sphere": sphere, "dodecahedron": dodecahedron, "dummy": dummy}
+def tetrahedron(r=0.4, h=0.7):
+    """3-sided pyramid: equilateral triangular base on z=0 + apex up. Closed (4 faces)."""
+    base = [(r * math.cos(math.radians(90 + 120 * k)), r * math.sin(math.radians(90 + 120 * k)), 0.0)
+            for k in range(3)]
+    v = base + [(0.0, 0.0, h)]                                        # 3 base verts + apex(3)
+    t = [(0, 1, 3), (1, 2, 3), (2, 0, 3), (0, 2, 1)]                 # 3 sides + base (facing -z)
+    return v, t
+
+
+def cone(r=0.4, h=0.8, n=24):
+    """Z-axis cone, base on z=0, apex up. Closed. (Internal helper; also the soundbox driver.)"""
+    v = [(r * math.cos(2 * math.pi * i / n), r * math.sin(2 * math.pi * i / n), 0.0) for i in range(n)]
+    apex = len(v); v.append((0.0, 0.0, h))
+    cb = len(v); v.append((0.0, 0.0, 0.0))
+    t = []
+    for i in range(n):
+        i1 = (i + 1) % n
+        t.append((i, i1, apex)); t.append((cb, i1, i))
+    return v, t
+
+
+def _box_at(w, d, h, pos):
+    v, t = box(w, d, h)
+    return bake(v, pos=pos), t
+
+
+def _open_cone(r, h, n):
+    """Cone with the wide end OPEN (sides only, no rim cap) — a speaker cone you look INTO. Base ring
+    on z=0, apex at z=h."""
+    v = [(r * math.cos(2 * math.pi * i / n), r * math.sin(2 * math.pi * i / n), 0.0) for i in range(n)]
+    apex = len(v); v.append((0.0, 0.0, h))
+    return v, [(i, (i + 1) % n, apex) for i in range(n)]
+
+
+def chair(w=0.45, d=0.45, seat_h=0.45, back_h=0.45, th=0.03):
+    """SIMPLIFIED chair for acoustics: seat slab + backrest only (no legs). Sits on z=0."""
+    return _merge([_box_at(w, d, th, (0, 0, seat_h - th / 2.0)),                        # seat
+                   _box_at(w, th, back_h, (0, -d / 2.0 + th / 2.0, seat_h + back_h / 2.0))])  # back
+
+
+def sofa(w=1.9, d=0.9, seat_h=0.43, back_h=0.45, back_t=0.15, arm=0.2, arm_h=0.22):
+    """Simplified ergonomic 2-3 seat sofa: seat block (top ~0.43 m) + backrest (top ~0.88 m) + 2 arms
+    (top ~0.65 m). Sits on z=0."""
+    parts = [_box_at(w, d, seat_h, (0, 0, seat_h / 2.0)),                                   # seat base
+             _box_at(w, back_t, back_h, (0, -d / 2.0 + back_t / 2.0, seat_h + back_h / 2.0))]  # backrest
+    for sx in (-1, 1):                                                                      # arms
+        parts.append(_box_at(arm, d, arm_h, (sx * (w / 2.0 - arm / 2.0), 0, seat_h + arm_h / 2.0)))
+    return _merge(parts)
+
+
+def _ring_fill(inner, outer):
+    """Triangulate the annulus between two angle-sorted closed loops (lists of (angle,(x,y,z))) by a
+    two-pointer merge on angle -> no gaps even when the loops have different vertex counts. inner verts
+    first, then outer."""
+    verts = [p for _, p in inner] + [p for _, p in outer]
+    ni, no = len(inner), len(outer)
+    tris, i, j = [], 0, 0
+    for _ in range(ni + no):
+        a_nxt = inner[(i + 1) % ni][0] + 2 * math.pi * ((i + 1) // ni)
+        b_nxt = outer[(j + 1) % no][0] + 2 * math.pi * ((j + 1) // no)
+        if i < ni and (j >= no or a_nxt <= b_nxt):
+            tris.append((i % ni, ni + j % no, (i + 1) % ni)); i += 1
+        else:
+            tris.append((i % ni, ni + j % no, ni + (j + 1) % no)); j += 1
+    return verts, tris
+
+
+def _annulus(w, h, r, cz, y, n=24):
+    """Front baffle: rectangle (w x h, centered in x,z) MINUS a circle (radius r at (0,cz)), at plane y.
+    The 4 rectangle corners are inserted into the outer loop so the face is gap-free at the corners."""
+    hw, hh = w / 2.0, h / 2.0
+    inner = [(2 * math.pi * i / n, (r * math.cos(2 * math.pi * i / n), y, cz + r * math.sin(2 * math.pi * i / n)))
+             for i in range(n)]
+    outer = []
+    for i in range(n):
+        th = 2 * math.pi * i / n; cx, cs = math.cos(th), math.sin(th)
+        ts = ([(hw if cx > 0 else -hw) / cx] if abs(cx) > 1e-9 else [])
+        ts += ([((hh - cz) if cs > 0 else (-hh - cz)) / cs] if abs(cs) > 1e-9 else [])
+        t = min(tt for tt in ts if tt > 0)
+        outer.append((th, (t * cx, y, cz + t * cs)))
+    for cxr, czr in ((hw, hh), (-hw, hh), (-hw, -hh), (hw, -hh)):   # exact corners -> no corner gaps
+        outer.append((math.atan2(czr - cz, cxr) % (2 * math.pi), (cxr, y, czr)))
+    outer.sort(key=lambda e: e[0])
+    return _ring_fill(inner, outer)
+
+
+def soundbox(w=0.4, d=0.35, h=0.6, driver_r=0.12, driver_depth=0.14, n=24):
+    """Loudspeaker cabinet: box with the front (+y) baffle opened by a circular hole (gap-free annulus,
+    corners included), a driver cone recessed INWARD through it (concave cone visible from the front).
+    Sits on z=0. Built centered, then lifted onto the floor."""
+    hh, yf = h / 2.0, d / 2.0
+    dz = h * 0.1                                                    # driver center height (box-centered)
+    bv, bt = box(w, d, h)
+    open_box = (bv, [tri for tri in bt if tri not in ((2, 3, 7), (2, 7, 6))])   # drop solid +y face
+    baffle = _annulus(w, h, driver_r, dz, yf, n)                   # front face minus driver hole
+    cv, ct = _open_cone(driver_r, driver_depth, n)                 # OPEN mouth -> you see into the cone
+    driver = (bake(cv, pos=(0, yf, dz), rot=(90, 0, 0)), ct)       # apex INWARD (-y): concave, visible
+    cap_frac = 0.5                                                 # depth fraction from the mouth
+    cap_r = driver_r * (1.0 - cap_frac)                            # = cone radius there -> disc sits FLUSH
+    capv, capt = cylinder(cap_r, driver_r * 0.06, n)              # dustcap caps the cone cross-section
+    cap = (bake(capv, pos=(0, yf - driver_depth * cap_frac, dz), rot=(90, 0, 0)), capt)
+    v, t = _merge([open_box, baffle, driver, cap])
+    return bake(v, pos=(0, 0, hh)), t                              # sit on the floor
+
+
+def skyline(N=7, cell=0.05, step=0.02, base=0.02):
+    """2D skyline diffuser from the 1D Schroeder QR sequence with ROWS SHIFTED: qr[k] = (k^2 mod N),
+    height(i,j) = qr[(i+j) mod N] — each row is the 1D QRD cyclically shifted by j (diagonal shift),
+    NOT the symmetric 2D (i^2+j^2) form. Shorter columns (smaller step). Sits on z=0."""
+    qr = [(k * k) % N for k in range(N)]
+    W = N * cell
+    parts = [_box_at(W, W, base, (0, 0, base / 2.0))]
+    for i in range(N):
+        for j in range(N):
+            res = qr[(i + j) % N]
+            if res == 0:
+                continue                                           # zero-depth well = just the base plate
+            hgt = base + step * res
+            x = -W / 2.0 + cell * (i + 0.5); y = -W / 2.0 + cell * (j + 0.5)
+            parts.append(_box_at(cell * 0.96, cell * 0.96, hgt, (x, y, hgt / 2.0)))
+    v, t = _merge(parts)
+    return bake(v, rot=(0, 90, 0)), t                              # start rotated 90 about y
+
+
+PRIMITIVES = {"plane": plane, "box": box, "cylinder": cylinder, "tetrahedron": tetrahedron,
+              "sphere": sphere, "dodecahedron": dodecahedron, "dummy": dummy,
+              "chair": chair, "sofa": sofa, "soundbox": soundbox, "skyline": skyline}
 
 
 # ── furniture / dummy assets (simplified OBJ, eyechecked once) ─────────────────────────────────
@@ -339,6 +464,19 @@ def _selfcheck():
     # feature edges: box shows its 12 cube edges (not quad diagonals), plane shows its 4-edge outline
     assert len(feature_edges(*box())) == 12, "box feature edges = 12 (no triangulation)"
     assert len(feature_edges(*plane())) == 4, "plane feature edges = 4 (outline only)"
+
+    # new props: tetra closed; composites valid (nonempty, in-range indices); cone NOT a public prop
+    v, t = tetrahedron(); assert len(v) == 4 and _euler_closed(v, t), "3-sided pyramid closed"
+    for name in ("chair", "sofa", "soundbox", "skyline"):
+        v, t = PRIMITIVES[name]()
+        assert v and t and all(0 <= i < len(v) for tri in t for i in tri), f"{name} valid"
+    assert "cone" not in PRIMITIVES, "cone stays an internal helper (soundbox driver), not a prop"
+
+    # soundbox baffle must be GAP-FREE (corners covered): its area == rectangle - driver circle
+    bv, bt = _annulus(0.4, 0.6, 0.12, 0.06, 0.0)
+    area = sum(abs((bv[b][0] - bv[a][0]) * (bv[c][2] - bv[a][2])
+                   - (bv[c][0] - bv[a][0]) * (bv[b][2] - bv[a][2])) * 0.5 for a, b, c in bt)
+    assert abs(area - (0.4 * 0.6 - math.pi * 0.12 ** 2)) < 0.01 * 0.4 * 0.6, "baffle has corner gaps"
 
     # bake: identity is a no-op; 90deg about Z sends +x -> +y; scale scales; translate offsets
     assert bake([(1, 2, 3)])[0] == (1.0, 2.0, 3.0), "identity bake"
