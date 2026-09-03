@@ -1338,6 +1338,8 @@ class GLViewer(QOpenGLWidget):
         elif self._drag_kind is not None and self._drag_idx >= 0:
             # show the same axis guide + coordinate readout while moving a point
             self._draw_drag_guide()
+        elif self._xform is not None:
+            self._draw_xform_guide()               # crosshair + locked-axis line, like the drag guide
         self._draw_hud()
         # origin marker + source/receiver glyphs, drawn last as a QPainter overlay
         gp = QPainter(self)
@@ -1346,6 +1348,36 @@ class GLViewer(QOpenGLWidget):
             self._paint_point_glyphs(gp)
         self._paint_colorbar(gp)
         gp.end()
+
+    def _prop_center_world(self, xf):
+        pr = self._props[xf["idx"]]; c = pr.center()
+        return [pr.pos[0] + c[0], pr.pos[1] + c[1], pr.pos[2] + c[2]]
+
+    def _draw_xform_guide(self):
+        """Crosshair at the prop center + a locked-axis line, mirroring _draw_drag_guide so a prop
+        transform and a source/receiver drag look/feel the same."""
+        xf = self._xform
+        if xf is None or not (0 <= xf["idx"] < len(self._props)):
+            return
+        p = self._prop_center_world(xf)
+        glDisable(GL_LIGHTING)
+        col = (1.0, 1.0, 1.0) if xf["axis"] is None else AXIS_COLORS[xf["axis"]]
+        glColor4f(col[0], col[1], col[2], 1.0); glLineWidth(1.5)
+        d = self._dist * 0.04
+        glBegin(GL_LINES)
+        glVertex3f(p[0]-d, p[1], p[2]); glVertex3f(p[0]+d, p[1], p[2])
+        glVertex3f(p[0], p[1]-d, p[2]); glVertex3f(p[0], p[1]+d, p[2])
+        glVertex3f(p[0], p[1], p[2]-d); glVertex3f(p[0], p[1], p[2]+d)
+        glEnd()
+        if xf["axis"]:
+            ext = self._dist * 1.5
+            ax = {'X': (1, 0, 0), 'Y': (0, 1, 0), 'Z': (0, 0, 1)}[xf["axis"]]
+            glLineWidth(2.0)
+            glBegin(GL_LINES)
+            glVertex3f(p[0]-ax[0]*ext, p[1]-ax[1]*ext, p[2]-ax[2]*ext)
+            glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
+            glEnd()
+        glEnable(GL_LIGHTING)
 
     def _paint_colorbar(self, p):
         """Vertical LUT scale bar on the middle-right edge while a colour/greys animation runs,
@@ -1704,6 +1736,16 @@ class GLViewer(QOpenGLWidget):
                        "pos": list(p.pos), "rot": list(p.rot), "scale": list(p.scale)}
         self.update()
         return True
+
+    def _xform_reanchor(self):
+        """Re-snapshot the base transform + mouse anchor to the CURRENT state, so toggling an axis
+        lock mid-drag continues from what the user sees (no jump)."""
+        xf = self._xform
+        if xf is None or not (0 <= xf["idx"] < len(self._props)):
+            return
+        p = self._props[xf["idx"]]
+        xf["pos"], xf["rot"], xf["scale"] = list(p.pos), list(p.rot), list(p.scale)
+        xf["anchor"] = self.mapFromGlobal(QCursor.pos())
 
     def _xform_end(self, cancel):
         if self._xform is None:
@@ -2109,6 +2151,26 @@ class GLViewer(QOpenGLWidget):
     def _draw_hud(self):
         """Overlay text using QPainter on top of GL."""
         if self._mode == self.MODE_NONE:
+            # Modal prop transform: same top banner as a point drag (mode, locked axis, center coords).
+            if self._xform is not None and 0 <= self._xform["idx"] < len(self._props):
+                cw = self._prop_center_world(self._xform)
+                mode_str = {"p": "MOVE", "r": "ROTATE", "s": "SCALE"}[self._xform["mode"]] + " PROP"
+                axis_str = (f"  locked: {self._xform['axis']}" if self._xform["axis"]
+                            else "  (hold X / Y / Z to lock an axis)")
+                ijk = self._ijk_str(cw)
+                coord_str = (f"  center x={cw[0]:.3f}  y={cw[1]:.3f}  z={cw[2]:.3f} m"
+                             + (f"   [{ijk}]" if ijk else ""))
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                from PySide6.QtCore import QRect
+                painter.fillRect(QRect(0, 0, self.width(), 28), QColor(20, 25, 35, 210))
+                painter.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+                painter.setPen(QColor(PAL["accent"]))
+                painter.drawText(8, 18, f"● {mode_str}")
+                painter.setFont(QFont("Monospace", 10)); painter.setPen(QColor(PAL["text"]))
+                painter.drawText(150, 18, axis_str + coord_str)
+                painter.end()
+                return
             # While moving an existing point with G, show a top banner with the
             # live coordinates and the locked axis, mirroring placement.
             if self._drag_kind is not None and self._drag_idx >= 0:
@@ -2444,8 +2506,9 @@ class GLViewer(QOpenGLWidget):
                     self._xform_end(cancel=False); e.accept(); return
                 if key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):    # HELD (like placement/drag locks)
                     if not e.isAutoRepeat():
+                        self._xform_reanchor()                            # continue from here (no jump)
                         self._xform['axis'] = {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]
-                        self._xform_apply(self.mapFromGlobal(QCursor.pos()))
+                        self.update()
                     e.accept(); return
             if self._xform is None and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
                 if self._xform_start({Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]):
@@ -2492,8 +2555,9 @@ class GLViewer(QOpenGLWidget):
         key = e.key()
         # Releasing X/Y/Z during a modal prop transform -> back to free (held, like everywhere else).
         if self._xform is not None and key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
+            self._xform_reanchor()                                # continue from here (no jump)
             self._xform['axis'] = None
-            self._xform_apply(self.mapFromGlobal(QCursor.pos()))
+            self.update()
             e.accept(); return
         # Releasing X/Y/Z while dragging a point -> back to free movement.
         if self._drag_kind is not None and key in (
