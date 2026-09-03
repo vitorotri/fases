@@ -1652,9 +1652,8 @@ class GLViewer(QOpenGLWidget):
             glEnd()
             glColor4f(*WIRE_COLOR); glLineWidth(2.0 if sel else 1.0)
             glBegin(GL_LINES)
-            for a, bb, c in tris:
-                for u, v in ((a, bb), (bb, c), (c, a)):
-                    glVertex3f(*verts[u]); glVertex3f(*verts[v])
+            for u, v in p.edges():                # feature edges only -> no triangulation shown
+                glVertex3f(*verts[u]); glVertex3f(*verts[v])
             glEnd()
         glEnable(GL_LIGHTING)
 
