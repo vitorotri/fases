@@ -18,7 +18,7 @@ import math
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 from PySide6.QtGui import QPainter, QPen, QColor, QBrush
 from PySide6.QtWidgets import (QWidget, QDoubleSpinBox, QLabel, QVBoxLayout, QHBoxLayout, QFormLayout,
-                               QPushButton, QLineEdit)
+                               QGridLayout, QPushButton, QLineEdit, QScrollArea)
 
 HIT_PX = 10          # vertex pick radius, screen pixels
 EDGE_HIT_PX = 28     # edge pick radius for Ctrl+LMB insert (looser: no need to be near the edge)
@@ -955,7 +955,7 @@ class _Canvas(QWidget):
 class SketchWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Domain sketch — 2D")
+        self.setWindowTitle("Top-view domain sketch")
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(900, 620)
         self.canvas = _Canvas(self)
@@ -968,7 +968,7 @@ class SketchWindow(QWidget):
         form.addRow("z bottom", self._szb); form.addRow("z top", self._szt)
         panel = QWidget(); panel.setLayout(form); panel.setFixedWidth(160)
         hint = QLabel(
-            "<b>Free</b>: LMB add pt (snaps to grid) · drag pt to move · LMB inside closed = sub-region · "
+            "<b>Poly</b>: LMB add pt (snaps to grid) · drag pt to move · LMB inside closed = sub-region · "
             "Enter finish line = interior ceiling (raise z top for ridge/peak) · Ctrl+K close · "
             "Ctrl+LMB insert on edge · Ctrl+RMB delete pt<br>"
             "<b>Rect / Ellipse</b>: drag a box (unions into a boundary it overlaps)<br>"
@@ -980,32 +980,37 @@ class SketchWindow(QWidget):
             "type a layer name → 'Assign layer→edges' (walls sharing a name = one material layer)<br>"
             "Global: MMB pan · wheel zoom · Ctrl+Z undo · RMB = extrude / update OBJ")
         hint.setWordWrap(True); hint.setStyleSheet("color:#8a94a6;font-size:11px;")
-        # tool selector: Free (click polygon) / Rect / Ellipse (drag a bbox); rect/ellipse union into the
-        # boundary they overlap.
+        hint.setAlignment(Qt.AlignmentFlag.AlignJustify)          # wrap + justify the help text
+        # tool selector, laid out 4 x 2
         self._tool_btns = {}
-        trow = QHBoxLayout()
-        for label, tool in (("Free", "free"), ("Rect", "rect"), ("Ellipse", "ellipse"),
-                            ("Measure", "measure"), ("Select", "select"), ("Cut", "cut"),
-                            ("Shape", "shape"), ("Edge", "edge")):
+        tgrid = QGridLayout()
+        for k, (label, tool) in enumerate((("⍿ Poly", "free"), ("▭ Rect", "rect"), ("⬭ Ellipse", "ellipse"),
+                                           ("⬄ Measure", "measure"), ("≡ Select", "select"), ("✁ Cut", "cut"),
+                                           ("⬟ Shape", "shape"), ("㇎ Edge", "edge"))):
             b = QPushButton(label); b.setCheckable(True); b.setChecked(tool == "free")
-            b.setStyleSheet("QPushButton:checked{background:#7c5cfc;color:#1a1d23;font-weight:bold;}")
+            b.setStyleSheet("QPushButton:checked{background:#7c5cfc;color:#1a1d23;}")  # no bold -> no clip
             b.clicked.connect(lambda _=False, t=tool: self._set_tool(t))
-            trow.addWidget(b); self._tool_btns[tool] = b
-        self._applyz_btn = QPushButton("Apply z → selected pts")   # equalize heights over a Select box
+            tgrid.addWidget(b, k // 4, k % 4); self._tool_btns[tool] = b
+        self._applyz_btn = QPushButton("Apply z → pts")           # equalize heights over a Select box
         self._applyz_btn.clicked.connect(self._apply_z_sel)
         self._edge_layer = QLineEdit(); self._edge_layer.setPlaceholderText("layer name for edges")
-        self._edgelayer_btn = QPushButton("Assign layer → selected edges")
+        self._edgelayer_btn = QPushButton("Assign → edges")
         self._edgelayer_btn.clicked.connect(self._apply_edge_layer)
-        self._importdxf_btn = QPushButton("Import DXF…")           # architect room outline -> boundary
+        self._importdxf_btn = QPushButton("Import DXF…")          # architect room outline -> boundary
         self._importdxf_btn.clicked.connect(self._import_dxf)
+
+        def _left(w):                                             # natural width, left-aligned (not stretched)
+            hb = QHBoxLayout(); hb.setContentsMargins(0, 0, 0, 0); hb.addWidget(w); hb.addStretch(1); return hb
         side = QVBoxLayout()
-        side.addWidget(self._importdxf_btn)
-        side.addWidget(QLabel("Tool")); side.addLayout(trow)
+        side.addLayout(_left(self._importdxf_btn))
+        side.addWidget(QLabel("Tool")); side.addLayout(tgrid)
         side.addWidget(QLabel("Selected point")); side.addWidget(panel)
-        side.addWidget(self._applyz_btn)
+        side.addLayout(_left(self._applyz_btn))
         side.addWidget(QLabel("Edge layer (Edge tool)")); side.addWidget(self._edge_layer)
-        side.addWidget(self._edgelayer_btn)
-        side.addWidget(hint); side.addStretch(1)
+        side.addLayout(_left(self._edgelayer_btn))
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(hint)  # never clip the help
+        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        side.addWidget(scroll, 1)
         root = QHBoxLayout(self); root.addWidget(self.canvas, 1); root.addLayout(side)
         self._sync()
 

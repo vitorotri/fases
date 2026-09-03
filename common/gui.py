@@ -7780,7 +7780,7 @@ class PropsWindow(QWidget):
         import props3d
         from PySide6.QtWidgets import QComboBox
         self.gl = gl; self.p3 = props3d
-        self.setWindowTitle("Props — place objects")
+        self.setWindowTitle("Props - place 3D objects")
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(340, 600)
         root = QVBoxLayout(self)
@@ -7791,15 +7791,6 @@ class PropsWindow(QWidget):
             b = QPushButton(name); b.clicked.connect(lambda _=False, n=name: self._add("primitive", n))
             grid.addWidget(b, k // 3, k % 3)
         root.addLayout(grid)
-
-        assets = props3d.list_assets()
-        arow = QHBoxLayout()
-        self._asset = QComboBox(); self._asset.addItems(assets or ["(drop .obj in assets/)"])
-        self._asset.setEnabled(bool(assets))
-        ab = QPushButton("Add asset"); ab.setEnabled(bool(assets))
-        ab.clicked.connect(lambda: self._add("asset", self._asset.currentText()))
-        arow.addWidget(self._asset, 1); arow.addWidget(ab)
-        root.addLayout(arow)
 
         root.addWidget(QLabel("Placed props (Ctrl/Shift-click for multi-select)"))
         self._list = QListWidget(); self._list.currentRowChanged.connect(self._on_select)
