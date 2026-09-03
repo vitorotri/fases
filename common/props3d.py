@@ -209,16 +209,10 @@ def _open_cone(r, h, n):
     return v, [(i, (i + 1) % n, apex) for i in range(n)]
 
 
-def chair(w=0.45, d=0.45, seat_h=0.45, back_h=0.45, th=0.03):
-    """SIMPLIFIED chair for acoustics: seat slab + backrest only (no legs). Sits on z=0."""
+def seat(w=0.45, d=0.45, seat_h=0.45, back_h=0.40, th=0.03):
+    """SIMPLIFIED seat for acoustics: seat slab + backrest only (no legs). Sits on z=0."""
     return _merge([_box_at(w, d, th, (0, 0, seat_h - th / 2.0)),                        # seat
                    _box_at(w, th, back_h, (0, -d / 2.0 + th / 2.0, seat_h + back_h / 2.0))])  # back
-
-
-def bench(w=1.6, d=0.4, seat_h=0.45, back_h=0.30, th=0.03):
-    """Simplified bench: long thin seat slab + a short low back support. Sits on z=0."""
-    return _merge([_box_at(w, d, th, (0, 0, seat_h - th / 2.0)),                          # seat
-                   _box_at(w, th, back_h, (0, -d / 2.0 + th / 2.0, seat_h + back_h / 2.0))])  # short back
 
 
 def sofa(w=1.9, d=0.9, seat_h=0.43, back_h=0.45, back_t=0.15, arm=0.2, arm_h=0.22):
@@ -393,25 +387,12 @@ def fountain(r=0.6, basin_h=0.35, col_r=0.1, col_h=0.7, top_r=0.25, top_h=0.12):
                    _cyl_at(top_r, top_h, (0, 0, basin_h + col_h + top_h / 2.0), 20)])
 
 
-def tree(trunk_r=0.12, trunk_h=1.2, canopy_r=0.6):
-    """Trunk cylinder + a canopy of 4 overlapping spheres of DIFFERENT sizes -> natural foliage.
-    Sits on z=0. Foliage scatterer for semi-open/outdoor scenes."""
-    parts = [_cyl_at(trunk_r, trunk_h, (0, 0, trunk_h / 2.0), 12)]
-    top = trunk_h
-    blobs = [(canopy_r,        (0, 0, top + canopy_r * 0.6)),
-             (canopy_r * 0.70, (canopy_r * 0.5, 0, top + canopy_r * 0.3)),
-             (canopy_r * 0.65, (-canopy_r * 0.45, canopy_r * 0.35, top + canopy_r * 0.45)),
-             (canopy_r * 0.55, (0, -canopy_r * 0.45, top + canopy_r * 0.55))]
-    for rr, pos in blobs:
-        sv, st = sphere(rr, 2)
-        parts.append((bake(sv, pos=pos), st))
-    return _merge(parts)
 
 
 PRIMITIVES = {"plane": plane, "box": box, "cylinder": cylinder, "tetrahedron": tetrahedron,
               "sphere": sphere, "dodecahedron": dodecahedron, "octant": octant, "wedge": wedge,
-              "dummy": dummy, "chair": chair, "bench": bench, "sofa": sofa, "bed": bed,
-              "shelf": shelf, "full_shelf": full_shelf, "fountain": fountain, "tree": tree,
+              "dummy": dummy, "seat": seat, "sofa": sofa, "bed": bed,
+              "shelf": shelf, "full_shelf": full_shelf, "fountain": fountain,
               "soundbox": soundbox, "skyline": skyline, "stairs": stairs}
 
 
@@ -584,7 +565,7 @@ def _selfcheck():
     # new props: tetra closed; composites valid (nonempty, in-range indices); cone NOT a public prop
     v, t = tetrahedron(); assert len(v) == 4 and _euler_closed(v, t), "3-sided pyramid closed"
     v, t = wedge(); assert len(v) == 6 and _euler_closed(v, t), "wedge (bass trap) closed prism"
-    for name in ("chair", "bench", "sofa", "bed", "shelf", "full_shelf", "fountain", "tree",
+    for name in ("seat", "sofa", "bed", "shelf", "full_shelf", "fountain",
                  "soundbox", "skyline", "stairs", "octant"):
         v, t = PRIMITIVES[name]()
         assert v and t and all(0 <= i < len(v) for tri in t for i in tri), f"{name} valid"
