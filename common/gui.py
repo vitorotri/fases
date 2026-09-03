@@ -640,6 +640,12 @@ class GLViewer(QOpenGLWidget):
     MODE_REC   = 2
     MODE_SLICE = 3
 
+    # default/reset camera = isometric: looking down the body diagonal so x, y, z are symmetric on
+    # screen. yaw 225 (into the +x+y corner), pitch -54.736 = -(90 - 35.264), elevation 35.264 =
+    # arcsin(1/sqrt3). Used by __init__ and the fit/reset (T) so they never drift apart.
+    ISO_YAW = 225.0
+    ISO_PITCH = -54.7356
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(520, 500)
@@ -647,8 +653,8 @@ class GLViewer(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # camera
-        self._yaw   =  215.0      # normal orbit: around OBJ/world Z (x lower-left, y lower-right)
-        self._pitch = -22.0       # normal orbit: tilt
+        self._yaw   = self.ISO_YAW      # starting view only — free to orbit after (isometric x/y/z)
+        self._pitch = self.ISO_PITCH
         self._free_x = 0.0        # Alt+LMB free tumble around screen X
         self._free_y = 0.0        # Alt+LMB free tumble around screen Y
         self._roll  =  0.0        # Ctrl+LMB roll around view axis
@@ -766,8 +772,8 @@ class GLViewer(QOpenGLWidget):
             self._dist       = span * 1.8 if span > 0 else 6.0
             # nudge the scene right (~10% of view width) so the sliding left panel doesn't cover it
             self._pan        = np.array([0.12 * self._dist, 0.0, 0.0], np.float32)
-            self._yaw   = 215.0
-            self._pitch = -22.0
+            self._yaw   = self.ISO_YAW      # starting/reset view only — orbit freely after
+            self._pitch = self.ISO_PITCH
             self._free_x = 0.0
             self._free_y = 0.0
             self._roll   = 0.0
