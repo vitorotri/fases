@@ -1739,6 +1739,26 @@ class GLViewer(QOpenGLWidget):
         return [{"pos": list(self._props[i].pos), "rot": list(self._props[i].rot),
                  "scale": list(self._props[i].scale)} for i in idxs]
 
+    def _group_pivot(self, idxs):
+        """Centroid (world) of the props' centers — the pivot for group rotate/scale. For one prop this
+        is its own center, so single-prop R/S stay in place (identical to before)."""
+        pts = []
+        for i in idxs:
+            c = self._props[i].center()
+            pts.append([self._props[i].pos[k] + c[k] for k in range(3)])
+        n = max(1, len(pts))
+        return [sum(p[k] for p in pts) / n for k in range(3)]
+
+    @staticmethod
+    def _rot_axis(v, axis, deg):
+        """Rotate vector v about world axis X/Y/Z by `deg`."""
+        a = math.radians(deg); ca, sa = math.cos(a), math.sin(a); x, y, z = v
+        if axis == "X":
+            return (x, ca * y - sa * z, sa * y + ca * z)
+        if axis == "Y":
+            return (ca * x + sa * z, y, -sa * x + ca * z)
+        return (ca * x - sa * y, sa * x + ca * y, z)
+
     def _xform_start(self, mode, idxs=None):
         """Begin a modal transform on a GROUP of props (idxs). Default idxs = the selected prop, else
         the nearest to the cursor. mode 'p'=move (whole group), 'r'/'s' act on the primary prop."""
@@ -1751,7 +1771,7 @@ class GLViewer(QOpenGLWidget):
                 return False
             idxs = [idx]; self._prop_sel = idx
         self._xform = {"mode": mode, "axis": None, "idxs": list(idxs), "anchor": cpos,
-                       "bases": self._snapshot(idxs)}
+                       "bases": self._snapshot(idxs), "pivot": self._group_pivot(idxs)}
         self.update()
         return True
 
@@ -1763,6 +1783,7 @@ class GLViewer(QOpenGLWidget):
             return
         xf["bases"] = self._snapshot(xf["idxs"])
         xf["anchor"] = self.mapFromGlobal(QCursor.pos())
+        xf["pivot"] = self._group_pivot(xf["idxs"])
 
     def _xform_end(self, cancel):
         xf = self._xform
@@ -1810,14 +1831,25 @@ class GLViewer(QOpenGLWidget):
             for i, b in zip(xf["idxs"], xf["bases"]):
                 bp = b["pos"]; self._props[i].pos = [bp[0] + delta[0], bp[1] + delta[1], bp[2] + delta[2]]
         elif xf["mode"] == "r":
-            axis = xf["axis"] or "Z"; k = ai[axis]; i = xf["idxs"][0]; b = xf["bases"][0]
-            self._props[i].rot = list(b["rot"]); self._props[i].rot[k] = b["rot"][k] + dx * 0.5  # 0.5 deg/px
+            axis = xf["axis"] or "Z"; k = ai[axis]; ang = dx * 0.5; piv = xf["pivot"]  # 0.5 deg/px
+            for i, b in zip(xf["idxs"], xf["bases"]):
+                p = self._props[i]; cm = p.center()
+                off = [b["pos"][m] + cm[m] - piv[m] for m in range(3)]     # base center - pivot
+                ro = self._rot_axis(off, axis, ang)                       # orbit about the group pivot
+                p.pos = [piv[m] + ro[m] - cm[m] for m in range(3)]
+                p.rot = list(b["rot"]); p.rot[k] = b["rot"][k] + ang      # + spin each in place
         elif xf["mode"] == "s":
-            f = max(0.01, 1.0 + dx * 0.01); i = xf["idxs"][0]; b = xf["bases"][0]
-            if xf["axis"] is None:
-                self._props[i].scale = [c * f for c in b["scale"]]
-            else:
-                k = ai[xf["axis"]]; self._props[i].scale = list(b["scale"]); self._props[i].scale[k] = b["scale"][k] * f
+            f = max(0.01, 1.0 + dx * 0.01); piv = xf["pivot"]
+            for i, b in zip(xf["idxs"], xf["bases"]):
+                p = self._props[i]; cm = p.center()
+                off = [b["pos"][m] + cm[m] - piv[m] for m in range(3)]
+                if xf["axis"] is None:
+                    noff = [o * f for o in off]; ns = [c * f for c in b["scale"]]
+                else:
+                    k = ai[xf["axis"]]; noff = list(off); noff[k] = off[k] * f
+                    ns = list(b["scale"]); ns[k] = b["scale"][k] * f
+                p.pos = [piv[m] + noff[m] - cm[m] for m in range(3)]      # move from pivot + scale each
+                p.scale = ns
         self.update()
 
     def _find_props_in_rect(self, rect):
@@ -2577,6 +2609,11 @@ class GLViewer(QOpenGLWidget):
                         self._xform['axis'] = {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]
                         self.update()
                     e.accept(); return
+                if not e.isAutoRepeat() and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
+                    self._xform_reanchor()                                # switch mode mid-transform
+                    self._xform['mode'] = {Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]
+                    self._xform['axis'] = None
+                    self.update(); e.accept(); return
             if self._xform is None and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
                 if self._xform_start({Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]):
                     e.accept(); return
