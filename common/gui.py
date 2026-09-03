@@ -1628,10 +1628,16 @@ class GLViewer(QOpenGLWidget):
         self.update()
 
     def _layer_color(self, name):
-        """Stable per-layer hue (PYTHONHASHSEED-independent) so props on the same layer share a color."""
+        """Per-layer color, stable within a session. Hues assigned by ORDER of first appearance via the
+        golden angle (137.5 deg) so they spread across the WHOLE wheel — reds/oranges/pinks/blues/greens
+        — and consecutive layers stay far apart (name-hashing clustered them in blue/green)."""
         import colorsys
-        h = (sum(ord(c) for c in name) * 47) % 360
-        return colorsys.hsv_to_rgb(h / 360.0, 0.45, 0.95)
+        m = getattr(self, "_layer_hue", None)
+        if m is None:
+            m = self._layer_hue = {}
+        if name not in m:
+            m[name] = (len(m) * 137.508) % 360.0
+        return colorsys.hsv_to_rgb(m[name] / 360.0, 0.55, 0.95)
 
     def _draw_props(self):
         """Filled + wire pass for placed props (props3d.Prop). Grouped by layer color; selected prop
@@ -7412,8 +7418,9 @@ class PropsWindow(QWidget):
         arow.addWidget(self._asset, 1); arow.addWidget(ab)
         root.addLayout(arow)
 
-        root.addWidget(QLabel("Placed props"))
+        root.addWidget(QLabel("Placed props (Ctrl/Shift-click for multi-select)"))
         self._list = QListWidget(); self._list.currentRowChanged.connect(self._on_select)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # multi-select
         root.addWidget(self._list, 1)
         delb = QPushButton("Delete selected"); delb.clicked.connect(self._delete)
         root.addWidget(delb)
@@ -7425,12 +7432,16 @@ class PropsWindow(QWidget):
         form.addRow("pos x y z", self._triple(self._pos))
         form.addRow("rot x y z", self._triple(self._rot))
         form.addRow("scale x y z", self._triple(self._scl))
-        self._layer = QLineEdit(props3d.DEFAULT_LAYER)
-        form.addRow("layer", self._layer)
+        self._layer = QComboBox(); self._layer.setEditable(True)                # type new OR pick existing
+        self._layer.setCurrentText(props3d.DEFAULT_LAYER)
+        lrow = QHBoxLayout(); lrow.addWidget(self._layer, 1)
+        asg = QPushButton("Assign → selected"); asg.clicked.connect(self._assign_selected)
+        lrow.addWidget(asg)
+        form.addRow("layer", lrow)
         root.addLayout(form)
         for s in self._pos + self._rot + self._scl:
             s.valueChanged.connect(self._apply)
-        self._layer.editingFinished.connect(self._apply)
+        self._layer.lineEdit().editingFinished.connect(self._apply)
         self._refresh()
 
     def _spin(self, val=0.0, step=0.1):
@@ -7446,7 +7457,7 @@ class PropsWindow(QWidget):
     def _add(self, kind, source):
         if kind == "primitive" and source not in self.p3.PRIMITIVES:
             return
-        layer = self._layer.text().strip() or self.p3.DEFAULT_LAYER
+        layer = self._layer.currentText().strip() or self.p3.DEFAULT_LAYER
         self.gl.add_prop(self.p3.Prop(kind, source, layer=layer))
         self._refresh(); self._list.setCurrentRow(len(self.gl._props) - 1)
 
@@ -7456,6 +7467,12 @@ class PropsWindow(QWidget):
             self._list.addItem(f"{p.source}  [{p.layer}]")
         self._list.blockSignals(False)
         self._list.setCurrentRow(self.gl._prop_sel)
+        # existing layers into the combo (keep the current text so a half-typed new name survives)
+        self._layer.blockSignals(True)
+        cur = self._layer.currentText()
+        self._layer.clear(); self._layer.addItems(sorted({p.layer for p in self.gl._props}))
+        self._layer.setCurrentText(cur)
+        self._layer.blockSignals(False)
 
     def _on_select(self, row):
         self.gl.select_prop(row)
@@ -7465,7 +7482,7 @@ class PropsWindow(QWidget):
         for grp, vals in ((self._pos, p.pos), (self._rot, p.rot), (self._scl, p.scale)):
             for s, v in zip(grp, vals):
                 s.blockSignals(True); s.setValue(float(v)); s.blockSignals(False)
-        self._layer.blockSignals(True); self._layer.setText(p.layer); self._layer.blockSignals(False)
+        self._layer.blockSignals(True); self._layer.setCurrentText(p.layer); self._layer.blockSignals(False)
 
     def _apply(self, *_):
         row = self._list.currentRow()
@@ -7475,14 +7492,27 @@ class PropsWindow(QWidget):
         p.pos = [s.value() for s in self._pos]
         p.rot = [s.value() for s in self._rot]
         p.scale = [s.value() for s in self._scl]
-        p.layer = self._layer.text().strip() or self.p3.DEFAULT_LAYER
+        p.layer = self._layer.currentText().strip() or self.p3.DEFAULT_LAYER
         self._list.item(row).setText(f"{p.source}  [{p.layer}]")
         self.gl.update()
 
+    def _selected_rows(self):
+        return sorted(self._list.row(it) for it in self._list.selectedItems())
+
+    def _assign_selected(self):
+        """AutoCAD-style: give every selected prop the same layer (type a new name or pick an existing)."""
+        layer = self._layer.currentText().strip() or self.p3.DEFAULT_LAYER
+        for r in self._selected_rows():
+            if 0 <= r < len(self.gl._props):
+                self.gl._props[r].layer = layer
+        self._refresh(); self.gl.update()
+
     def _delete(self):
-        row = self._list.currentRow()
-        if 0 <= row < len(self.gl._props):
-            self.gl.remove_prop(row); self._refresh()
+        for r in sorted(self._selected_rows(), reverse=True):        # reverse so indices stay valid
+            if 0 <= r < len(self.gl._props):
+                del self.gl._props[r]
+        self.gl._prop_sel = min(self.gl._prop_sel, len(self.gl._props) - 1)
+        self.gl.update(); self._refresh()
 
 
 # ─────────────────────────────────────────────────────────────
