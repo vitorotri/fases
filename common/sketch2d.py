@@ -269,6 +269,7 @@ class _Canvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)  # hover coords without a button held
         self._hover = None           # world (x,y) under cursor, for the readout
+        self._prop_foot = []         # read-only top-down prop outlines (from gui), [[(x,y),...], ...]
         self.shapes = []             # [{"pts": [[x,y,z], ...], "closed": bool}]
         self.sel = None              # (shape_idx, pt_idx) or None
         self._undo = []              # snapshots (shapes, sel), pushed BEFORE each mutation
@@ -306,6 +307,11 @@ class _Canvas(QWidget):
     def dump_shapes(self):
         """JSON-able copy of the sketch (for the .json sidecar so it can be re-edited later)."""
         return copy.deepcopy(self.shapes)
+
+    def set_prop_footprints(self, polys):
+        """Read-only top-down outlines of the 3D props (from gui), drawn under the sketch."""
+        self._prop_foot = polys or []
+        self.update()
 
     def load_shapes(self, data):
         data, dropped = _drop_out_of_range(data or [])            # self-heal a corrupt save (see helper)
@@ -526,6 +532,13 @@ class _Canvas(QWidget):
             qp.setPen(QColor("#cfd8dc"))
             qp.drawText(8, Hpx - 8, f"x {self._hover[0]:.3g} m    y {self._hover[1]:.3g} m")
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)         # shapes/points antialiased
+        if self._prop_foot:                                        # read-only 3D-prop footprints, under shapes
+            from PySide6.QtGui import QPolygonF
+            qp.setPen(QPen(QColor("#3f7d8c"), 1, Qt.PenStyle.DashLine))
+            qp.setBrush(QBrush(QColor(63, 125, 140, 45)))
+            for poly in self._prop_foot:
+                if len(poly) >= 2:
+                    qp.drawPolygon(QPolygonF([self._w2s(x, y) for x, y in poly]))
         for si, sh in enumerate(self.shapes):
             sp = [self._w2s(p[0], p[1]) for p in sh["pts"]]
             col = QColor("#7c5cfc") if sh["closed"] else QColor("#e0a54f")  # boundary vs interior line

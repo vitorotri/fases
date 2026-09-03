@@ -711,6 +711,7 @@ class GLViewer(QOpenGLWidget):
         self._xform     = None        # active modal transform: {mode,axis,idxs,bases,anchor}
         self._copy_arm  = False       # C pressed: next LMB drag draws a box to pick props to copy
         self._rect      = None        # [QPointF start, QPointF cur] rubber-band box while selecting
+        self._props_undo_stack = []   # pre-op snapshots (list of Prop dicts) for Ctrl+Z on prop ops
         self._ortho     = False       # orthographic top-down projection (plan view for placement)
         self._axis_lock = None          # 'X','Y','Z' or None
         self._place_pos = np.zeros(3, np.float32)  # frozen base position
@@ -1688,10 +1689,10 @@ class GLViewer(QOpenGLWidget):
         return colorsys.hsv_to_rgb(m[name] / 360.0, 0.55, 0.95)
 
     def _draw_props(self):
-        """Filled + wire pass for placed props (props3d.Prop). Grouped by layer color; selected prop
-        brighter with a thicker wire. ponytail: world() re-bakes each frame — fine for a few props,
-        cache verts if a scene ever holds hundreds."""
-        if not self._props:
+        """Filled + wire pass for placed props (props3d.Prop), colored per layer — ONLY in Draw mode
+        (placement). In Simulation the props are the baked scene groups, drawn transparent/grey by
+        _draw_mesh with normal layer highlighting; the colorful overlay would fight that."""
+        if not self._props or not self._props_mode:
             return
         glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE)
         glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE)
@@ -1872,6 +1873,7 @@ class GLViewer(QOpenGLWidget):
     def _copy_start(self, idxs):
         """Duplicate props idxs, then begin a group MOVE of the copies (drag to place, X/Y/Z lock)."""
         import props3d
+        self.push_props_undo()                                     # so Ctrl+Z removes the copies
         new = []
         for i in idxs:
             if 0 <= i < len(self._props):
@@ -1883,12 +1885,32 @@ class GLViewer(QOpenGLWidget):
         self._xform_start("p", idxs=new)
         self.propsChanged.emit()
 
+    def push_props_undo(self):
+        """Snapshot props BEFORE a mutating op (move/rotate/scale/copy/add/delete/assign) for Ctrl+Z."""
+        snap = [p.to_dict() for p in self._props]
+        if self._props_undo_stack and self._props_undo_stack[-1] == snap:
+            return
+        self._props_undo_stack.append(snap)
+        self._props_undo_stack = self._props_undo_stack[-50:]
+
+    def props_undo(self):
+        """Restore the last pre-op prop snapshot. Returns True if something was undone."""
+        if not self._props_undo_stack:
+            return False
+        import props3d
+        self._props = [props3d.Prop.from_dict(d) for d in self._props_undo_stack.pop()]
+        self._prop_sel = -1; self._xform = None
+        self.propsChanged.emit(); self.update()
+        return True
+
     def add_prop(self, prop):
-        self._props.append(prop); self._prop_sel = len(self._props) - 1; self.update()
+        self._props.append(prop); self._prop_sel = len(self._props) - 1
+        self.propsChanged.emit(); self.update()          # refresh panel + 2D footprints live
 
     def remove_prop(self, i):
         if 0 <= i < len(self._props):
-            del self._props[i]; self._prop_sel = min(self._prop_sel, len(self._props) - 1); self.update()
+            del self._props[i]; self._prop_sel = min(self._prop_sel, len(self._props) - 1)
+            self.propsChanged.emit(); self.update()
 
     def select_prop(self, i):
         self._prop_sel = i if 0 <= i < len(self._props) else -1; self.update()
@@ -2593,6 +2615,9 @@ class GLViewer(QOpenGLWidget):
         # ── Draw mode: modal prop transform. P move, R rotate, S scale; X/Y/Z lock axis (toggle);
         #    Enter confirms, Esc cancels. Blender-style: after the key, the mouse drives it (no button). ──
         if self._props_mode and self._mode == self.MODE_NONE:
+            if self._xform is None and self._rect is None and e.matches(QKeySequence.StandardKey.Undo):
+                if self.props_undo():
+                    e.accept(); return
             if key == Qt.Key.Key_Escape and (self._copy_arm or self._rect is not None):
                 self._copy_arm = False; self._rect = None; self.update(); e.accept(); return
             if self._xform is None and self._rect is None and key == Qt.Key.Key_C and self._props:
@@ -2615,8 +2640,11 @@ class GLViewer(QOpenGLWidget):
                     self._xform['axis'] = None
                     self.update(); e.accept(); return
             if self._xform is None and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
+                self.push_props_undo()                            # so Ctrl+Z reverts this transform
                 if self._xform_start({Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]):
                     e.accept(); return
+                elif self._props_undo_stack:
+                    self._props_undo_stack.pop()                  # no prop to grab -> drop the snapshot
         if key == Qt.Key.Key_Escape:
             self.exit_placement_mode()
             e.accept(); return
@@ -5302,6 +5330,7 @@ class MainWindow(QMainWindow):
             self._sketch.canvas.objReady.connect(self._on_sketch_obj)
         if self._gl._grid_h > 0:                   # background grid = solver grid spacing h
             self._sketch.canvas.h = self._gl._grid_h
+        self._sketch.canvas.set_prop_footprints(self._prop_footprints())   # top-down prop outlines
         if not self._sketch.canvas.shapes:         # empty -> restore this project's saved sketch
             self._load_sketch_json()
         self._sketch.show(); self._sketch.raise_(); self._sketch.activateWindow()
@@ -5320,6 +5349,36 @@ class MainWindow(QMainWindow):
         pw = getattr(self, "_propswin", None)
         if pw is not None:
             pw._refresh(); pw._on_select(self._gl._prop_sel)
+        sk = getattr(self, "_sketch", None)
+        if sk is not None:                                       # refresh the 2D footprint overlays
+            sk.canvas.set_prop_footprints(self._prop_footprints())
+
+    def _prop_footprints(self):
+        """Top-down (XY) outline of each prop for the 2D sketch overlay: convex hull of its world verts
+        projected to the floor. Returns a list of polygons (each a list of (x,y))."""
+        def hull(pts):
+            pts = sorted(set((round(x, 4), round(y, 4)) for x, y in pts))
+            if len(pts) < 3:
+                return pts
+            cr = lambda o, a, b: (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+            lo = []
+            for p in pts:
+                while len(lo) >= 2 and cr(lo[-2], lo[-1], p) <= 0:
+                    lo.pop()
+                lo.append(p)
+            up = []
+            for p in reversed(pts):
+                while len(up) >= 2 and cr(up[-2], up[-1], p) <= 0:
+                    up.pop()
+                up.append(p)
+            return lo[:-1] + up[:-1]
+        out = []
+        for p in self._gl._props:
+            v = p.world()[0]
+            h = hull([(x, y) for x, y, _ in v])
+            if len(h) >= 2:
+                out.append(h)
+        return out
 
     def _props_json_path(self):
         return (os.path.join(self._proj_root, "input", "scene", "props.json")
@@ -7766,6 +7825,7 @@ class PropsWindow(QWidget):
         if kind == "primitive" and source not in self.p3.PRIMITIVES:
             return
         layer = self._layer.currentText().strip() or self.p3.DEFAULT_LAYER
+        self.gl.push_props_undo()
         self.gl.add_prop(self.p3.Prop(kind, source, layer=layer))
         self._refresh(); self._list.setCurrentRow(len(self.gl._props) - 1)
 
@@ -7810,12 +7870,14 @@ class PropsWindow(QWidget):
     def _assign_selected(self):
         """AutoCAD-style: give every selected prop the same layer (type a new name or pick an existing)."""
         layer = self._layer.currentText().strip() or self.p3.DEFAULT_LAYER
+        self.gl.push_props_undo()
         for r in self._selected_rows():
             if 0 <= r < len(self.gl._props):
                 self.gl._props[r].layer = layer
         self._refresh(); self.gl.update()
 
     def _delete(self):
+        self.gl.push_props_undo()
         for r in sorted(self._selected_rows(), reverse=True):        # reverse so indices stay valid
             if 0 <= r < len(self.gl._props):
                 del self.gl._props[r]
