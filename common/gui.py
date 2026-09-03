@@ -7405,6 +7405,8 @@ class MainWindow(QMainWindow):
             self._launch_solver(self._aural_cmd)
 
     def _launch_solver(self, cmd):
+        import time
+        self._t_start = time.time()                    # for the live ETA (see _on_solver_progress)
         self._log.append(f"$ cd {self._proj_root}\n$ " + " ".join(cmd))
         self._log.append("-"*60)
         self._set_running(True)
@@ -7472,8 +7474,22 @@ class MainWindow(QMainWindow):
                 f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
             self._fitimp_btn.setEnabled(True)
 
+    @staticmethod
+    def _fmt_eta(s):
+        s = int(max(0, s))
+        if s >= 3600:
+            return f"{s // 3600}h {(s % 3600) // 60}m"
+        if s >= 60:
+            return f"{s // 60}m {s % 60:02d}s"
+        return f"{s}s"
+
     def _on_solver_progress(self, pct):
         self._float_prog.setValue(pct)
+        t0 = getattr(self, "_t_start", None)
+        if t0 and pct > 0:                             # live ETA: extrapolate from elapsed / percent
+            import time
+            remaining = (time.time() - t0) * (100 - pct) / pct
+            self._sb.showMessage(f"Simulating… {pct}%  ·  ~{self._fmt_eta(remaining)} left")
 
     def _stop_solver(self):
         if self._solver_thread and self._solver_thread.isRunning():
