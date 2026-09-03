@@ -708,7 +708,9 @@ class GLViewer(QOpenGLWidget):
         self._props     = []          # props3d.Prop list (placed primitives/assets); drawn + exported
         self._prop_sel  = -1          # selected prop index (panel highlight), or -1
         self._props_mode = False      # Draw mode: P/R/S transform props (and src/rec placement locked)
-        self._xform     = None        # active modal transform: {mode,axis,idx,pos,rot,scale,anchor}
+        self._xform     = None        # active modal transform: {mode,axis,idxs,bases,anchor}
+        self._copy_arm  = False       # C pressed: next LMB drag draws a box to pick props to copy
+        self._rect      = None        # [QPointF start, QPointF cur] rubber-band box while selecting
         self._ortho     = False       # orthographic top-down projection (plan view for placement)
         self._axis_lock = None          # 'X','Y','Z' or None
         self._place_pos = np.zeros(3, np.float32)  # frozen base position
@@ -1347,17 +1349,19 @@ class GLViewer(QOpenGLWidget):
         if self._glyph_queue:
             self._paint_point_glyphs(gp)
         self._paint_colorbar(gp)
+        if self._rect is not None:
+            self._paint_copy_rect(gp)
         gp.end()
 
     def _prop_center_world(self, xf):
-        pr = self._props[xf["idx"]]; c = pr.center()
+        pr = self._props[xf["idxs"][0]]; c = pr.center()           # primary prop of the group
         return [pr.pos[0] + c[0], pr.pos[1] + c[1], pr.pos[2] + c[2]]
 
     def _draw_xform_guide(self):
         """Crosshair at the prop center + a locked-axis line, mirroring _draw_drag_guide so a prop
         transform and a source/receiver drag look/feel the same."""
         xf = self._xform
-        if xf is None or not (0 <= xf["idx"] < len(self._props)):
+        if xf is None or not xf["idxs"] or not (0 <= xf["idxs"][0] < len(self._props)):
             return
         p = self._prop_center_world(xf)
         glDisable(GL_LIGHTING)
@@ -1378,6 +1382,15 @@ class GLViewer(QOpenGLWidget):
             glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
             glEnd()
         glEnable(GL_LIGHTING)
+
+    def _paint_copy_rect(self, p):
+        """Rubber-band box while copy-selecting props (C then LMB-drag)."""
+        from PySide6.QtCore import QRectF
+        a, b = self._rect
+        r = QRectF(a, b).normalized()
+        col = QColor(PAL["accent"])
+        p.fillRect(r, QColor(col.red(), col.green(), col.blue(), 40))
+        p.setPen(col); p.drawRect(r)
 
     def _paint_colorbar(self, p):
         """Vertical LUT scale bar on the middle-right edge while a colour/greys animation runs,
@@ -1722,86 +1735,121 @@ class GLViewer(QOpenGLWidget):
                 pass
         return bi
 
-    def _xform_start(self, mode):
-        """Begin a modal transform (mode 'p'/'r'/'s') on the selected prop, else the nearest to cursor."""
+    def _snapshot(self, idxs):
+        return [{"pos": list(self._props[i].pos), "rot": list(self._props[i].rot),
+                 "scale": list(self._props[i].scale)} for i in idxs]
+
+    def _xform_start(self, mode, idxs=None):
+        """Begin a modal transform on a GROUP of props (idxs). Default idxs = the selected prop, else
+        the nearest to the cursor. mode 'p'=move (whole group), 'r'/'s' act on the primary prop."""
         if not self._props:
             return False
         cpos = self.mapFromGlobal(QCursor.pos())
-        idx = self._prop_sel if 0 <= self._prop_sel < len(self._props) else self._find_nearest_prop(cpos)
-        if idx < 0:
-            return False
-        p = self._props[idx]
-        self._prop_sel = idx
-        self._xform = {"mode": mode, "axis": None, "idx": idx, "anchor": cpos,
-                       "pos": list(p.pos), "rot": list(p.rot), "scale": list(p.scale)}
+        if idxs is None:
+            idx = self._prop_sel if 0 <= self._prop_sel < len(self._props) else self._find_nearest_prop(cpos)
+            if idx < 0:
+                return False
+            idxs = [idx]; self._prop_sel = idx
+        self._xform = {"mode": mode, "axis": None, "idxs": list(idxs), "anchor": cpos,
+                       "bases": self._snapshot(idxs)}
         self.update()
         return True
 
     def _xform_reanchor(self):
-        """Re-snapshot the base transform + mouse anchor to the CURRENT state, so toggling an axis
+        """Re-snapshot the base transforms + mouse anchor to the CURRENT state, so toggling an axis
         lock mid-drag continues from what the user sees (no jump)."""
         xf = self._xform
-        if xf is None or not (0 <= xf["idx"] < len(self._props)):
+        if xf is None:
             return
-        p = self._props[xf["idx"]]
-        xf["pos"], xf["rot"], xf["scale"] = list(p.pos), list(p.rot), list(p.scale)
+        xf["bases"] = self._snapshot(xf["idxs"])
         xf["anchor"] = self.mapFromGlobal(QCursor.pos())
 
     def _xform_end(self, cancel):
-        if self._xform is None:
+        xf = self._xform
+        if xf is None:
             return
-        if cancel:                                                 # restore the snapshot
-            p = self._props[self._xform["idx"]]
-            p.pos, p.rot, p.scale = (list(self._xform["pos"]), list(self._xform["rot"]),
-                                     list(self._xform["scale"]))
+        if cancel:                                                 # restore every prop's snapshot
+            for i, b in zip(xf["idxs"], xf["bases"]):
+                if 0 <= i < len(self._props):
+                    p = self._props[i]
+                    p.pos, p.rot, p.scale = list(b["pos"]), list(b["rot"]), list(b["scale"])
         self._xform = None
         self.propsChanged.emit(); self.update()
 
     def _xform_apply(self, qpos):
-        """Drive the active transform from the mouse (Blender-style, no button): P moves (screen-plane or
-        along the locked axis), R rotates about the locked axis (default Z), S scales (uniform or the
-        locked axis)."""
+        """Drive the transform from the mouse (no button). P moves the WHOLE group by one delta (screen-
+        plane or along the locked axis); R/S act on the primary prop (about its center)."""
         xf = self._xform
-        if xf is None or not (0 <= xf["idx"] < len(self._props)):
+        if xf is None:
             return
-        p = self._props[xf["idx"]]
         dx = qpos.x() - xf["anchor"].x(); dy = -(qpos.y() - xf["anchor"].y())
         ai = {"X": 0, "Y": 1, "Z": 2}
         if xf["mode"] == "p":
             self.makeCurrent()
             W, H = self.width(), self.height(); vp = [0, 0, int(W), int(H)]
-            base = np.array(xf["pos"], float)
-            if xf["axis"] is None:                                 # free: screen-plane at the prop's depth
+            base0 = np.array(xf["bases"][0]["pos"], float)         # primary drives the shared delta
+            delta = np.zeros(3)
+            if xf["axis"] is None:                                 # free: screen-plane at the primary depth
                 try:
-                    _, _, sz = gluProject(*base, self._mv, self._proj, vp)
+                    _, _, sz = gluProject(*base0, self._mv, self._proj, vp)
                     w = gluUnProject(float(qpos.x()), float(H) - float(qpos.y()), float(sz),
                                      self._mv, self._proj, vp)
-                    p.pos = [float(w[0]), float(w[1]), float(w[2])]
+                    delta = np.array(w, float) - base0
                 except Exception:
                     pass
             else:                                                  # along the locked world axis
                 axv = np.array({"X": (1, 0, 0), "Y": (0, 1, 0), "Z": (0, 0, 1)}[xf["axis"]], float)
                 try:
-                    s0 = np.array(gluProject(*base, self._mv, self._proj, vp)[:2])
-                    s1 = np.array(gluProject(*(base + axv * 0.1), self._mv, self._proj, vp)[:2])
+                    s0 = np.array(gluProject(*base0, self._mv, self._proj, vp)[:2])
+                    s1 = np.array(gluProject(*(base0 + axv * 0.1), self._mv, self._proj, vp)[:2])
                     sdir = s1 - s0; L = np.linalg.norm(sdir)
                     if L > 1e-6:
-                        move = float(np.dot([dx, dy], sdir / L)) * self._dist * 0.0015
-                        newp = base + axv * move
-                        p.pos = [float(newp[0]), float(newp[1]), float(newp[2])]
+                        delta = axv * (float(np.dot([dx, dy], sdir / L)) * self._dist * 0.0015)
                 except Exception:
                     pass
+            for i, b in zip(xf["idxs"], xf["bases"]):
+                bp = b["pos"]; self._props[i].pos = [bp[0] + delta[0], bp[1] + delta[1], bp[2] + delta[2]]
         elif xf["mode"] == "r":
-            axis = xf["axis"] or "Z"
-            p.rot = list(xf["rot"]); p.rot[ai[axis]] = xf["rot"][ai[axis]] + dx * 0.5   # 0.5 deg/px
+            axis = xf["axis"] or "Z"; k = ai[axis]; i = xf["idxs"][0]; b = xf["bases"][0]
+            self._props[i].rot = list(b["rot"]); self._props[i].rot[k] = b["rot"][k] + dx * 0.5  # 0.5 deg/px
         elif xf["mode"] == "s":
-            f = max(0.01, 1.0 + dx * 0.01)
+            f = max(0.01, 1.0 + dx * 0.01); i = xf["idxs"][0]; b = xf["bases"][0]
             if xf["axis"] is None:
-                p.scale = [c * f for c in xf["scale"]]
+                self._props[i].scale = [c * f for c in b["scale"]]
             else:
-                k = ai[xf["axis"]]
-                p.scale = list(xf["scale"]); p.scale[k] = xf["scale"][k] * f
+                k = ai[xf["axis"]]; self._props[i].scale = list(b["scale"]); self._props[i].scale[k] = b["scale"][k] * f
         self.update()
+
+    def _find_props_in_rect(self, rect):
+        """Indices of props whose center projects inside the screen rectangle (two QPoints)."""
+        self.makeCurrent()
+        W, H = self.width(), self.height(); vp = [0, 0, int(W), int(H)]
+        x0, x1 = sorted((rect[0].x(), rect[1].x())); y0, y1 = sorted((rect[0].y(), rect[1].y()))
+        out = []
+        for i, p in enumerate(self._props):
+            c = p.center(); wc = (p.pos[0] + c[0], p.pos[1] + c[1], p.pos[2] + c[2])
+            try:
+                sx, sy, _ = gluProject(float(wc[0]), float(wc[1]), float(wc[2]), self._mv, self._proj, vp)
+                sy = H - sy
+                if x0 <= sx <= x1 and y0 <= sy <= y1:
+                    out.append(i)
+            except Exception:
+                pass
+        return out
+
+    def _copy_start(self, idxs):
+        """Duplicate props idxs, then begin a group MOVE of the copies (drag to place, X/Y/Z lock)."""
+        import props3d
+        new = []
+        for i in idxs:
+            if 0 <= i < len(self._props):
+                self._props.append(props3d.Prop.from_dict(self._props[i].to_dict()))
+                new.append(len(self._props) - 1)
+        if not new:
+            return
+        self._prop_sel = new[-1]
+        self._xform_start("p", idxs=new)
+        self.propsChanged.emit()
 
     def add_prop(self, prop):
         self._props.append(prop); self._prop_sel = len(self._props) - 1; self.update()
@@ -2152,7 +2200,7 @@ class GLViewer(QOpenGLWidget):
         """Overlay text using QPainter on top of GL."""
         if self._mode == self.MODE_NONE:
             # Modal prop transform: same top banner as a point drag (mode, locked axis, center coords).
-            if self._xform is not None and 0 <= self._xform["idx"] < len(self._props):
+            if self._xform is not None and self._xform["idxs"] and 0 <= self._xform["idxs"][0] < len(self._props):
                 cw = self._prop_center_world(self._xform)
                 mode_str = {"p": "MOVE", "r": "ROTATE", "s": "SCALE"}[self._xform["mode"]] + " PROP"
                 axis_str = (f"  locked: {self._xform['axis']}" if self._xform["axis"]
@@ -2276,6 +2324,9 @@ class GLViewer(QOpenGLWidget):
                 self._xform_end(cancel=False); return
             if e.button() == Qt.MouseButton.RightButton:
                 self._xform_end(cancel=True); return
+        # Copy-select armed (C): LMB starts the rubber-band box; consume so it doesn't orbit.
+        if self._copy_arm and e.button() == Qt.MouseButton.LeftButton:
+            self._rect = [e.position(), e.position()]; self._copy_arm = False; return
         # If edit mode (E) is armed and LMB is pressed, grab the nearest
         # placed source/receiver instead of rotating the camera.
         if (self._fpv is None and self._grab_held and e.button() == Qt.MouseButton.LeftButton
@@ -2296,6 +2347,9 @@ class GLViewer(QOpenGLWidget):
                 self._last_pos = e.position()
                 self.update()
             return
+        # ── rubber-band box for copy-select: extend it, no orbit ──
+        if self._rect is not None:
+            self._rect[1] = e.position(); self.update(); return
         # ── modal prop transform: mouse drives it, no button held ──
         if self._xform is not None:
             self._xform_apply(e.position()); self._last_pos = e.position(); return
@@ -2383,6 +2437,14 @@ class GLViewer(QOpenGLWidget):
         moved = getattr(self, '_drag_moved', False)
         self._mouse_btn = None
         self._last_pos  = None
+
+        # Finish the copy box: duplicate props whose center is inside it, then grab the copies (move).
+        if self._rect is not None and e.button() == Qt.MouseButton.LeftButton:
+            idxs = self._find_props_in_rect(self._rect); self._rect = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            if idxs:
+                self._copy_start(idxs)                              # copies enter a group MOVE
+            self.update(); return
 
         if self._fpv is not None:      # receiver view: no layer pick / point pick / placement — only
             if not moved and e.button() == Qt.MouseButton.RightButton:  # the RMB Go-back menu
@@ -2499,6 +2561,11 @@ class GLViewer(QOpenGLWidget):
         # ── Draw mode: modal prop transform. P move, R rotate, S scale; X/Y/Z lock axis (toggle);
         #    Enter confirms, Esc cancels. Blender-style: after the key, the mouse drives it (no button). ──
         if self._props_mode and self._mode == self.MODE_NONE:
+            if key == Qt.Key.Key_Escape and (self._copy_arm or self._rect is not None):
+                self._copy_arm = False; self._rect = None; self.update(); e.accept(); return
+            if self._xform is None and self._rect is None and key == Qt.Key.Key_C and self._props:
+                self._copy_arm = True                                # next LMB drag = box-select to copy
+                self.setCursor(Qt.CursorShape.CrossCursor); e.accept(); return
             if self._xform is not None:
                 if key == Qt.Key.Key_Escape:
                     self._xform_end(cancel=True); e.accept(); return
