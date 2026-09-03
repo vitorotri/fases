@@ -312,6 +312,46 @@ def _split_polygon(xy, p0, p1):
     return [[(round(x, 4), round(y, 4)) for x, y in list(g.exterior.coords)[:-1]] for g in polys]
 
 
+def _dxf_pick_exterior(loops, mpu):
+    """Largest-area loop, scaled by meters-per-unit `mpu`. Raises if no loops. Pure (testable)."""
+    if not loops:
+        raise RuntimeError("No closed polyline (LWPOLYLINE/POLYLINE) found — draw the room outline as a "
+                           "closed polyline (or put it on its own layer).")
+
+    def area(p):
+        s, n = 0.0, len(p)
+        for i in range(n):
+            x1, y1 = p[i]; x2, y2 = p[(i + 1) % n]
+            s += x1 * y2 - x2 * y1
+        return abs(s) * 0.5
+    return [(x * mpu, y * mpu) for x, y in max(loops, key=area)]
+
+
+# ezdxf $INSUNITS code -> meters per unit (0 = unitless -> assume meters, per the project convention)
+_DXF_MPU = {0: 1.0, 1: 0.0254, 2: 0.3048, 4: 0.001, 5: 0.01, 6: 1.0, 10: 0.9144, 13: 1e-6, 14: 0.1}
+
+
+def _dxf_exterior(path):
+    """Exterior polygon (largest closed polyline) of a DXF, in METERS. Auto-scales from $INSUNITS;
+    unitless -> meters. Needs ezdxf (raises ImportError if absent). Bulge arcs are read as their
+    vertices (straight); flatten in CAD first if a room has curved walls."""
+    import ezdxf
+    doc = ezdxf.readfile(path)
+    mpu = _DXF_MPU.get(int(getattr(doc, "units", 0) or 0), 1.0)
+    loops = []
+    for e in doc.modelspace():
+        t = e.dxftype()
+        if t == "LWPOLYLINE" and e.closed:
+            pts = [(p[0], p[1]) for p in e.get_points("xy")]
+        elif t == "POLYLINE" and e.is_closed:
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+        else:
+            continue
+        if len(pts) >= 3:
+            loops.append(pts)
+    return _dxf_pick_exterior(loops, mpu)
+
+
 def _drop_out_of_range(shapes):
     """Remove vertices flung far past the scene — corrupt saves clamp coords to the spinbox +-1e4 max,
     which then extrudes a wall shooting to 10000 and wrecks the contour. Bound = 50x the median extent
@@ -543,6 +583,17 @@ class _Canvas(QWidget):
             txt += f"  (Δi {abs(p1[0]-p0[0])/self.h:.1f}, Δj {abs(p1[1]-p0[1])/self.h:.1f})"
         qp.setPen(QColor("#f0c040"))
         qp.drawText(QPointF((a.x() + b.x()) / 2.0, (a.y() + b.y()) / 2.0 - 6), txt)
+
+    def import_dxf(self, path):
+        """Import the exterior polygon of a DXF room (meters) as a closed boundary shape, shifted into
+        the positive quadrant. Raises on failure (caller shows the message)."""
+        pts = _dxf_exterior(path)                                  # meters; may raise ImportError/RuntimeError
+        mnx = min(x for x, _ in pts); mny = min(y for _, y in pts)
+        shape = {"pts": [[round(x - mnx, 4), round(y - mny, 4), 0.0, 0.0] for x, y in pts], "closed": True}
+        self._snap()
+        self.shapes.append(shape)
+        self.sel = None; self._psel = set(); self._esel = set()
+        self.selectionChanged.emit(); self.fit_view()
 
     def set_prop_footprints(self, polys):
         """Read-only top-down outlines of the 3D props (from gui), drawn under the sketch."""
@@ -945,7 +996,10 @@ class SketchWindow(QWidget):
         self._edge_layer = QLineEdit(); self._edge_layer.setPlaceholderText("layer name for edges")
         self._edgelayer_btn = QPushButton("Assign layer → selected edges")
         self._edgelayer_btn.clicked.connect(self._apply_edge_layer)
+        self._importdxf_btn = QPushButton("Import DXF…")           # architect room outline -> boundary
+        self._importdxf_btn.clicked.connect(self._import_dxf)
         side = QVBoxLayout()
+        side.addWidget(self._importdxf_btn)
         side.addWidget(QLabel("Tool")); side.addLayout(trow)
         side.addWidget(QLabel("Selected point")); side.addWidget(panel)
         side.addWidget(self._applyz_btn)
@@ -991,6 +1045,18 @@ class SketchWindow(QWidget):
     def _apply_edge_layer(self):
         self.canvas.assign_edge_layer(self._edge_layer.text())
 
+    def _import_dxf(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        path, _ = QFileDialog.getOpenFileName(self, "Import DXF room outline", "", "DXF (*.dxf)")
+        if not path:
+            return
+        try:
+            self.canvas.import_dxf(path); self.canvas.update()
+        except ImportError:
+            QMessageBox.warning(self, "Missing dependency", "DXF import needs ezdxf:\n\n    pip install ezdxf")
+        except Exception as ex:
+            QMessageBox.warning(self, "DXF import failed", f"{type(ex).__name__}: {ex}")
+
     def _apply(self, *_):        # valueChanged passes a float; absorb it (else TypeError, edit ignored)
         sel = self.canvas.sel
         if sel is None:
@@ -1024,6 +1090,9 @@ def _selfcheck():
     assert len(_triangulate_xy([[0, 0], [4, 0], [4, 4], [2, 4], [2, 2], [0, 2]])) == 4, "ear-clip concave L"
     assert _rect_ellipse_pts((0, 0), (2, 1), "rect") == [(0, 0), (2, 0), (2, 1), (0, 1)], "rect from bbox"
     assert len(_rect_ellipse_pts((0, 0), (2, 2), "ellipse")) == 48, "ellipse polygon 48 pts"
+    big = [(0, 0), (10, 0), (10, 10), (0, 10)]; small = [(0, 0), (1, 0), (1, 1), (0, 1)]
+    ext = _dxf_pick_exterior([small, big], 0.001)                 # mm -> m, pick the larger loop
+    assert ext[2] == (0.01, 0.01), "dxf exterior = largest loop, scaled mm->m"
     try:                                                # boundary union needs shapely
         import shapely  # noqa: F401
         # two overlapping unit squares -> union exterior spans 0..1.5 in x (outermost boundary)
