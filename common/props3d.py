@@ -196,6 +196,11 @@ def _box_at(w, d, h, pos):
     return bake(v, pos=pos), t
 
 
+def _cyl_at(r, h, pos, n=24):
+    v, t = cylinder(r, h, n)
+    return bake(v, pos=pos), t
+
+
 def _open_cone(r, h, n):
     """Cone with the wide end OPEN (sides only, no rim cap) — a speaker cone you look INTO. Base ring
     on z=0, apex at z=h."""
@@ -344,9 +349,69 @@ def octant(r=0.5, seg=8):
     return verts, tris
 
 
+def shelf(w=0.9, d=0.3, h=1.8, th=0.03, shelves=4):
+    """Open shelf: 2 sides + (shelves+1) horizontal boards, NO back — every compartment open front
+    and back (see-through), not a closed box. Box-grid diffuser/absorber. Sits on z=0."""
+    parts = [_box_at(th, d, h, (-w / 2.0 + th / 2.0, 0, h / 2.0)),          # left side
+             _box_at(th, d, h, (w / 2.0 - th / 2.0, 0, h / 2.0))]           # right side
+    for k in range(shelves + 1):                                            # boards (bottom..top)
+        z = th / 2.0 + (h - th) * k / shelves
+        parts.append(_box_at(w, d, th, (0, 0, z)))
+    return _merge(parts)
+
+
+def full_shelf(w=0.9, d=0.3, h=1.8, th=0.03, shelves=4, slots=6, seed=1):
+    """Open `shelf` frame (sides + boards) WITH book-bricks standing on the shelves: a deterministic
+    ~random subset of slots per compartment, thin depth + x-gaps so you still see through to the other
+    side. Sits on z=0."""
+    parts = [shelf(w, d, h, th, shelves)]
+    inner_w = w - 2 * th
+    sw = inner_w / slots
+    bz = lambda k: th / 2.0 + (h - th) * k / shelves                        # board center height
+    for k in range(shelves):                                                # each compartment
+        cz = (bz(k) + bz(k + 1)) / 2.0
+        ch = (bz(k + 1) - bz(k)) - th - 0.01                               # brick fills between boards
+        for s in range(slots):
+            if ((k * 3 + s * 5 + k * s + seed) % 5) < 2:                    # ~40% empty -> see-through gaps
+                continue
+            x = -inner_w / 2.0 + sw * (s + 0.5)
+            parts.append(_box_at(sw * 0.7, d * 0.7, ch, (x, 0, cz)))        # book-brick (x + depth gaps)
+    return _merge(parts)
+
+
+def bed(w=1.5, d=2.0, base_h=0.5, head_h=0.5, th=0.06):
+    """Simplified bed: mattress/base block + headboard at the -y end. Sits on z=0."""
+    return _merge([_box_at(w, d, base_h, (0, 0, base_h / 2.0)),
+                   _box_at(w, th, head_h, (0, -d / 2.0 + th / 2.0, base_h + head_h / 2.0))])
+
+
+def fountain(r=0.6, basin_h=0.35, col_r=0.1, col_h=0.7, top_r=0.25, top_h=0.12):
+    """Simplified fountain: wide low basin + central column + small upper tier (all cylinders). A
+    scatterer for semi-open spaces. Sits on z=0."""
+    return _merge([_cyl_at(r, basin_h, (0, 0, basin_h / 2.0)),
+                   _cyl_at(col_r, col_h, (0, 0, basin_h + col_h / 2.0), 16),
+                   _cyl_at(top_r, top_h, (0, 0, basin_h + col_h + top_h / 2.0), 20)])
+
+
+def tree(trunk_r=0.12, trunk_h=1.2, canopy_r=0.6):
+    """Trunk cylinder + a canopy of 4 overlapping spheres of DIFFERENT sizes -> natural foliage.
+    Sits on z=0. Foliage scatterer for semi-open/outdoor scenes."""
+    parts = [_cyl_at(trunk_r, trunk_h, (0, 0, trunk_h / 2.0), 12)]
+    top = trunk_h
+    blobs = [(canopy_r,        (0, 0, top + canopy_r * 0.6)),
+             (canopy_r * 0.70, (canopy_r * 0.5, 0, top + canopy_r * 0.3)),
+             (canopy_r * 0.65, (-canopy_r * 0.45, canopy_r * 0.35, top + canopy_r * 0.45)),
+             (canopy_r * 0.55, (0, -canopy_r * 0.45, top + canopy_r * 0.55))]
+    for rr, pos in blobs:
+        sv, st = sphere(rr, 2)
+        parts.append((bake(sv, pos=pos), st))
+    return _merge(parts)
+
+
 PRIMITIVES = {"plane": plane, "box": box, "cylinder": cylinder, "tetrahedron": tetrahedron,
               "sphere": sphere, "dodecahedron": dodecahedron, "octant": octant, "wedge": wedge,
-              "dummy": dummy, "chair": chair, "bench": bench, "sofa": sofa,
+              "dummy": dummy, "chair": chair, "bench": bench, "sofa": sofa, "bed": bed,
+              "shelf": shelf, "full_shelf": full_shelf, "fountain": fountain, "tree": tree,
               "soundbox": soundbox, "skyline": skyline, "stairs": stairs}
 
 
@@ -519,7 +584,8 @@ def _selfcheck():
     # new props: tetra closed; composites valid (nonempty, in-range indices); cone NOT a public prop
     v, t = tetrahedron(); assert len(v) == 4 and _euler_closed(v, t), "3-sided pyramid closed"
     v, t = wedge(); assert len(v) == 6 and _euler_closed(v, t), "wedge (bass trap) closed prism"
-    for name in ("chair", "bench", "sofa", "soundbox", "skyline", "stairs", "octant"):
+    for name in ("chair", "bench", "sofa", "bed", "shelf", "full_shelf", "fountain", "tree",
+                 "soundbox", "skyline", "stairs", "octant"):
         v, t = PRIMITIVES[name]()
         assert v and t and all(0 <= i < len(v) for tri in t for i in tri), f"{name} valid"
     assert "cone" not in PRIMITIVES, "cone stays an internal helper (soundbox driver), not a prop"
