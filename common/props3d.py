@@ -107,15 +107,37 @@ def sphere(r=0.5, subdiv=2):
     return v, f
 
 
+def _rotate_points(pts, a, b):
+    """Rotate all points by the rotation that sends unit vector a -> unit vector b (Rodrigues)."""
+    a, b = _normalize(a), _normalize(b)
+    v = _cross(a, b); s = math.sqrt(_dot(v, v)); c = _dot(a, b)
+    if s < 1e-9:                                                     # parallel
+        if c > 0:
+            return list(pts)
+        ax = _cross(a, (1, 0, 0))                                   # antiparallel: 180deg about any perp axis
+        if _dot(ax, ax) < 1e-9:
+            ax = _cross(a, (0, 1, 0))
+        ax = _normalize(ax)
+        return [(2 * _dot(ax, p) * ax[0] - p[0], 2 * _dot(ax, p) * ax[1] - p[1],
+                 2 * _dot(ax, p) * ax[2] - p[2]) for p in pts]
+    k = (1.0 - c) / (s * s)
+
+    def rot(p):
+        vp = _cross(v, p); vvp = _cross(v, vp)
+        return (p[0] + vp[0] + vvp[0] * k, p[1] + vp[1] + vvp[1] * k, p[2] + vp[2] + vvp[2] * k)
+    return [rot(p) for p in pts]
+
+
 def dodecahedron(r=0.5):
     """Dodecahedron as the DUAL of an icosahedron: dodeca verts = icosa face centroids; each dodeca
     pentagon = the ring of icosa faces around one icosa vertex. Connectivity is correct by construction
-    (no hand-typed face table). Pentagons fan-triangulated, wound outward."""
+    (no hand-typed face table). Oriented so ONE pentagon lies flat on the floor (z=0) — like a real
+    dodecahedron loudspeaker standing on a face. Pentagons fan-triangulated, wound outward."""
     iv, if_ = _icosahedron()
     dv = [_normalize(((iv[a][0] + iv[b][0] + iv[c][0]) / 3.0,
                       (iv[a][1] + iv[b][1] + iv[c][1]) / 3.0,
                       (iv[a][2] + iv[b][2] + iv[c][2]) / 3.0), r) for a, b, c in if_]
-    tris = []
+    faces = []
     for j in range(len(iv)):
         ring = [i for i, face in enumerate(if_) if j in face]        # 5 icosa faces touching vertex j
         order = [ring[0]]
@@ -123,19 +145,26 @@ def dodecahedron(r=0.5):
             cur = order[-1]
             order.append(next(i for i in ring if i not in order
                               and len(set(if_[i]) & set(if_[cur])) == 2))
-        poly = order
-        n = _cross(_sub(dv[poly[1]], dv[poly[0]]), _sub(dv[poly[2]], dv[poly[0]]))
-        if _dot(n, dv[poly[0]]) < 0:                                 # face outward (verts ~ outward normal)
-            poly = poly[::-1]
-        for k in range(1, len(poly) - 1):
-            tris.append((poly[0], poly[k], poly[k + 1]))
+        n = _cross(_sub(dv[order[1]], dv[order[0]]), _sub(dv[order[2]], dv[order[0]]))
+        if _dot(n, dv[order[0]]) < 0:                                # face outward (verts ~ outward normal)
+            order = order[::-1]
+        faces.append(order)
+    # stand it on a face: rotate one face's outward normal to -z, then lift so the bottom rests at z=0
+    fc = faces[0]
+    fn = _normalize((sum(dv[i][0] for i in fc), sum(dv[i][1] for i in fc), sum(dv[i][2] for i in fc)))
+    dv = _rotate_points(dv, fn, (0.0, 0.0, -1.0))
+    minz = min(p[2] for p in dv)
+    dv = [(x, y, z - minz) for x, y, z in dv]
+    tris = [(poly[0], poly[k], poly[k + 1]) for poly in faces for k in range(1, len(poly) - 1)]
     return dv, tris
 
 
-def dummy(head_r=0.12, torso_r=0.16, torso_h=0.9):
-    """Simplified human proxy (scatterer stand-in): cylinder torso + sphere head, merged. Low-poly, no
-    asset file to author. Swap for a decimated .obj asset when you have a real one; same Prop pipeline."""
+def dummy(head_r=0.12, torso_r=0.16, torso_h=0.7, shoulder=1.3):
+    """Simplified human proxy (scatterer stand-in): elliptical cylinder torso (widened in x -> shoulders)
+    + round sphere head, merged. Low-poly, no asset file to author. Swap for a decimated .obj asset when
+    you have a real one; same Prop pipeline."""
     tv, tt = cylinder(torso_r, torso_h, 16)
+    tv = bake(tv, scale=(shoulder, 1.0, 1.0))                        # widen left-right -> shoulders
     hv, ht = sphere(head_r, 1)
     hv = bake(hv, pos=(0.0, 0.0, torso_h / 2.0 + head_r))            # head sits on top of the torso
     return _merge([(tv, tt), (hv, ht)])
@@ -200,6 +229,30 @@ def bake(verts, pos=(0.0, 0.0, 0.0), rot=(0.0, 0.0, 0.0), scale=(1.0, 1.0, 1.0))
     return out
 
 
+def feature_edges(verts, tris, angle_thresh_deg=1.0):
+    """Crease + boundary edges only (drop within-face triangulation): an edge is kept if it borders one
+    face (open boundary, e.g. a plane's rim) or two faces whose normals differ by > thresh. Low thresh
+    (1 deg) drops only COPLANAR splits (box quad diagonals = 0 deg) -> a box shows its 12 cube edges,
+    while curved facets (sphere ~10 deg, cylinder ~22 deg) stay visible. Same idea as the scene overlay."""
+    from collections import defaultdict
+
+    def fn(t):
+        a, b, c = verts[t[0]], verts[t[1]], verts[t[2]]
+        return _normalize(_cross(_sub(b, a), _sub(c, a)))
+
+    normals = [fn(t) for t in tris]
+    emap = defaultdict(list)
+    for fi, t in enumerate(tris):
+        for u, v in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            emap[(min(u, v), max(u, v))].append(fi)
+    cos_t = math.cos(math.radians(angle_thresh_deg))
+    out = []
+    for (i, j), fs in emap.items():
+        if len(fs) == 1 or _dot(normals[fs[0]], normals[fs[1]]) < cos_t:
+            out.append((i, j))
+    return out
+
+
 class Prop:
     """A placed object: a source mesh (primitive name or asset name) + transform + layer."""
     def __init__(self, kind, source="box", pos=(0, 0, 0), rot=(0, 0, 0), scale=(1, 1, 1),
@@ -210,6 +263,7 @@ class Prop:
         self.layer = layer
         self.params = params or {}       # e.g. {"w":2,"h":1} for a primitive
         self._base = None                # cached (verts,tris) of the untransformed mesh
+        self._edges = None               # cached feature edges (topology -> same for any transform)
 
     def mesh(self):
         """Untransformed (verts, tris), cached. Rebuilds a primitive from params or loads an asset."""
@@ -222,6 +276,13 @@ class Prop:
         """(baked verts, tris) at the prop's transform — what gui draws / exports."""
         v, t = self.mesh()
         return bake(v, self.pos, self.rot, self.scale), t
+
+    def edges(self):
+        """Feature edges (indices into the vert list) for a clean wireframe — no triangulation shown."""
+        if self._edges is None:
+            v, t = self.mesh()
+            self._edges = feature_edges(v, t)
+        return self._edges
 
     def to_dict(self):
         return {"kind": self.kind, "source": self.source, "pos": self.pos, "rot": self.rot,
@@ -274,6 +335,10 @@ def _selfcheck():
     v, t = dodecahedron(0.5)
     assert len(v) == 20 and len(t) == 36 and _euler_closed(v, t), "dodecahedron closed (20v, 12 pentagons)"
     v, t = dummy(); assert v and t and all(0 <= i < len(v) for tri in t for i in tri), "dummy valid"
+
+    # feature edges: box shows its 12 cube edges (not quad diagonals), plane shows its 4-edge outline
+    assert len(feature_edges(*box())) == 12, "box feature edges = 12 (no triangulation)"
+    assert len(feature_edges(*plane())) == 4, "plane feature edges = 4 (outline only)"
 
     # bake: identity is a no-op; 90deg about Z sends +x -> +y; scale scales; translate offsets
     assert bake([(1, 2, 3)])[0] == (1.0, 2.0, 3.0), "identity bake"
