@@ -210,6 +210,12 @@ def chair(w=0.45, d=0.45, seat_h=0.45, back_h=0.45, th=0.03):
                    _box_at(w, th, back_h, (0, -d / 2.0 + th / 2.0, seat_h + back_h / 2.0))])  # back
 
 
+def bench(w=1.6, d=0.4, seat_h=0.45, back_h=0.30, th=0.03):
+    """Simplified bench: long thin seat slab + a short low back support. Sits on z=0."""
+    return _merge([_box_at(w, d, th, (0, 0, seat_h - th / 2.0)),                          # seat
+                   _box_at(w, th, back_h, (0, -d / 2.0 + th / 2.0, seat_h + back_h / 2.0))])  # short back
+
+
 def sofa(w=1.9, d=0.9, seat_h=0.43, back_h=0.45, back_t=0.15, arm=0.2, arm_h=0.22):
     """Simplified ergonomic 2-3 seat sofa: seat block (top ~0.43 m) + backrest (top ~0.88 m) + 2 arms
     (top ~0.65 m). Sits on z=0."""
@@ -294,9 +300,54 @@ def skyline(N=7, cell=0.05, step=0.02, base=0.02):
     return bake(v, rot=(0, 90, 0)), t                              # start rotated 90 about y
 
 
+def wedge(leg=0.35, length=1.2):
+    """Corner bass trap standing VERTICAL: right-triangular prism extruded `length` along z (floor to
+    height), right-angle edge vertical, legs along the two walls (+x, +y), hypotenuse facing the room.
+    Sits on z=0. Closed."""
+    L = length
+    v = [(0, 0, 0), (leg, 0, 0), (0, leg, 0),                 # bottom triangle (z=0)
+         (0, 0, L), (leg, 0, L), (0, leg, L)]                 # top triangle (z=L)
+    t = [(0, 2, 1), (3, 4, 5),                                # caps (bottom -z, top +z)
+         (0, 1, 4), (0, 4, 3),                                # wall face y=0
+         (0, 3, 5), (0, 5, 2),                                # wall face x=0
+         (1, 2, 5), (1, 5, 4)]                                # hypotenuse (faces room)
+    return v, t
+
+
+def stairs(n=5, w=1.0, tread=0.28, rise=0.18):
+    """Solid staircase: n cumulative step blocks (step k rises to (k+1)*rise). Sits on z=0."""
+    depth = n * tread
+    parts = []
+    for k in range(n):
+        h = (k + 1) * rise
+        parts.append(_box_at(w, tread, h, (0, -depth / 2.0 + tread * (k + 0.5), h / 2.0)))
+    return _merge(parts)
+
+
+def octant(r=0.5, seg=8):
+    """One octant (x,y,z >= 0) of an OPEN spherical shell — a curved triangular surface patch spanning
+    the +++ octant (two meridians + a quarter-equator arc). Open surface (no caps, no thickness); a
+    curved reflector/scatterer. Corner at the pole (0,0,r)."""
+    verts = []
+    for iu in range(seg + 1):
+        az = (math.pi / 2.0) * iu / seg
+        for iv in range(seg + 1):
+            el = (math.pi / 2.0) * iv / seg
+            verts.append((r * math.cos(el) * math.cos(az), r * math.cos(el) * math.sin(az), r * math.sin(el)))
+    idx = lambda iu, iv: iu * (seg + 1) + iv
+    tris = []
+    for iu in range(seg):
+        for iv in range(seg):
+            a, b = idx(iu, iv), idx(iu + 1, iv)
+            c, d = idx(iu + 1, iv + 1), idx(iu, iv + 1)
+            tris += [(a, b, c), (a, c, d)]
+    return verts, tris
+
+
 PRIMITIVES = {"plane": plane, "box": box, "cylinder": cylinder, "tetrahedron": tetrahedron,
-              "sphere": sphere, "dodecahedron": dodecahedron, "dummy": dummy,
-              "chair": chair, "sofa": sofa, "soundbox": soundbox, "skyline": skyline}
+              "sphere": sphere, "dodecahedron": dodecahedron, "octant": octant, "wedge": wedge,
+              "dummy": dummy, "chair": chair, "bench": bench, "sofa": sofa,
+              "soundbox": soundbox, "skyline": skyline, "stairs": stairs}
 
 
 # ── furniture / dummy assets (simplified OBJ, eyechecked once) ─────────────────────────────────
@@ -467,7 +518,8 @@ def _selfcheck():
 
     # new props: tetra closed; composites valid (nonempty, in-range indices); cone NOT a public prop
     v, t = tetrahedron(); assert len(v) == 4 and _euler_closed(v, t), "3-sided pyramid closed"
-    for name in ("chair", "sofa", "soundbox", "skyline"):
+    v, t = wedge(); assert len(v) == 6 and _euler_closed(v, t), "wedge (bass trap) closed prism"
+    for name in ("chair", "bench", "sofa", "soundbox", "skyline", "stairs", "octant"):
         v, t = PRIMITIVES[name]()
         assert v and t and all(0 <= i < len(v) for tri in t for i in tri), f"{name} valid"
     assert "cone" not in PRIMITIVES, "cone stays an internal helper (soundbox driver), not a prop"
