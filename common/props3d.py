@@ -486,6 +486,7 @@ class Prop:
         self.params = params or {}       # e.g. {"w":2,"h":1} for a primitive
         self._base = None                # cached (verts,tris) of the untransformed mesh
         self._edges = None               # cached feature edges (topology -> same for any transform)
+        self._center = None              # cached bbox center of the base mesh (transform pivot)
 
     def mesh(self):
         """Untransformed (verts, tris), cached. Rebuilds a primitive from params or loads an asset."""
@@ -494,10 +495,23 @@ class Prop:
                           else load_asset(self.source))
         return self._base
 
+    def center(self):
+        """Bbox center of the base mesh — the pivot for rotate/scale so they act IN PLACE (a corner-at-
+        origin mesh like `wedge` would otherwise swing/scale from its corner)."""
+        if self._center is None:
+            v = self.mesh()[0]
+            self._center = tuple((min(p[k] for p in v) + max(p[k] for p in v)) / 2.0 for k in range(3))
+        return self._center
+
     def world(self):
-        """(baked verts, tris) at the prop's transform — what gui draws / exports."""
+        """(baked verts, tris). Rotate/scale pivot about the mesh center, then offset by pos — so at
+        rot=0/scale=1 the result equals pos+vert (placement unchanged), but rotate spins and axis-scale
+        stretches IN PLACE about the center (and, for an axis-aligned prop, along the world axes)."""
         v, t = self.mesh()
-        return bake(v, self.pos, self.rot, self.scale), t
+        cx, cy, cz = self.center()
+        centered = [(x - cx, y - cy, z - cz) for x, y, z in v]
+        pos = (self.pos[0] + cx, self.pos[1] + cy, self.pos[2] + cz)
+        return bake(centered, pos, self.rot, self.scale), t
 
     def edges(self):
         """Feature edges (indices into the vert list) for a clean wireframe — no triangulation shown."""
@@ -565,6 +579,17 @@ def _selfcheck():
     # new props: tetra closed; composites valid (nonempty, in-range indices); cone NOT a public prop
     v, t = tetrahedron(); assert len(v) == 4 and _euler_closed(v, t), "3-sided pyramid closed"
     v, t = wedge(); assert len(v) == 6 and _euler_closed(v, t), "wedge (bass trap) closed prism"
+
+    # transforms pivot about the mesh CENTER (in place), yet placement (rot=0,scale=1) stays pos+vert.
+    _bc = lambda vv: [(min(p[k] for p in vv) + max(p[k] for p in vv)) / 2.0 for k in range(3)]
+    pw = Prop("primitive", "wedge", pos=(1, 2, 3))                  # corner-at-origin mesh
+    wv, bv = pw.world()[0], pw.mesh()[0]
+    assert all(abs(wv[i][k] - (bv[i][k] + (1, 2, 3)[k])) < 1e-9 for i in range(len(bv)) for k in range(3)), \
+        "identity transform == pos + vert (placement unchanged by center pivot)"
+    c0 = _bc(pw.world()[0]); pw.rot = [0, 0, 90]; c1 = _bc(pw.world()[0])
+    assert all(abs(a - b) < 1e-9 for a, b in zip(c0, c1)), "rotate pivots about center (in place)"
+    pw.rot = [0, 0, 0]; pw.scale = [2, 1, 1]; c2 = _bc(pw.world()[0])
+    assert all(abs(a - b) < 1e-9 for a, b in zip(c0, c2)), "axis-scale pivots about center (in place)"
     for name in ("seat", "sofa", "bed", "shelf", "full_shelf", "fountain",
                  "soundbox", "skyline", "stairs", "octant"):
         v, t = PRIMITIVES[name]()

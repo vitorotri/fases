@@ -633,6 +633,7 @@ class GLViewer(QOpenGLWidget):
     fpvRequested     = Signal()                          # RMB "Enter receiver view" (first-person)
     fpvExitRequested = Signal()                          # RMB "Go back" from receiver view
     fpvPoseChanged   = Signal(float, float, float)       # FPV mouselook -> az,el,roll (deg) to the dials
+    propsChanged     = Signal()                          # a prop transform confirmed/cancelled (refresh panel)
 
     # placement modes
     MODE_NONE  = 0
@@ -706,6 +707,8 @@ class GLViewer(QOpenGLWidget):
         self._mode      = self.MODE_NONE
         self._props     = []          # props3d.Prop list (placed primitives/assets); drawn + exported
         self._prop_sel  = -1          # selected prop index (panel highlight), or -1
+        self._props_mode = False      # Draw mode: P/R/S transform props (and src/rec placement locked)
+        self._xform     = None        # active modal transform: {mode,axis,idx,pos,rot,scale,anchor}
         self._ortho     = False       # orthographic top-down projection (plan view for placement)
         self._axis_lock = None          # 'X','Y','Z' or None
         self._place_pos = np.zeros(3, np.float32)  # frozen base position
@@ -1663,6 +1666,101 @@ class GLViewer(QOpenGLWidget):
             glEnd()
         glEnable(GL_LIGHTING)
 
+    def set_props_mode(self, on):
+        """Draw mode: enable P/R/S modal prop transforms (and the caller locks src/rec placement)."""
+        self._props_mode = bool(on)
+        if not on and self._xform is not None:
+            self._xform = None; self.update()
+
+    def _find_nearest_prop(self, qpos, radius=60.0):
+        """Index of the prop whose center projects nearest the cursor (within radius px), else -1."""
+        if not self._props:
+            return -1
+        self.makeCurrent()
+        W, H = self.width(), self.height(); vp = [0, 0, int(W), int(H)]
+        best, bi = radius, -1
+        for i, p in enumerate(self._props):
+            try:
+                sx, sy, _ = gluProject(float(p.pos[0]), float(p.pos[1]), float(p.pos[2]),
+                                       self._mv, self._proj, vp)
+                d = math.hypot(sx - qpos.x(), (H - sy) - qpos.y())
+                if d < best:
+                    best, bi = d, i
+            except Exception:
+                pass
+        return bi
+
+    def _xform_start(self, mode):
+        """Begin a modal transform (mode 'p'/'r'/'s') on the selected prop, else the nearest to cursor."""
+        if not self._props:
+            return False
+        cpos = self.mapFromGlobal(QCursor.pos())
+        idx = self._prop_sel if 0 <= self._prop_sel < len(self._props) else self._find_nearest_prop(cpos)
+        if idx < 0:
+            return False
+        p = self._props[idx]
+        self._prop_sel = idx
+        self._xform = {"mode": mode, "axis": None, "idx": idx, "anchor": cpos,
+                       "pos": list(p.pos), "rot": list(p.rot), "scale": list(p.scale)}
+        self.update()
+        return True
+
+    def _xform_end(self, cancel):
+        if self._xform is None:
+            return
+        if cancel:                                                 # restore the snapshot
+            p = self._props[self._xform["idx"]]
+            p.pos, p.rot, p.scale = (list(self._xform["pos"]), list(self._xform["rot"]),
+                                     list(self._xform["scale"]))
+        self._xform = None
+        self.propsChanged.emit(); self.update()
+
+    def _xform_apply(self, qpos):
+        """Drive the active transform from the mouse (Blender-style, no button): P moves (screen-plane or
+        along the locked axis), R rotates about the locked axis (default Z), S scales (uniform or the
+        locked axis)."""
+        xf = self._xform
+        if xf is None or not (0 <= xf["idx"] < len(self._props)):
+            return
+        p = self._props[xf["idx"]]
+        dx = qpos.x() - xf["anchor"].x(); dy = -(qpos.y() - xf["anchor"].y())
+        ai = {"X": 0, "Y": 1, "Z": 2}
+        if xf["mode"] == "p":
+            self.makeCurrent()
+            W, H = self.width(), self.height(); vp = [0, 0, int(W), int(H)]
+            base = np.array(xf["pos"], float)
+            if xf["axis"] is None:                                 # free: screen-plane at the prop's depth
+                try:
+                    _, _, sz = gluProject(*base, self._mv, self._proj, vp)
+                    w = gluUnProject(float(qpos.x()), float(H) - float(qpos.y()), float(sz),
+                                     self._mv, self._proj, vp)
+                    p.pos = [float(w[0]), float(w[1]), float(w[2])]
+                except Exception:
+                    pass
+            else:                                                  # along the locked world axis
+                axv = np.array({"X": (1, 0, 0), "Y": (0, 1, 0), "Z": (0, 0, 1)}[xf["axis"]], float)
+                try:
+                    s0 = np.array(gluProject(*base, self._mv, self._proj, vp)[:2])
+                    s1 = np.array(gluProject(*(base + axv * 0.1), self._mv, self._proj, vp)[:2])
+                    sdir = s1 - s0; L = np.linalg.norm(sdir)
+                    if L > 1e-6:
+                        move = float(np.dot([dx, dy], sdir / L)) * self._dist * 0.0015
+                        newp = base + axv * move
+                        p.pos = [float(newp[0]), float(newp[1]), float(newp[2])]
+                except Exception:
+                    pass
+        elif xf["mode"] == "r":
+            axis = xf["axis"] or "Z"
+            p.rot = list(xf["rot"]); p.rot[ai[axis]] = xf["rot"][ai[axis]] + dx * 0.5   # 0.5 deg/px
+        elif xf["mode"] == "s":
+            f = max(0.01, 1.0 + dx * 0.01)
+            if xf["axis"] is None:
+                p.scale = [c * f for c in xf["scale"]]
+            else:
+                k = ai[xf["axis"]]
+                p.scale = list(xf["scale"]); p.scale[k] = xf["scale"][k] * f
+        self.update()
+
     def add_prop(self, prop):
         self._props.append(prop); self._prop_sel = len(self._props) - 1; self.update()
 
@@ -2110,6 +2208,12 @@ class GLViewer(QOpenGLWidget):
         self._last_pos  = e.position()
         self._mouse_btn = e.button()
         self._drag_moved = False
+        # A modal prop transform in progress: LMB confirms, RMB cancels; consume so the camera stays put.
+        if self._xform is not None:
+            if e.button() == Qt.MouseButton.LeftButton:
+                self._xform_end(cancel=False); return
+            if e.button() == Qt.MouseButton.RightButton:
+                self._xform_end(cancel=True); return
         # If edit mode (E) is armed and LMB is pressed, grab the nearest
         # placed source/receiver instead of rotating the camera.
         if (self._fpv is None and self._grab_held and e.button() == Qt.MouseButton.LeftButton
@@ -2130,6 +2234,9 @@ class GLViewer(QOpenGLWidget):
                 self._last_pos = e.position()
                 self.update()
             return
+        # ── modal prop transform: mouse drives it, no button held ──
+        if self._xform is not None:
+            self._xform_apply(e.position()); self._last_pos = e.position(); return
         # ── placement mode: mouse moves the cursor with NO button needed ──
         if self._mode != self.MODE_NONE:
             if self._axis_lock:
@@ -2327,6 +2434,22 @@ class GLViewer(QOpenGLWidget):
 
     def keyPressEvent(self, e):
         key = e.key()
+        # ── Draw mode: modal prop transform. P move, R rotate, S scale; X/Y/Z lock axis (toggle);
+        #    Enter confirms, Esc cancels. Blender-style: after the key, the mouse drives it (no button). ──
+        if self._props_mode and self._mode == self.MODE_NONE:
+            if self._xform is not None:
+                if key == Qt.Key.Key_Escape:
+                    self._xform_end(cancel=True); e.accept(); return
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self._xform_end(cancel=False); e.accept(); return
+                if key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):    # HELD (like placement/drag locks)
+                    if not e.isAutoRepeat():
+                        self._xform['axis'] = {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]
+                        self._xform_apply(self.mapFromGlobal(QCursor.pos()))
+                    e.accept(); return
+            if self._xform is None and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
+                if self._xform_start({Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]):
+                    e.accept(); return
         if key == Qt.Key.Key_Escape:
             self.exit_placement_mode()
             e.accept(); return
@@ -2367,6 +2490,11 @@ class GLViewer(QOpenGLWidget):
         if e.isAutoRepeat():
             return
         key = e.key()
+        # Releasing X/Y/Z during a modal prop transform -> back to free (held, like everywhere else).
+        if self._xform is not None and key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
+            self._xform['axis'] = None
+            self._xform_apply(self.mapFromGlobal(QCursor.pos()))
+            e.accept(); return
         # Releasing X/Y/Z while dragging a point -> back to free movement.
         if self._drag_kind is not None and key in (
                 Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
@@ -4970,6 +5098,7 @@ class MainWindow(QMainWindow):
         """Switch the right-side area: 'sim' = 3D scene, 'results' = per-receiver IR/FR plots,
         'draw' = sketcher (separate script, added later)."""
         self._view_mode = mode
+        self._gl.set_props_mode(mode == "draw")        # Draw: P/R/S transform props, src/rec locked
         self._gl.set_results_pick(mode == "results")   # click-to-select receivers only in Results
         if mode != "results":
             self._gl.set_selected_receivers([])        # drop the multi-select highlight
@@ -5014,9 +5143,15 @@ class MainWindow(QMainWindow):
         self._load_props_json()
         if getattr(self, "_propswin", None) is None:
             self._propswin = PropsWindow(self._gl, self)
+            self._gl.propsChanged.connect(self._on_props_changed)   # GL transform -> refresh the panel
         else:
             self._propswin._refresh()
         self._propswin.show(); self._propswin.raise_()
+
+    def _on_props_changed(self):
+        pw = getattr(self, "_propswin", None)
+        if pw is not None:
+            pw._refresh(); pw._on_select(self._gl._prop_sel)
 
     def _props_json_path(self):
         return (os.path.join(self._proj_root, "input", "scene", "props.json")
@@ -5554,6 +5689,11 @@ class MainWindow(QMainWindow):
             self._undo_point_change()
             e.accept(); return
         key = e.key()
+        # Draw mode reserves S/R/L for prop transforms (handled by the GL widget when focused); never
+        # place sources/receivers/slices here. Placement is a Simulation-mode action.
+        if getattr(self, "_view_mode", "sim") == "draw" and key in (
+                Qt.Key.Key_S, Qt.Key.Key_R, Qt.Key.Key_L):
+            e.accept(); return
         if key == Qt.Key.Key_S:
             checked = not self._src_btn.isChecked()
             self._src_btn.setChecked(checked)
