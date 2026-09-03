@@ -14,9 +14,11 @@ Controls (checked against gui.py: Ctrl+K is unused there; the rest are window-sc
   Ctrl+Z     undo        MMB drag  pan        wheel  zoom
 """
 import copy
-from PySide6.QtCore import Qt, QPointF, Signal
+import math
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 from PySide6.QtGui import QPainter, QPen, QColor, QBrush
-from PySide6.QtWidgets import (QWidget, QDoubleSpinBox, QLabel, QVBoxLayout, QHBoxLayout, QFormLayout)
+from PySide6.QtWidgets import (QWidget, QDoubleSpinBox, QLabel, QVBoxLayout, QHBoxLayout, QFormLayout,
+                               QPushButton)
 
 HIT_PX = 10          # vertex pick radius, screen pixels
 EDGE_HIT_PX = 28     # edge pick radius for Ctrl+LMB insert (looser: no need to be near the edge)
@@ -241,6 +243,64 @@ def extrude_obj(shapes):
     return "\n".join(lines) + "\n"
 
 
+def _rect_ellipse_pts(p0, p1, kind, n=48):
+    """2D outline (list of (x,y)) of a rectangle or ellipse spanning the drag bbox p0..p1."""
+    x0, x1 = sorted((p0[0], p1[0])); y0, y1 = sorted((p0[1], p1[1]))
+    if kind == "rect":
+        return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0; rx, ry = (x1 - x0) / 2.0, (y1 - y0) / 2.0
+    return [(cx + rx * math.cos(2 * math.pi * k / n), cy + ry * math.sin(2 * math.pi * k / n)) for k in range(n)]
+
+
+def _boundary_union(new_xy, others):
+    """Union the new polygon with any `others` it CROSSES (overlaps the boundary of) -> the outermost
+    exterior ring + the absorbed indices. Fully-contained shapes (sub-regions) are NOT unioned. Needs
+    shapely (polygon boolean); returns (None, []) if shapely is absent or nothing crosses."""
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except Exception:
+        return None, []
+    npoly = Polygon(new_xy)
+    if not npoly.is_valid or npoly.area <= 0:
+        return None, []
+    merged, absorbed = npoly, []
+    for i, xy in enumerate(others):
+        if len(xy) < 3:
+            continue
+        poly = Polygon(xy)
+        if poly.is_valid and npoly.intersects(poly) and not npoly.within(poly) and not poly.within(npoly):
+            merged = unary_union([merged, poly]); absorbed.append(i)
+    if not absorbed:
+        return None, []
+    g = merged
+    if g.geom_type == "MultiPolygon":
+        g = max(g.geoms, key=lambda p: p.area)
+    return [(round(x, 4), round(y, 4)) for x, y in list(g.exterior.coords)[:-1]], absorbed
+
+
+def _split_polygon(xy, p0, p1):
+    """Split polygon `xy` with the segment p0..p1 -> list of exterior rings (>=2 if it actually cut),
+    else []. Needs shapely; [] if absent or the line doesn't divide the polygon."""
+    try:
+        from shapely.geometry import Polygon, LineString
+        from shapely.ops import split
+    except Exception:
+        return []
+    poly = Polygon(xy)
+    line = LineString([p0, p1])
+    if not poly.is_valid or not line.intersects(poly):
+        return []
+    try:
+        parts = split(poly, line)
+    except Exception:
+        return []
+    polys = [g for g in getattr(parts, "geoms", [parts]) if g.geom_type == "Polygon" and g.area > 1e-9]
+    if len(polys) <= 1:
+        return []
+    return [[(round(x, 4), round(y, 4)) for x, y in list(g.exterior.coords)[:-1]] for g in polys]
+
+
 def _drop_out_of_range(shapes):
     """Remove vertices flung far past the scene — corrupt saves clamp coords to the spinbox +-1e4 max,
     which then extrudes a wall shooting to 10000 and wrecks the contour. Bound = 50x the median extent
@@ -270,6 +330,11 @@ class _Canvas(QWidget):
         self.setMouseTracking(True)  # hover coords without a button held
         self._hover = None           # world (x,y) under cursor, for the readout
         self._prop_foot = []         # read-only top-down prop outlines (from gui), [[(x,y),...], ...]
+        self._tool = "free"          # free | rect | ellipse | measure | select | cut
+        self._draw_drag = None       # [(x0,y0),(x1,y1)] world bbox while dragging a rect/ellipse
+        self._tool_drag = None       # active measure/select/cut drag [(x0,y0),(x1,y1)]
+        self._measure = None         # last ruler measurement [(x0,y0),(x1,y1)] (persistent)
+        self._psel = set()           # multi-selected points {(shape_idx, pt_idx)} for delete / z-apply
         self.shapes = []             # [{"pts": [[x,y,z], ...], "closed": bool}]
         self.sel = None              # (shape_idx, pt_idx) or None
         self._undo = []              # snapshots (shapes, sel), pushed BEFORE each mutation
@@ -304,9 +369,93 @@ class _Canvas(QWidget):
                 return i
         return None
 
+    def _grid_snap(self, x, y):
+        """Snap to the nearest h-grid corner in FREE mode (rect/ellipse keep the exact drag)."""
+        h = self.h
+        if self._tool == "free" and h and h > 0:
+            return round(x / h) * h, round(y / h) * h
+        return x, y
+
     def dump_shapes(self):
         """JSON-able copy of the sketch (for the .json sidecar so it can be re-edited later)."""
         return copy.deepcopy(self.shapes)
+
+    def _finish_draw_shape(self, p0, p1):
+        """Create the dragged rect/ellipse (closed), add it, and union it into any boundary it crosses
+        (outermost outline kept; absorbed shapes removed). Positive quadrant only."""
+        xy = [(round(max(0.0, x), 4), round(max(0.0, y), 4)) for x, y in _rect_ellipse_pts(p0, p1, self._tool)]
+        self._snap()
+        self.shapes.append({"pts": [[x, y, 0.0, 0.0] for x, y in xy], "closed": True})
+        closed_idx = [i for i, s in enumerate(self.shapes[:-1]) if s["closed"] and len(s["pts"]) >= 3]
+        others = [[(p[0], p[1]) for p in self.shapes[i]["pts"]] for i in closed_idx]
+        ext, absorbed = _boundary_union(xy, others)
+        if ext:
+            self.shapes[-1]["pts"] = [[x, y, 0.0, 0.0] for x, y in ext]
+            for i in sorted((closed_idx[a] for a in absorbed), reverse=True):
+                del self.shapes[i]
+        self.sel = None; self.selectionChanged.emit(); self.update()
+
+    def _select_in_box(self, p0, p1):
+        """Select all shape points inside the box p0..p1 (for delete / height-apply)."""
+        x0, x1 = sorted((p0[0], p1[0])); y0, y1 = sorted((p0[1], p1[1]))
+        self._psel = {(si, pi) for si, sh in enumerate(self.shapes)
+                      for pi, pt in enumerate(sh["pts"]) if x0 <= pt[0] <= x1 and y0 <= pt[1] <= y1}
+        self.sel = None; self.selectionChanged.emit()
+
+    def _delete_selected(self):
+        """Delete the box-selected points; drop any shape left with too few points."""
+        if not self._psel:
+            return
+        self._snap()
+        bysh = {}
+        for si, pi in self._psel:
+            bysh.setdefault(si, []).append(pi)
+        for si in sorted(bysh, reverse=True):                      # high->low so indices stay valid
+            if si >= len(self.shapes):
+                continue
+            for pi in sorted(bysh[si], reverse=True):
+                if pi < len(self.shapes[si]["pts"]):
+                    del self.shapes[si]["pts"][pi]
+            if len(self.shapes[si]["pts"]) < 2:
+                del self.shapes[si]
+        self._psel = set(); self.sel = None; self.selectionChanged.emit(); self.update()
+
+    def apply_z_to_selection(self, zb, zt):
+        """Set z_bottom/z_top on every box-selected point (equal heights across many corners)."""
+        if not self._psel:
+            return
+        self._snap()
+        for si, pi in self._psel:
+            if si < len(self.shapes) and pi < len(self.shapes[si]["pts"]):
+                self.shapes[si]["pts"][pi][2] = round(zb, 4); self.shapes[si]["pts"][pi][3] = round(zt, 4)
+        self.update()
+
+    def _cut_with_line(self, p0, p1):
+        """Cut every closed shape the segment crosses into pieces (shapely split). Footprint z carried
+        as z_top; z reassigned by extrude/panel afterwards."""
+        new, changed = [], False
+        for sh in self.shapes:
+            if sh["closed"] and len(sh["pts"]) >= 3:
+                rings = _split_polygon([(p[0], p[1]) for p in sh["pts"]], p0, p1)
+                if rings:
+                    zt = max((p[3] for p in sh["pts"]), default=0.0)
+                    for r in rings:
+                        new.append({"pts": [[x, y, 0.0, round(zt, 4)] for x, y in r], "closed": True})
+                    changed = True
+                    continue
+            new.append(sh)
+        if changed:
+            self._snap(); self.shapes = new
+            self.sel = None; self._psel = set(); self.selectionChanged.emit(); self.update()
+
+    def _draw_measure_label(self, qp, p0, p1):
+        d = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+        a = self._w2s(*p0); b = self._w2s(*p1)
+        txt = f"{d:.3g} m"
+        if self.h and self.h > 0:
+            txt += f"  (Δi {abs(p1[0]-p0[0])/self.h:.1f}, Δj {abs(p1[1]-p0[1])/self.h:.1f})"
+        qp.setPen(QColor("#f0c040"))
+        qp.drawText(QPointF((a.x() + b.x()) / 2.0, (a.y() + b.y()) / 2.0 - 6), txt)
 
     def set_prop_footprints(self, polys):
         """Read-only top-down outlines of the 3D props (from gui), drawn under the sketch."""
@@ -327,6 +476,13 @@ class _Canvas(QWidget):
         self._last = e.position()
         wx, wy = self._s2w(e.position().x(), e.position().y())
         wx, wy = max(0.0, wx), max(0.0, wy)                         # positive quadrant only
+        gx, gy = self._grid_snap(wx, wy)                            # free-mode: placed points snap to grid
+        if self._tool in ("rect", "ellipse") and e.button() == Qt.MouseButton.LeftButton:
+            self._draw_drag = [(wx, wy), (wx, wy)]                  # rubber-band a bbox; finish on release
+            return
+        if self._tool in ("measure", "select", "cut") and e.button() == Qt.MouseButton.LeftButton:
+            self._tool_drag = [(wx, wy), (wx, wy)]                  # ruler line / select box / cut line
+            return
         ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
         alt = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
         tol = HIT_PX / self.scale
@@ -336,7 +492,7 @@ class _Canvas(QWidget):
             if hit:
                 self._snap()
                 si, idx, zb, zt = hit                               # xy at the CLICK, z's from the edge
-                self.shapes[si]["pts"].insert(idx, [round(wx, 4), round(wy, 4), round(zb, 4), round(zt, 4)])
+                self.shapes[si]["pts"].insert(idx, [round(gx, 4), round(gy, 4), round(zb, 4), round(zt, 4)])
                 self.sel = (si, idx); self.selectionChanged.emit(); self.update()
             return
         if b == Qt.MouseButton.RightButton and ctrl:                # remove nearest point
@@ -356,7 +512,7 @@ class _Canvas(QWidget):
                 self.selectionChanged.emit()
             elif self._active() is not None:                        # drawing an open shape -> append
                 self._snap(); si = self._active()
-                self.shapes[si]["pts"].append([round(wx, 4), round(wy, 4), 0.0, 0.0])
+                self.shapes[si]["pts"].append([round(gx, 4), round(gy, 4), 0.0, 0.0])
                 self.sel = (si, len(self.shapes[si]["pts"]) - 1); self.selectionChanged.emit()
             else:
                 inside = next((si for si, sh in enumerate(self.shapes)
@@ -365,7 +521,7 @@ class _Canvas(QWidget):
                     self._snap(); self._drag = ("shape", inside)
                 else:                                               # start a new shape; LMB inside a
                     self._snap()                                    # closed one begins a nested sub-region
-                    self.shapes.append({"pts": [[round(wx, 4), round(wy, 4), 0.0, 0.0]], "closed": False})
+                    self.shapes.append({"pts": [[round(gx, 4), round(gy, 4), 0.0, 0.0]], "closed": False})
                     self.sel = (len(self.shapes) - 1, 0); self.selectionChanged.emit()
             self.update(); return
         if b == Qt.MouseButton.MiddleButton:                        # pan
@@ -374,6 +530,12 @@ class _Canvas(QWidget):
     def mouseMoveEvent(self, e):
         p = e.position()
         self._hover = self._s2w(p.x(), p.y())                       # live cursor coords (raw, may be <0)
+        if self._draw_drag is not None:                            # extend the rect/ellipse bbox
+            wx, wy = self._s2w(p.x(), p.y())
+            self._draw_drag[1] = (max(0.0, wx), max(0.0, wy)); self.update(); return
+        if self._tool_drag is not None:                            # extend the ruler/select/cut drag
+            wx, wy = self._s2w(p.x(), p.y())
+            self._tool_drag[1] = (max(0.0, wx), max(0.0, wy)); self.update(); return
         if self._drag is None:
             self.update(); return
         if self._drag[0] == "pan":
@@ -383,7 +545,7 @@ class _Canvas(QWidget):
         if self._drag[0] == "pt":
             _, si, idx = self._drag
             pt = self.shapes[si]["pts"][idx]
-            pt[0] = round(max(0.0, pt[0] + dx), 4); pt[1] = round(max(0.0, pt[1] + dy), 4)  # positive only
+            pt[0] = round(max(0.0, pt[0] + dx), 4); pt[1] = round(max(0.0, pt[1] + dy), 4)  # free while dragging
             self.selectionChanged.emit()
         elif self._drag[0] == "shape":
             sh = self.shapes[self._drag[1]]
@@ -394,6 +556,28 @@ class _Canvas(QWidget):
         self._last = p; self.update()
 
     def mouseReleaseEvent(self, e):
+        if self._draw_drag is not None and e.button() == Qt.MouseButton.LeftButton:
+            p0, p1 = self._draw_drag; self._draw_drag = None
+            if abs(p1[0] - p0[0]) > 1e-3 and abs(p1[1] - p0[1]) > 1e-3:   # ignore a zero-size click
+                self._finish_draw_shape(p0, p1)
+            else:
+                self.update()
+            return
+        if self._tool_drag is not None and e.button() == Qt.MouseButton.LeftButton:
+            p0, p1 = self._tool_drag; self._tool_drag = None
+            if self._tool == "measure":
+                self._measure = [p0, p1]
+            elif self._tool == "select":
+                self._select_in_box(p0, p1)
+            elif self._tool == "cut":
+                self._cut_with_line(p0, p1)
+            self.update(); return
+        if self._drag and self._drag[0] == "pt":                  # snap the moved point to grid ON RELEASE
+            _, si, idx = self._drag
+            pt = self.shapes[si]["pts"][idx]
+            nx, ny = self._grid_snap(pt[0], pt[1])
+            pt[0] = round(nx, 4); pt[1] = round(ny, 4)
+            self.selectionChanged.emit(); self.update()
         self._drag = None
 
     def contextMenuEvent(self, e):
@@ -459,8 +643,10 @@ class _Canvas(QWidget):
         if ctrl and e.key() == Qt.Key.Key_Z:                        # undo
             if self._undo:
                 self.shapes, self.sel = self._undo.pop()
-                self.selectionChanged.emit(); self.update()
+                self._psel = set(); self.selectionChanged.emit(); self.update()
             return
+        if e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):    # delete box-selected points
+            self._delete_selected(); return
         super().keyPressEvent(e)
 
     def fit_view(self):
@@ -539,6 +725,11 @@ class _Canvas(QWidget):
             for poly in self._prop_foot:
                 if len(poly) >= 2:
                     qp.drawPolygon(QPolygonF([self._w2s(x, y) for x, y in poly]))
+        if self._draw_drag is not None:                            # live rect/ellipse preview
+            a = self._w2s(*self._draw_drag[0]); b = self._w2s(*self._draw_drag[1])
+            qp.setPen(QPen(QColor("#7c5cfc"), 2, Qt.PenStyle.DashLine)); qp.setBrush(Qt.BrushStyle.NoBrush)
+            r = QRectF(a, b).normalized()
+            (qp.drawRect if self._tool == "rect" else qp.drawEllipse)(r)
         for si, sh in enumerate(self.shapes):
             sp = [self._w2s(p[0], p[1]) for p in sh["pts"]]
             col = QColor("#7c5cfc") if sh["closed"] else QColor("#e0a54f")  # boundary vs interior line
@@ -548,11 +739,30 @@ class _Canvas(QWidget):
             if sh["closed"] and len(sp) > 1:
                 qp.drawLine(sp[-1], sp[0])
             for pi, s in enumerate(sp):
+                msel = (si, pi) in self._psel
                 selp = self.sel == (si, pi)
                 qp.setPen(Qt.PenStyle.NoPen)
-                qp.setBrush(QBrush(QColor("#0ff091") if selp else QColor("#cfd8dc")))
-                r = 5 if selp else 4
+                qp.setBrush(QBrush(QColor("#ff5c7a") if msel else QColor("#0ff091") if selp
+                                   else QColor("#cfd8dc")))
+                r = 6 if (msel or selp) else 4
                 qp.drawEllipse(s, r, r)
+        # ruler measurement (persistent) + active measure/select/cut drag preview
+        if self._measure is not None and self._tool == "measure":
+            a = self._w2s(*self._measure[0]); b = self._w2s(*self._measure[1])
+            qp.setPen(QPen(QColor("#f0c040"), 2)); qp.drawLine(a, b)
+            self._draw_measure_label(qp, *self._measure)
+        td = self._tool_drag
+        if td is not None:
+            a = self._w2s(*td[0]); b = self._w2s(*td[1])
+            if self._tool == "select":
+                qp.setPen(QPen(QColor("#0ff091"), 1, Qt.PenStyle.DashLine))
+                qp.setBrush(QBrush(QColor(15, 240, 145, 30)))
+                qp.drawRect(QRectF(a, b).normalized())
+            else:
+                qp.setPen(QPen(QColor("#f0c040" if self._tool == "measure" else "#ff5c7a"), 2))
+                qp.setBrush(Qt.BrushStyle.NoBrush); qp.drawLine(a, b)
+                if self._tool == "measure":
+                    self._draw_measure_label(qp, td[0], td[1])
 
 
 class SketchWindow(QWidget):
@@ -575,11 +785,30 @@ class SketchWindow(QWidget):
                       "shape · Ctrl+LMB insert on edge · Ctrl+RMB del · Ctrl+Z undo · RMB extrude/update · "
                       "MMB pan · wheel zoom")
         hint.setWordWrap(True); hint.setStyleSheet("color:#8a94a6;font-size:11px;")
+        # tool selector: Free (click polygon) / Rect / Ellipse (drag a bbox); rect/ellipse union into the
+        # boundary they overlap.
+        self._tool_btns = {}
+        trow = QHBoxLayout()
+        for label, tool in (("Free", "free"), ("Rect", "rect"), ("Ellipse", "ellipse"),
+                            ("Measure", "measure"), ("Select", "select"), ("Cut", "cut")):
+            b = QPushButton(label); b.setCheckable(True); b.setChecked(tool == "free")
+            b.clicked.connect(lambda _=False, t=tool: self._set_tool(t))
+            trow.addWidget(b); self._tool_btns[tool] = b
+        self._applyz_btn = QPushButton("Apply z → selected pts")   # equalize heights over a Select box
+        self._applyz_btn.clicked.connect(self._apply_z_sel)
         side = QVBoxLayout()
+        side.addWidget(QLabel("Tool")); side.addLayout(trow)
         side.addWidget(QLabel("Selected point")); side.addWidget(panel)
+        side.addWidget(self._applyz_btn)
         side.addWidget(hint); side.addStretch(1)
         root = QHBoxLayout(self); root.addWidget(self.canvas, 1); root.addLayout(side)
         self._sync()
+
+    def _set_tool(self, tool):
+        self.canvas._tool = tool
+        for t, b in self._tool_btns.items():
+            b.setChecked(t == tool)
+        self.canvas.setFocus()
 
     def _spin(self):
         s = QDoubleSpinBox(); s.setRange(-1e4, 1e4); s.setDecimals(3); s.setSingleStep(0.1)
@@ -590,15 +819,20 @@ class SketchWindow(QWidget):
 
     def _sync(self):
         sel = self.canvas.sel
-        on = sel is not None
+        has_psel = bool(self.canvas._psel)
+        on = sel is not None or has_psel                          # enable z spins for box-selection too
         for s in (self._sx, self._sy, self._szb, self._szt):
             s.blockSignals(True); s.setEnabled(on)
-        if on:
+        if sel is not None:                                       # only a single point fills the fields
             p = self.canvas.shapes[sel[0]]["pts"][sel[1]]
             self._sx.setValue(p[0]); self._sy.setValue(p[1])
             self._szb.setValue(p[2]); self._szt.setValue(p[3])
         for s in (self._sx, self._sy, self._szb, self._szt):
             s.blockSignals(False)
+        self._applyz_btn.setEnabled(has_psel)
+
+    def _apply_z_sel(self):
+        self.canvas.apply_z_to_selection(self._szb.value(), self._szt.value())
 
     def _apply(self, *_):        # valueChanged passes a float; absorb it (else TypeError, edit ignored)
         sel = self.canvas.sel
@@ -627,6 +861,21 @@ def _selfcheck():
     assert extrude_obj([{"pts": sloped, "closed": True}]).count("g ceiling") > 1, "sloped ceiling triangulated"
     assert extrude_obj([{"pts": sq, "closed": False}]) is None, "open -> no obj"
     assert len(_triangulate_xy([[0, 0], [4, 0], [4, 4], [2, 4], [2, 2], [0, 2]])) == 4, "ear-clip concave L"
+    assert _rect_ellipse_pts((0, 0), (2, 1), "rect") == [(0, 0), (2, 0), (2, 1), (0, 1)], "rect from bbox"
+    assert len(_rect_ellipse_pts((0, 0), (2, 2), "ellipse")) == 48, "ellipse polygon 48 pts"
+    try:                                                # boundary union needs shapely
+        import shapely  # noqa: F401
+        # two overlapping unit squares -> union exterior spans 0..1.5 in x (outermost boundary)
+        ext, absorbed = _boundary_union([(0, 0), (1, 0), (1, 1), (0, 1)],
+                                        [[(0.5, 0), (1.5, 0), (1.5, 1), (0.5, 1)]])
+        assert absorbed == [0] and ext and abs(max(x for x, _ in ext) - 1.5) < 1e-6, "overlap unions to outer"
+        # a fully-contained square is NOT unioned (stays a sub-region)
+        _, ab2 = _boundary_union([(0, 0), (3, 0), (3, 3), (0, 3)], [[(1, 1), (2, 1), (2, 2), (1, 2)]])
+        assert ab2 == [], "contained shape not unioned"
+        rings = _split_polygon([(0, 0), (2, 0), (2, 2), (0, 2)], (1, -1), (1, 3))   # vertical cut at x=1
+        assert len(rings) == 2, "cut line splits the square into two"
+    except ImportError:
+        print("(shapely not installed -> boundary-union / cut tests skipped)")
     clean, nd = _drop_out_of_range([{"pts": [[0, 0, 0, 3], [2, 0, 0, 3], [2, 2, 0, 3],
                                              [10000, 10000, 0, 3]], "closed": True}])   # 1 stray vertex
     assert nd == 1 and len(clean) == 1 and len(clean[0]["pts"]) == 3, "sanitizer drops far vertex, keeps room"
