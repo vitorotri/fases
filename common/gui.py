@@ -6239,7 +6239,10 @@ class MainWindow(QMainWindow):
         ar = QHBoxLayout(); ar.addWidget(QLabel("Audio"))
         self._aur_dry = QLineEdit(QSettings("phases", "gui").value("last_dry", "") or "")
         bd = QPushButton("Anechoic…"); bd.setFixedHeight(24); bd.clicked.connect(self._pick_dry)
-        ar.addWidget(self._aur_dry, 1); ar.addWidget(bd); v.addLayout(ar)
+        bps = QPushButton("Per-source…"); bps.setFixedHeight(24); bps.clicked.connect(self._edit_src_dry)
+        bps.setToolTip("Give each source its own anechoic signal (played simultaneously)")
+        ar.addWidget(self._aur_dry, 1); ar.addWidget(bd); ar.addWidget(bps); v.addLayout(ar)
+        self._src_dry = {}                # {source_index: anechoic_path}; blank -> uses the default Audio
 
         self._aur_conv = QPushButton("∗	Convolve"); self._aur_conv.setFixedHeight(26)
         self._aur_conv.clicked.connect(self._run_convolve); v.addWidget(self._aur_conv)
@@ -6359,6 +6362,39 @@ class MainWindow(QMainWindow):
         if f:
             self._aur_dry.setText(f); QSettings("phases", "gui").setValue("last_dry", f)
 
+    def _edit_src_dry(self):
+        """Assign each source its own anechoic signal (all sources play simultaneously into the receiver;
+        blank rows fall back to the default Audio file)."""
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                                       QFileDialog, QDialogButtonBox)
+        pts = self._src_tbl.get_points()
+        if not pts:
+            self._sb.showMessage("No sources defined yet."); return
+        dlg = QDialog(self); dlg.setWindowTitle("Per-source anechoic signals")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Each source plays its own signal. Leave a row blank to use the default Audio."))
+        edits = []
+        for i in range(len(pts)):
+            row = QHBoxLayout(); row.addWidget(QLabel(f"Source {i}"))
+            le = QLineEdit(self._src_dry.get(i, "")); row.addWidget(le, 1)
+            b = QPushButton("…"); b.setFixedWidth(28)
+            b.clicked.connect(lambda _=False, e=le: self._browse_into(e))
+            row.addWidget(b); lay.addLayout(row); edits.append(le)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); lay.addWidget(bb)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._src_dry = {i: e.text().strip() for i, e in enumerate(edits) if e.text().strip()}
+            self._sb.showMessage(f"Per-source signals: {len(self._src_dry)} set "
+                                 f"(rest use the default Audio).")
+
+    def _browse_into(self, line_edit):
+        from PySide6.QtWidgets import QFileDialog
+        start = os.path.dirname(line_edit.text()) or os.path.dirname(self._aur_dry.text()) or os.path.expanduser("~")
+        f, _ = QFileDialog.getOpenFileName(self, "Anechoic signal", start,
+                                           "Audio (*.wav *.flac *.aiff *.aif *.ogg)")
+        if f:
+            line_edit.setText(f)
+
     def _run_convolve(self):
         """Render the selected receiver to a binaural wav via binauralize.py (in output/)."""
         if not self._proj_root:
@@ -6385,6 +6421,13 @@ class MainWindow(QMainWindow):
         pose = [str(x) for x in pose_i]
         cmd = [sys.executable, script, sofa, "--rec", str(rec),
                "--dry", dry, "--out", self._aur_wav, "--pose", *pose]
+        dm = {str(i): p for i, p in getattr(self, "_src_dry", {}).items() if p and os.path.isfile(p)}
+        if dm:                                                   # per-source signals -> write a drymap.json
+            import json
+            mp = os.path.join(out, "drymap.json")
+            with open(mp, "w") as f:
+                json.dump(dm, f)
+            cmd += ["--drymap", mp]
         if self._player is not None:
             self._player.setSource(QUrl())                       # release the file before overwrite
         self._aur_conv.setEnabled(False); self._aur_play.setEnabled(False)
@@ -7417,14 +7460,19 @@ class MainWindow(QMainWindow):
         self._solver_thread.start()
 
     def _run_source(self, i):
-        """Auralization: write config (src index = i) + a 1-source src.txt, then launch."""
+        """Auralization: write config (src index = i) + a 1-source src.txt, then launch. Source 0 does
+        the normal full purge (fresh directory); sources 1..N keep the earlier sources' bins so all
+        per-source IR/HIR/ARR accumulate (else each run wipes the last)."""
         self._write_config(os.path.join(self._proj_root,"config","config.txt"), i)
         pt = self._src_tbl.get_points()[i]
         with open(os.path.join(self._proj_root,"input","src","src.txt"), "w") as f:
             f.write("# x y z p0 f0\n")
             f.write("  ".join(f"{v:.6g}" for v in pt) + "\n")
         self._log.append(f'<span style="color:{PAL["subtext"]};">— source {i} —</span>')
-        self._launch_solver(self._aural_cmd)
+        cmd = list(self._aural_cmd)
+        if i > 0:
+            cmd.append("--keep-other-sources")           # don't wipe sources already computed this batch
+        self._launch_solver(cmd)
 
     def _fit_impedances(self):
         """Run vectFIT over ALL materials (was the Scene tab's 'Fit all').

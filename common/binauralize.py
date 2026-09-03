@@ -251,10 +251,12 @@ def _sources_for(rec):
     return sorted(out)
 
 
-def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav):
-    """Full binaural render for ONE receiver: SUM all its sources' BRIRs (convolution is linear, so one
-    render on the summed BRIR == summing per-source renders, but far cheaper), convolve the dry anechoic
-    mono file once, write a peak-normalized stereo wav. Run from the project's output/ dir."""
+def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav, dry_map=None):
+    """Full binaural render for ONE receiver. Default: SUM all its sources' BRIRs (convolution is linear,
+    so one render on the summed BRIR == summing per-source renders, but far cheaper), convolve the single
+    dry anechoic file once. If `dry_map` {src_id: path} is given, each source plays its OWN signal, so we
+    convolve each source's BRIR with its own dry and SUM the AUDIO (sources missing from the map fall back
+    to dry_path). Writes a peak-normalized stereo wav. Run from the project's output/ dir."""
     import time
     import soundfile as sf
     try:
@@ -267,31 +269,56 @@ def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav):
     hrtf = load_hrtf(sofa)
     print(f"[binauralize] HRTF {hrtf['hrir'].shape} loaded ({time.time()-t0:.1f}s)", flush=True)
     pose = tuple(np.radians(pose_deg))
-    dry = _read_audio(dry_path)
-    print(f"[binauralize] dry {dry.size} samples ({dry.size/FS:.1f}s)", flush=True)
-    B = None
-    for src in _sources_for(rec):
+    dry_map = dry_map or {}
+    _dry_cache = {}
+
+    def _dry(path):                                              # cache reads; reused across sources
+        if path not in _dry_cache:
+            _dry_cache[path] = _read_audio(path)
+        return _dry_cache[path]
+
+    def _brir_of(src):
         res = allIRs.broadband_ir(rec, src)
         if res is None:
-            continue
+            return None
         _, LIRp, HIRp = res
         arr = read_arrivals(f"ARR{rec}_{src}.bin")
         if arr[0].size == 0:
-            print(f"[binauralize]  !! src{src}: 0 ISM arrivals — no direct/early reflections; the direct "
-                  "sound falls back to straight-ahead. Check the sim's '[ISM] src rec: N paths' line "
-                  "(occlusion / t_cross / coords).", flush=True)
+            print(f"[binauralize]  !! src{src}: 0 ISM arrivals — direct sound falls back to straight-ahead. "
+                  "Check the sim's '[ISM] src rec: N paths' line (occlusion / t_cross / coords).", flush=True)
         else:
             print(f"[binauralize]  src{src}: {arr[0].size} arrivals, building BRIR…", flush=True)
-        b = brir(LIRp, HIRp, arr, hrtf, pose)
+        return brir(LIRp, HIRp, arr, hrtf, pose)
+
+    def _add(acc, y):                                            # zero-pad to the longer, then add
+        if acc is None:
+            return y
+        n = max(acc.shape[1], y.shape[1])
+        return np.pad(acc, ((0, 0), (0, n - acc.shape[1]))) + np.pad(y, ((0, 0), (0, n - y.shape[1])))
+
+    if dry_map:
+        print(f"[binauralize] per-source signals: {len(dry_map)} mapped, rest use {os.path.basename(dry_path)}",
+              flush=True)
+        acc = None
+        for src in _sources_for(rec):
+            b = _brir_of(src)
+            if b is None:
+                continue
+            acc = _add(acc, render(_dry(dry_map.get(src, dry_path)), b))   # each source its own dry
+        if acc is None:
+            raise FileNotFoundError(f"no ARR/broadband data for receiver {rec} in {os.getcwd()}")
+    else:
+        dry = _dry(dry_path)
+        print(f"[binauralize] dry {dry.size} samples ({dry.size/FS:.1f}s)", flush=True)
+        B = None
+        for src in _sources_for(rec):
+            b = _brir_of(src)
+            if b is not None:
+                B = _add(B, b)                                   # sum BRIRs (all sources share one dry)
         if B is None:
-            B = b
-        else:                                                    # sum sources (zero-pad to the longer)
-            n = max(B.shape[1], b.shape[1])
-            B = np.pad(B, ((0, 0), (0, n - B.shape[1]))) + np.pad(b, ((0, 0), (0, n - b.shape[1])))
-    if B is None:
-        raise FileNotFoundError(f"no ARR/broadband data for receiver {rec} in {os.getcwd()}")
-    print(f"[binauralize] BRIR {B.shape}, convolving dry signal…", flush=True)
-    acc = render(dry, B)
+            raise FileNotFoundError(f"no ARR/broadband data for receiver {rec} in {os.getcwd()}")
+        print(f"[binauralize] BRIR {B.shape}, convolving dry signal…", flush=True)
+        acc = render(dry, B)
     pk = np.abs(acc).max()
     if pk > 0:
         acc = 0.98 * acc / pk
@@ -391,8 +418,9 @@ if __name__ == "__main__":
     ap.add_argument("pose_pos", nargs="*", type=float, help="az el roll (deg) positional; default 0 0 0")
     ap.add_argument("--pose", nargs=3, type=float, metavar=("AZ", "EL", "ROLL"), help="az el roll (deg)")
     ap.add_argument("--rec", type=int, help="auralize ONE receiver to a wav (needs --dry --out)")
-    ap.add_argument("--dry", help="anechoic mono audio in")
+    ap.add_argument("--dry", help="anechoic mono audio in (default for sources without a per-source signal)")
     ap.add_argument("--out", help="binaural wav out")
+    ap.add_argument("--drymap", help="JSON {source_id: anechoic_path} -> each source plays its OWN signal")
     a = ap.parse_args()
     pose = a.pose if a.pose is not None else (a.pose_pos + [0, 0, 0])[:3]
     if a.rec is not None:
@@ -401,9 +429,13 @@ if __name__ == "__main__":
         # allIRs.py reads ../config and ../output RELATIVE to cwd, so run in the project's output/
         # (derived from --out). Lets manual runs work from anywhere; matches the GUI's cwd=output.
         a.sofa, a.dry, a.out = (os.path.abspath(a.sofa), os.path.abspath(a.dry), os.path.abspath(a.out))
+        dry_map = None
+        if a.drymap:
+            import json
+            dry_map = {int(k): os.path.abspath(v) for k, v in json.load(open(a.drymap)).items()}
         os.chdir(os.path.dirname(a.out))
         print(f"[binauralize] cwd -> {os.getcwd()}", flush=True)
-        p = auralize_receiver(a.rec, a.sofa, pose, a.dry, a.out)
+        p = auralize_receiver(a.rec, a.sofa, pose, a.dry, a.out, dry_map=dry_map)
         print(f"[binauralize] receiver {a.rec} pose {pose} -> {p}")
     else:
         main(a.sofa, pose)                                       # batch: BRIR_*.npy for every pair
