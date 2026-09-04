@@ -2838,30 +2838,24 @@ class GLViewer(QOpenGLWidget):
         W, H = self.width(), self.height()
         viewport = [int(0), int(0), int(W), int(H)]
 
-        # ── axis-constrained movement ──
+        # ── axis-constrained movement (view-INDEPENDENT) ──
+        # Slide along the world axis to the point on it CLOSEST to the mouse ray, so the point tracks
+        # the cursor exactly at any camera angle (no screen-projection heuristic / sensitivity fudge).
         if self._drag_axis is not None and self._drag_axis_base is not None:
-            ax = {'X': np.array([1,0,0], np.float32),
-                  'Y': np.array([0,1,0], np.float32),
-                  'Z': np.array([0,0,1], np.float32)}[self._drag_axis]
-            base = np.array(self._drag_axis_base, np.float32)
+            ax = {'X': np.array([1., 0, 0]), 'Y': np.array([0, 1., 0]),
+                  'Z': np.array([0, 0, 1.])}[self._drag_axis]
+            base = np.array(self._drag_axis_base, np.float64)
             try:
-                # screen-space direction of the axis at the base point
-                s0 = np.array(gluProject(*base.astype(float),
-                              self._mv, self._proj, viewport)[:2])
-                s1 = np.array(gluProject(*(base + ax*0.1).astype(float),
-                              self._mv, self._proj, viewport)[:2])
-                sdir = s1 - s0
-                slen = np.linalg.norm(sdir)
-                if slen < 1e-6:
-                    return
-                sdir /= slen
-                anchor = self._drag_anchor_px or QCursor.pos()
-                cur = QCursor.pos()
-                mdx = cur.x() - anchor.x()
-                mdy = -(cur.y() - anchor.y())
-                move = float(np.dot(np.array([mdx, mdy], np.float32), sdir))
-                scale = self._dist * 0.0015
-                newp = base + ax * move * scale
+                mx, myf = float(qpos.x()), float(H) - float(qpos.y())
+                ro = np.array(gluUnProject(mx, myf, 0.0, self._mv, self._proj, viewport), np.float64)
+                rd = np.array(gluUnProject(mx, myf, 1.0, self._mv, self._proj, viewport), np.float64) - ro
+                w0 = base - ro                                  # closest points between axis line & ray
+                b = float(ax @ rd); c = float(rd @ rd); d = float(ax @ w0); e = float(rd @ w0)
+                denom = c - b * b                               # a = ax·ax = 1
+                if abs(denom) < 1e-9:
+                    return                                      # ray ~parallel to the axis -> ambiguous
+                s = (b * e - c * d) / denom                     # axis coord under the cursor
+                newp = base + ax * s
                 lst[self._drag_idx] = [float(newp[0]), float(newp[1]), float(newp[2])]
             except Exception:
                 pass
