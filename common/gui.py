@@ -239,6 +239,13 @@ def _is_bbox(name: str) -> bool:
     return "bounding" in n or "boundary" in n
 
 
+def _sibling_base(name: str):
+    """'<base>_<int>' -> '<base>' (the scratch pool of exploded pieces, e.g. 'surface_12' -> 'surface');
+    None if the name isn't an exploded piece. Used to sweep leftover pieces back into one layer."""
+    b, sep, tail = name.rpartition("_")
+    return b if (sep and b and tail.isdigit()) else None
+
+
 def triangulate_face(face, vertices):
     """Triangulate a planar polygon face (indices into `vertices`) by ear
     clipping. Handles concave faces (e.g. an L-shaped floor) that a naive
@@ -530,6 +537,38 @@ def merge_coplanar_groups(verts, groups, angle_thresh_deg=5.0, weld_tol=1e-5):
             for r in order]
 
 
+def _tri_area2(verts, tris):
+    """2*area (= |edge×edge|) per triangle."""
+    a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    return np.linalg.norm(np.cross(b - a, c - a), axis=1)
+
+
+def drop_degenerate_faces(verts, groups, rel_tol=1e-4):
+    """Remove sliver triangles (area tiny RELATIVE to the mesh, not just exactly zero) and any group left
+    empty by that. A triangulated ceiling carries Delaunay slivers whose unstable normal made explode
+    spawn phantom `surface_N` layers with nothing you can see or pick — this cleans them (and their
+    leftover layers) at load. Threshold = rel_tol × median triangle area, so real facets (never 10000×
+    below the median) are safe. bbox groups pass through; dropping faces never removes vertices, so shared
+    geometry is unaffected."""
+    verts = np.asarray(verts, np.float64)
+    areas = [_tri_area2(verts, np.asarray(g["tris"])) for g in groups
+             if not _is_bbox(g["name"]) and len(g["tris"])]
+    if not areas:
+        return list(groups)
+    thr = max(1e-12, rel_tol * float(np.median(np.concatenate(areas))))
+    out = []
+    for g in groups:
+        if _is_bbox(g["name"]):
+            out.append(g); continue
+        tris = np.asarray(g["tris"])
+        if len(tris) == 0:
+            continue
+        keep = tris[_tri_area2(verts, tris) > thr]
+        if len(keep):
+            out.append({"name": g["name"], "tris": keep})
+    return out
+
+
 def split_coplanar_components(verts, tris, angle_thresh_deg=5.0, weld_tol=1e-5):
     """Split one triangle set into surfaces = connected components joined by a HIDDEN (coplanar) shared
     edge — the inverse of merge_coplanar_groups for a single group. Used by 'Explode' to break a
@@ -543,6 +582,11 @@ def split_coplanar_components(verts, tris, angle_thresh_deg=5.0, weld_tol=1e-5):
     q = np.round(verts / weld_tol).astype(np.int64)
     _, inv = np.unique(q, axis=0, return_inverse=True)
     fn = face_normals(verts, tris)
+    # sliver triangles (area tiny relative to the mesh) get an unstable normal, so each would become its
+    # own component -> a phantom surface_N with no area to show or pick. Absorb them into any edge-neighbour.
+    area2 = _tri_area2(np.asarray(verts, np.float64), tris)
+    med = float(np.median(area2)) if len(area2) else 0.0
+    degen = area2 < max(1e-12, 1e-4 * med)
     wt = inv[tris]
     cos_thr = math.cos(math.radians(angle_thresh_deg))
     parent = list(range(n))
@@ -557,9 +601,9 @@ def split_coplanar_components(verts, tris, angle_thresh_deg=5.0, weld_tol=1e-5):
         for e in ((a, b), (b, c), (c, a)):
             edge_tris[frozenset(e)].append(ti)
     for tl in edge_tris.values():
-        for k in range(1, len(tl)):                      # coplanar neighbours stay in one component
+        for k in range(1, len(tl)):                      # coplanar neighbours (or a sliver) stay in one component
             t0, t1 = tl[0], tl[k]
-            if abs(float(fn[t0] @ fn[t1])) >= cos_thr:
+            if degen[t0] or degen[t1] or abs(float(fn[t0] @ fn[t1])) >= cos_thr:
                 parent[find(t0)] = find(t1)
     comps = defaultdict(list)
     for ti in range(n):
@@ -672,7 +716,9 @@ class GLViewer(QOpenGLWidget):
     fpvPoseChanged   = Signal(float, float, float)       # FPV mouselook -> az,el,roll (deg) to the dials
     propsChanged     = Signal()                          # a prop transform confirmed/cancelled (refresh panel)
     surfacesPicked   = Signal(list)                       # RMB "Group selected" -> list of picked group names
-    explodeLayer     = Signal(str)                         # RMB "Explode" -> split a layer into its surfaces
+    explodeSurface   = Signal(int)                         # RMB "Explode" -> split ONE picked group (by index)
+    mergeSiblings    = Signal(str)                          # RMB -> collapse '<base>_N' exploded pieces back to '<base>'
+    cleanseLayers    = Signal()                             # RMB -> drop zero/sliver-area layers + dump layer areas
 
     # placement modes
     MODE_NONE  = 0
@@ -725,7 +771,8 @@ class GLViewer(QOpenGLWidget):
         self._show_rays = True
         self._bbox_visible  = False
         self._selected_layer = None
-        self._surf_sel  = set()    # group names multi-selected (RMB) for grouping; all highlighted
+        self._surf_sel  = set()    # group names multi-selected for grouping; all highlighted
+        self._surf_pick = False    # armed (RMB) -> next LMB drag rubber-bands surfaces into _surf_sel
         self._hover_world = None   # world coords under mouse for HUD
 
 
@@ -854,22 +901,89 @@ class GLViewer(QOpenGLWidget):
     def clear_surf_sel(self):
         self._surf_sel = set(); self.update()
 
-    def _pick_group_name(self, qpos):
-        """Nearest surface hit by the ray through qpos -> its group name, or None. Same filters as
-        _do_ray_pick (visible, non-bbox unless shown, not dollhouse-cut)."""
-        self.makeCurrent()
+    def _prop_layers(self):
+        """Layer names owned by placed props (columns/boxes/…). The surface tools must never group/explode/
+        cleanse these — they only apply to the domain enclosure. Props are baked into the OBJ under their
+        layer name, so excluding these names keeps prop geometry intact."""
+        return {p.layer for p in self._props}
+
+    def arm_surface_rect(self):
+        """Arm a one-shot rubber-band surface select: the next LMB drag boxes surfaces (front-most
+        only) into _surf_sel. RMB then groups/explodes them."""
+        self._surf_pick = True
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _find_surfaces_in_rect(self, rect):
+        """Front-most visible surfaces inside the screen rectangle. Samples a grid of pixels and keeps
+        the nearest ray hit at each (occluded back walls are NOT grabbed — the random-pick bug of the old
+        any-vertex-inside test). Inner surfaces show up only when a dollhouse cut exposes them. One
+        numpy ray-vs-ALL-triangles pass per sample (per-triangle Python loops froze the UI)."""
+        W, H = self.width(), self.height()
+        x0, x1 = sorted((rect[0].x(), rect[1].x())); y0, y1 = sorted((rect[0].y(), rect[1].y()))
+        x0 = max(0.0, x0); y0 = max(0.0, y0); x1 = min(float(W), x1); y1 = min(float(H), y1)
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return set()
+        # concat pickable groups' tris once + remember which group each triangle came from.
+        # Props are excluded — surface grouping is only for the domain enclosure.
+        pl = self._prop_layers()
+        cand = [g for g in self._groups
+                if g["visible"] and not g["is_bbox"] and not self._dollhouse_cut(g)
+                and len(g["tris"]) and g["name"] not in pl]
+        if not cand:
+            return set()
+        tris = np.concatenate([np.asarray(g["tris"]) for g in cand])
+        tri_grp = np.concatenate([np.full(len(g["tris"]), i, np.int32) for i, g in enumerate(cand)])
+        verts = np.asarray(self._verts, np.float64)
+        v0 = verts[tris[:, 0]]; e1 = verts[tris[:, 1]] - v0; e2 = verts[tris[:, 2]] - v0
+
+        def nearest(ro, rd):
+            p = np.cross(rd, e2)
+            det = np.einsum('ij,ij->i', e1, p)
+            ok = np.abs(det) > 1e-9
+            inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
+            tv = ro - v0
+            u = np.einsum('ij,ij->i', tv, p) * inv
+            q = np.cross(tv, e1)
+            v = np.einsum('j,ij->i', rd, q) * inv
+            tt = np.einsum('ij,ij->i', e2, q) * inv
+            hit = ok & (u >= -1e-6) & (v >= -1e-6) & (u + v <= 1 + 1e-6) & (tt > 1e-6)
+            if not hit.any():
+                return None
+            return int(tri_grp[np.argmin(np.where(hit, tt, np.inf))])
+
+        step = max(8.0, max(x1 - x0, y1 - y0) / 25.0)   # cap ~25 samples/axis
+        names, yy = set(), y0
+        while yy <= y1:
+            xx = x0
+            while xx <= x1:
+                ro, rd = ray_from_screen(xx, yy, W, H, self._mv, self._proj)
+                gi = nearest(ro.astype(np.float64), rd.astype(np.float64))
+                if gi is not None:
+                    names.add(cand[gi]["name"])
+                xx += step
+            yy += step
+        return names
+
+    def _pick_group_idx(self, qpos):
+        """Index into self._groups of the nearest surface hit by the ray through qpos, or -1. Same
+        filters as _do_ray_pick (visible, non-bbox unless shown, not dollhouse-cut). Index (not name)
+        so explode acts on the ONE clicked surface — several groups can share a name (e.g. props)."""
         W, H = self.width(), self.height()
         ro, rd = ray_from_screen(qpos.x(), qpos.y(), W, H, self._mv, self._proj)
-        best_t, best_name = None, None
-        for g in self._groups:
+        best_t, best_i = None, -1
+        for i, g in enumerate(self._groups):
             if not g["visible"]: continue
             if g["is_bbox"] and not self._bbox_visible: continue
             if self._dollhouse_cut(g): continue
             if len(g["tris"]) == 0: continue
             t = ray_group_hit(ro.astype(np.float64), rd.astype(np.float64), self._verts, g["tris"])
             if t is not None and (best_t is None or t < best_t):
-                best_t, best_name = t, g["name"]
-        return best_name
+                best_t, best_i = t, i
+        return best_i
+
+    def _pick_group_name(self, qpos):
+        i = self._pick_group_idx(qpos)
+        return self._groups[i]["name"] if i >= 0 else None
 
     def set_sources(self, pts):
         # keep x,y,z and the SPL (Lp,1m [dB], 4th col) so the particle sim can size its injection
@@ -2438,6 +2552,9 @@ class GLViewer(QOpenGLWidget):
                 self._xform_end(cancel=False); return
             if e.button() == Qt.MouseButton.RightButton:
                 self._xform_end(cancel=True); return
+        # Surface rect-select armed (RMB menu): LMB starts the rubber-band box; consume so it doesn't orbit.
+        if self._surf_pick and e.button() == Qt.MouseButton.LeftButton:
+            self._rect = [e.position(), e.position()]; return
         # Copy-select armed (C): LMB starts the rubber-band box; consume so it doesn't orbit.
         if self._copy_arm and e.button() == Qt.MouseButton.LeftButton:
             self._rect = [e.position(), e.position()]; self._copy_arm = False; return
@@ -2551,6 +2668,12 @@ class GLViewer(QOpenGLWidget):
         moved = getattr(self, '_drag_moved', False)
         self._mouse_btn = None
         self._last_pos  = None
+
+        # Finish a surface rect-select: add the front-most enclosed surfaces to the selection (highlight).
+        if self._rect is not None and self._surf_pick and e.button() == Qt.MouseButton.LeftButton:
+            self._surf_sel |= self._find_surfaces_in_rect(self._rect)
+            self._rect = None; self._surf_pick = False
+            self.setCursor(Qt.CursorShape.ArrowCursor); self.update(); return
 
         # Finish the copy box: duplicate props whose center is inside it, then grab the copies (move).
         if self._rect is not None and e.button() == Qt.MouseButton.LeftButton:
@@ -2819,20 +2942,23 @@ class GLViewer(QOpenGLWidget):
             if m.exec(gpos) is gb:
                 self.fpvExitRequested.emit()
             return
-        # ── surface grouping: pick the surface under the cursor, act on it / the running selection ──
-        hit = self._pick_group_name(qpos)
-        add_s = rem_s = exp_s = grp_s = clr_s = None
-        if hit and not _is_bbox(hit):
-            if hit in self._surf_sel:
-                rem_s = m.addAction(f"Remove '{hit}' from selection")
-            else:
-                add_s = m.addAction(f"Add '{hit}' to selection")
-            exp_s = m.addAction(f"Explode layer '{hit}'")
+        # ── surface grouping: rectangle-select surfaces, then group / explode ──
+        hit_idx = self._pick_group_idx(qpos)
+        hit = self._groups[hit_idx]["name"] if hit_idx >= 0 else None
+        sel_s = m.addAction("Select surfaces by rectangle")
+        exp_s = grp_s = clr_s = mrg_s = None
+        # Explode/merge only on enclosure surfaces — never props (all props share one layer name, so
+        # acting by name would shatter every prop at once).
+        if hit and not _is_bbox(hit) and hit not in self._prop_layers():
+            exp_s = m.addAction(f"Explode this surface ('{hit}')")
+            base = _sibling_base(hit)                     # 'surface_12' -> 'surface' when part of an exploded pool
+            if base and sum(1 for g in self._groups if _sibling_base(g["name"]) == base) > 1:
+                mrg_s = m.addAction(f"Merge all '{base}_*' → layer…")
         if self._surf_sel:
             grp_s = m.addAction(f"Group {len(self._surf_sel)} selected → layer…")
             clr_s = m.addAction("Clear surface selection")
-        if hit or self._surf_sel:
-            m.addSeparator()
+        cln_s = m.addAction("Cleanse phantom layers")
+        m.addSeparator()
 
         ax = m.addAction("Hide axes" if self._axes_visible else "Show axes")
         th = m.addAction("Light scene" if not SCENE_LIGHT_MODE else "Dark scene")
@@ -2844,16 +2970,18 @@ class GLViewer(QOpenGLWidget):
         chosen = m.exec(gpos)
         if chosen is None:
             return
-        if chosen is add_s:
-            self._surf_sel.add(hit); self.update(); return
-        if chosen is rem_s:
-            self._surf_sel.discard(hit); self.update(); return
+        if chosen is sel_s:
+            self.arm_surface_rect(); return
         if chosen is exp_s:
-            self.explodeLayer.emit(hit); return
+            self.explodeSurface.emit(hit_idx); return
+        if chosen is mrg_s:
+            self.mergeSiblings.emit(_sibling_base(hit)); return
         if chosen is grp_s:
             self.surfacesPicked.emit(sorted(self._surf_sel)); return
         if chosen is clr_s:
             self._surf_sel = set(); self.update(); return
+        if chosen is cln_s:
+            self.cleanseLayers.emit(); return
         if chosen is ax:
             self._axes_visible = not self._axes_visible
             self.update()
@@ -5119,7 +5247,9 @@ class MainWindow(QMainWindow):
         self._gl = GLViewer()
         self._gl.layerPicked.connect(self._on_layer_picked)
         self._gl.surfacesPicked.connect(self._on_surfaces_picked)
-        self._gl.explodeLayer.connect(self._on_explode_layer)
+        self._gl.explodeSurface.connect(self._on_explode_surface)
+        self._gl.mergeSiblings.connect(self._on_merge_siblings)
+        self._gl.cleanseLayers.connect(self._on_cleanse_layers)
         self._gl.pointPlaced.connect(self._on_point_placed)
         self._gl.pointMoved.connect(self._on_point_moved)
         self._gl.pointDragStarted.connect(self._remember_points_for_undo)
@@ -6080,11 +6210,6 @@ class MainWindow(QMainWindow):
         vis_row.addWidget(self._layers_all_btn)
         vis_row.addStretch(); lay.addLayout(vis_row)
 
-        hint = QLabel("Tip: right-click a surface in the 3D view to add it to a selection, then "
-                      "“Group … → layer”, or “Explode” a layer back into its surfaces.")
-        hint.setWordWrap(True); hint.setStyleSheet(f"color:{PAL['subtext']};")
-        lay.addWidget(hint)
-
         lay.addWidget(QLabel("Material - α per octave band"))
         self._mat_panel = MaterialPanel()
         self._mat_panel.status.connect(lambda t: self._sb.showMessage(t))   # shared status bar
@@ -7005,8 +7130,10 @@ class MainWindow(QMainWindow):
             verts, groups = parse_obj(path)
             raw_n = len(groups)
             groups = merge_coplanar_groups(verts, groups)   # fuse per-triangle splits of a flat surface
-            if len(groups) != raw_n:
-                # the file's groups no longer match what the GUI shows/materials. Persist the merged
+            n_faces_before = sum(len(g["tris"]) for g in groups)
+            groups = drop_degenerate_faces(verts, groups)   # purge zero-area slivers + the phantom layers they made
+            if len(groups) != raw_n or sum(len(g["tris"]) for g in groups) != n_faces_before:
+                # the file's groups no longer match what the GUI shows/materials. Persist the cleaned
                 # set to a derived copy (never the user's original) so the solver reads the same layers
                 # — else main3D looks up a .fit for a merged-away group and crashes.
                 base0, ext0 = os.path.splitext(path)
@@ -7077,24 +7204,76 @@ class MainWindow(QMainWindow):
                        if g["name"] not in merge_set or g["is_bbox"]])        # so parse_obj collapses them to one
         self._rewrite_scene(out_groups, f"Grouped {len(names)} surface(s) into layer '{target}'.")
 
-    def _on_explode_layer(self, name):
-        """RMB 'Explode' -> split a name-merged layer back into its coplanar surfaces (<name>_1..k).
-        Gathers ALL tris under `name` first (an old grouping can leave several same-named groups the
-        parser didn't collapse) so the split sees the whole layer at once."""
-        if not name or not self._obj_path:
+    def _on_explode_surface(self, idx):
+        """RMB 'Explode' -> split ONLY the one clicked group into its coplanar surfaces, named generically
+        (surface_N, numbering continued so repeats don't collide) as an unassigned scratch pool. You then
+        pull the ones you want into real material layers and sweep the rest with 'Merge all surface_* → …'
+        so main3D isn't left with hundreds of materials/.fit files. Acts by INDEX, never by name — several
+        groups can share a name (all props are 'props'), and exploding by name would shatter them all."""
+        groups = self._gl._groups
+        if not (0 <= idx < len(groups)) or not self._obj_path:
+            return
+        g = groups[idx]
+        if g["is_bbox"] or g["name"] in self._gl._prop_layers():
             return
         verts = np.asarray(self._gl._verts)
-        matched = [g for g in self._gl._groups if g["name"] == name and not g["is_bbox"]]
-        if not matched:
-            return
-        all_tris = np.concatenate([np.asarray(g["tris"]) for g in matched])
-        comps = split_coplanar_components(verts, all_tris)
+        comps = split_coplanar_components(verts, g["tris"])
         if len(comps) <= 1:
-            self._sb.showMessage(f"'{name}' is a single surface — nothing to explode."); return
-        others = [{"name": g["name"], "tris": g["tris"]} for g in self._gl._groups
-                  if not (g["name"] == name and not g["is_bbox"])]
-        exploded = [{"name": f"{name}_{k}", "tris": tr} for k, tr in enumerate(comps, 1)]
-        self._rewrite_scene(exploded + others, f"Exploded '{name}' into {len(comps)} surfaces.")
+            self._sb.showMessage(f"'{g['name']}' is a single surface — nothing to explode."); return
+        nums = [int(gg["name"].rpartition("_")[2]) for gg in groups if _sibling_base(gg["name"]) == "surface"]
+        start = 1 + (max(nums) if nums else 0)               # continue numbering so repeats don't collide
+        others = [{"name": gg["name"], "tris": gg["tris"]} for j, gg in enumerate(groups) if j != idx]
+        exploded = [{"name": f"surface_{start + i}", "tris": tr} for i, tr in enumerate(comps)]
+        self._rewrite_scene(exploded + others,
+                            f"Exploded '{g['name']}' into {len(comps)} surfaces (surface_{start}…).")
+
+    def _on_cleanse_layers(self):
+        """RMB 'Cleanse phantom layers' -> drop zero/sliver-area groups and rewrite. Also prints every
+        layer's area (smallest first) so we can SEE what the phantom rows really are if drop misses them."""
+        if not self._obj_path:
+            return
+        verts = np.asarray(self._gl._verts, np.float64)
+        before = [g for g in self._gl._groups if not _is_bbox(g["name"])]
+        stats = []
+        for g in before:
+            t = np.asarray(g["tris"])
+            area = float(_tri_area2(verts, t).sum()) / 2.0 if len(t) else 0.0
+            stats.append((area, len(t), g["name"]))
+        stats.sort()
+        print(f"[cleanse] {len(stats)} non-bbox layers, smallest area first:")
+        for area, nt, nm in stats[:50]:
+            print(f"    {nm:24s} tris={nt:6d}  area={area:.4e}")
+        pl = self._gl._prop_layers()                       # never touch prop geometry
+        keep_props = [g for g in self._gl._groups if g["name"] in pl]
+        cleaned = drop_degenerate_faces(verts, [g for g in self._gl._groups if g["name"] not in pl]) + keep_props
+        gone = {g["name"] for g in before} - {g["name"] for g in cleaned}
+        if not gone:
+            self._sb.showMessage("No zero/sliver-area layers found — see terminal for layer areas.")
+            return
+        out_groups = [{"name": g["name"], "tris": g["tris"]} for g in cleaned]
+        self._rewrite_scene(out_groups, f"Cleansed {len(gone)} phantom layer(s).")
+
+    def _on_merge_siblings(self, base):
+        """Sweep the exploded scratch pool: collapse every '<base>_N' (e.g. surface_*) into ONE named
+        layer so only the layers you actually use remain."""
+        if not base or not self._obj_path:
+            return
+        pool = [g for g in self._gl._groups if _sibling_base(g["name"]) == base and not g["is_bbox"]]
+        if not pool:
+            return
+        existing = [g["name"] for g in self._groups if not _is_bbox(g["name"])]
+        target, ok = QInputDialog.getItem(
+            self, "Merge exploded surfaces",
+            f"Collapse {len(pool)} '{base}_*' surface(s) into layer:", existing, 0, True)
+        if not ok or not target.strip():
+            return
+        target = target.strip()
+        merge_set = {g["name"] for g in pool} | {target}
+        out_groups = ([{"name": target, "tris": g["tris"]} for g in self._gl._groups
+                       if g["name"] in merge_set and not g["is_bbox"]] +
+                      [{"name": g["name"], "tris": g["tris"]} for g in self._gl._groups
+                       if g["name"] not in merge_set or g["is_bbox"]])
+        self._rewrite_scene(out_groups, f"Merged {len(pool)} '{base}_*' surfaces into '{target}'.")
 
     def _rewrite_scene(self, out_groups, msg):
         """Persist a new group set next to the scene and reload it. Shared by group/explode. Stable base
