@@ -2031,9 +2031,30 @@ class GLViewer(QOpenGLWidget):
                 return False
             idxs = [idx]; self._prop_sel = idx
         self._xform = {"mode": mode, "axis": None, "idxs": list(idxs), "anchor": cpos,
-                       "bases": self._snapshot(idxs), "pivot": self._group_pivot(idxs)}
+                       "bases": self._snapshot(idxs), "pivot": self._group_pivot(idxs),
+                       "collide": False, "ok": self._snapshot(idxs), "static": None}
         self.update()
         return True
+
+    def _prop_aabb(self, p):
+        v = np.asarray(p.world()[0], float)
+        return v.min(0), v.max(0)
+
+    def _xform_collides(self):
+        """AABB collision for the moving props: outside the domain box (walls/floor/ceiling of a box room)
+        or overlapping any static prop. ponytail: axis-aligned bounding boxes — approximate for rotated or
+        concave meshes and interior/non-box walls; upgrade to per-triangle tests only if needed."""
+        xf = self._xform
+        dmn, dmx = np.asarray(self._domain_min, float), np.asarray(self._domain_max, float)
+        eps = 1e-6
+        for i in xf["idxs"]:
+            amn, amx = self._prop_aabb(self._props[i])
+            if np.any(amn < dmn - eps) or np.any(amx > dmx + eps):
+                return True
+            for bmn, bmx in xf["static"]:
+                if np.all(amn < bmx - eps) and np.all(amx > bmn + eps):
+                    return True
+        return False
 
     def _xform_reanchor(self):
         """Re-snapshot the base transforms + mouse anchor to the CURRENT state, so toggling an axis
@@ -2110,6 +2131,17 @@ class GLViewer(QOpenGLWidget):
                     ns = list(b["scale"]); ns[k] = b["scale"][k] * f
                 p.pos = [piv[m] + noff[m] - cm[m] for m in range(3)]      # move from pivot + scale each
                 p.scale = ns
+        # collision (held C): reject a frame that overlaps a static prop or leaves the domain -> keep the
+        # last valid state, so the prop slides up to the obstacle instead of entering it.
+        if xf.get("collide"):
+            if xf["static"] is None:
+                moving = set(xf["idxs"])
+                xf["static"] = [self._prop_aabb(self._props[j]) for j in range(len(self._props)) if j not in moving]
+            if self._xform_collides():
+                for i, b in zip(xf["idxs"], xf["ok"]):
+                    p = self._props[i]; p.pos, p.rot, p.scale = list(b["pos"]), list(b["rot"]), list(b["scale"])
+            else:
+                xf["ok"] = self._snapshot(xf["idxs"])
         self.update()
 
     def _find_props_in_rect(self, rect):
@@ -2965,6 +2997,10 @@ class GLViewer(QOpenGLWidget):
                     self._xform['mode'] = {Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]
                     self._xform['axis'] = None
                     self.update(); e.accept(); return
+                if key == Qt.Key.Key_C and not e.isAutoRepeat():         # HELD: collision on (block overlaps)
+                    self._xform['collide'] = True; self._xform['static'] = None
+                    self._xform['ok'] = self._snapshot(self._xform['idxs'])
+                    e.accept(); return
             if self._xform is None and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
                 self.push_props_undo()                            # so Ctrl+Z reverts this transform
                 if self._xform_start({Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]):
@@ -3033,6 +3069,9 @@ class GLViewer(QOpenGLWidget):
             if self._gxf.get("axis") == {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]:
                 self._gxf["axis"] = None; self._gxf_reanchor()
             e.accept(); return
+        # Releasing held C during a prop transform -> collision off.
+        if self._xform is not None and key == Qt.Key.Key_C:
+            self._xform['collide'] = False; e.accept(); return
         # Releasing X/Y/Z during a modal prop transform -> back to free (held, like everywhere else).
         if self._xform is not None and key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
             self._xform_reanchor()                                # continue from here (no jump)
