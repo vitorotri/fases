@@ -6250,12 +6250,12 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self); dlg.setWindowTitle(f"Create {kind} array")
         dlg.setStyleSheet(f"QDialog{{background:{PAL['bg']};color:{PAL['text']};}}QLabel{{color:{PAL['text']};}}")
         root = QVBoxLayout(dlg)
-        shape = QComboBox(); shape.addItems(["Box grid", "Sphere — az × el", "Sphere — Fibonacci"])
+        shape = QComboBox(); shape.addItems(["Box grid", "Sphere: azimuth × elevation", "Fibonacci Sphere"])
         root.addWidget(shape)
         stack = QStackedWidget(); root.addWidget(stack)
 
-        def sb(v, mn=-1e4, mx=1e4, dec=3):
-            s = QDoubleSpinBox(); s.setRange(mn, mx); s.setDecimals(dec); s.setValue(v); return s
+        def sb(v, mn=-1e4, mx=1e4, dec=3, suf=" m"):             # unit shown next to the value
+            s = QDoubleSpinBox(); s.setRange(mn, mx); s.setDecimals(dec); s.setValue(v); s.setSuffix(suf); return s
 
         # page 0 — box grid (start/end/step per axis; step 0 = single)
         p0 = QWidget(); g = QGridLayout(p0)
@@ -6266,24 +6266,27 @@ class MainWindow(QMainWindow):
             g.addWidget(QLabel(a), r + 1, 0); box[a] = (sb(0.0), sb(1.0), sb(0.0))
             for c, w in enumerate(box[a]):
                 g.addWidget(w, r + 1, c + 1)
+        g.setRowStretch(4, 1)                                     # hug top (stack is sized to the taller pages)
         stack.addWidget(p0)
 
         # page 1 — equiangular az × el shell (defaults: 8-point horizontal ring at head height)
         p1 = QWidget(); f1 = QGridLayout(p1)
-        az = dict(cx=sb(0.0), cy=sb(0.0), cz=sb(1.6), r=sb(1.0, 0), azs=sb(45.0, 0, 360),
-                  elmn=sb(0.0, -90, 90), elmx=sb(0.0, -90, 90), els=sb(0.0, 0, 180))
+        az = dict(cx=sb(0.0), cy=sb(0.0), cz=sb(1.6), r=sb(1.0, 0), azs=sb(45.0, 0, 360, suf=" °"),
+                  elmn=sb(0.0, -90, 90, suf=" °"), elmx=sb(0.0, -90, 90, suf=" °"), els=sb(0.0, 0, 180, suf=" °"))
         for i, (lb, w) in enumerate([("center x", az["cx"]), ("center y", az["cy"]), ("center z", az["cz"]),
-                                     ("radius", az["r"]), ("az step°", az["azs"]),
-                                     ("el min°", az["elmn"]), ("el max°", az["elmx"]), ("el step° (0=single)", az["els"])]):
+                                     ("radius", az["r"]), ("az step", az["azs"]),
+                                     ("el min", az["elmn"]), ("el max", az["elmx"]), ("el step (0=single)", az["els"])]):
             f1.addWidget(QLabel(lb), i, 0); f1.addWidget(w, i, 1)
+        f1.setRowStretch(8, 1)
         stack.addWidget(p1)
 
         # page 2 — Fibonacci near-uniform shell
         p2 = QWidget(); f2 = QGridLayout(p2)
-        fib = dict(cx=sb(0.0), cy=sb(0.0), cz=sb(1.6), r=sb(1.0, 0), n=sb(32, 1, 100000, 0))
+        fib = dict(cx=sb(0.0), cy=sb(0.0), cz=sb(1.6), r=sb(1.0, 0), n=sb(32, 1, 100000, 0, suf=""))
         for i, (lb, w) in enumerate([("center x", fib["cx"]), ("center y", fib["cy"]), ("center z", fib["cz"]),
                                      ("radius", fib["r"]), ("N points", fib["n"])]):
             f2.addWidget(QLabel(lb), i, 0); f2.addWidget(w, i, 1)
+        f2.setRowStretch(5, 1)
         stack.addWidget(p2)
 
         shape.currentIndexChanged.connect(stack.setCurrentIndex)
@@ -8656,6 +8659,9 @@ class PropsWindow(QWidget):
         self._pos = [self._spin(step=0.1) for _ in range(3)]
         self._rot = [self._spin(step=5.0) for _ in range(3)]
         self._scl = [self._spin(1.0, step=0.1) for _ in range(3)]
+        for s in self._pos: s.setSuffix(" m")                       # units next to each field
+        for s in self._rot: s.setSuffix(" °")
+        for s in self._scl: s.setSuffix(" ×")
         form.addRow("pos x y z", self._triple(self._pos))
         form.addRow("rot x y z", self._triple(self._rot))
         form.addRow("scale x y z", self._triple(self._scl))

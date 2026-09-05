@@ -1077,9 +1077,10 @@ class SketchWindow(QWidget):
         for s in (self._sx, self._sy, self._szb, self._szt):
             s.valueChanged.connect(self._apply)
         form = QFormLayout()
-        form.addRow("x (m)", self._sx); form.addRow("y (m)", self._sy)
-        form.addRow("z bottom", self._szb); form.addRow("z top", self._szt)
-        panel = QWidget(); panel.setLayout(form); panel.setFixedWidth(160)
+        form.addRow(QLabel("x"), self._sx); form.addRow(QLabel("y"), self._sy)
+        form.addRow(QLabel("z<sub>base</sub>"), self._szb)         # LaTeX-style subscripts (rich text)
+        form.addRow(QLabel("z<sub>top</sub>"), self._szt)
+        panel = QWidget(); panel.setLayout(form); panel.setFixedWidth(180)
         hint = QLabel(
             "<b>Poly</b>: LMB add pt (snaps to grid) · drag pt to move · LMB inside closed = sub-region · "
             "Enter finish line = interior ceiling (raise z top for ridge/peak) · Ctrl+K close · "
@@ -1145,6 +1146,7 @@ class SketchWindow(QWidget):
 
     def _spin(self):
         s = QDoubleSpinBox(); s.setRange(-1e4, 1e4); s.setDecimals(3); s.setSingleStep(0.1)
+        s.setSuffix(" m")                                          # unit shown next to the value
         s.setEnabled(False); return s
 
     def showEvent(self, e):
