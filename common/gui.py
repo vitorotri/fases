@@ -3437,12 +3437,11 @@ class GLViewer(QOpenGLWidget):
 
     def _do_ray_pick(self, qpos):
         best_name = self._pick_group_name(qpos)
-        if best_name:
+        if best_name and best_name != self._selected_layer:
             self._selected_layer = best_name
             self.layerPicked.emit(best_name)
         else:
-            # Clicking empty space must genuinely deselect; do not keep the
-            # previous layer highlighted or selected in the list/material panel.
+            # Empty space OR clicking the already-selected surface again -> deselect (toggle off).
             self._selected_layer = None
             self.layerPicked.emit("")
             # also clear any source/receiver highlight (scene + table selection)
@@ -6116,14 +6115,49 @@ class MainWindow(QMainWindow):
         lo, hi = (s, e) if e >= s else (e, s)
         return [round(v, 6) for v in np.arange(lo, hi + step * 0.5, step)]
 
+    @staticmethod
+    def _sphere_azel(center, r, az_step, el_min, el_max, el_step):
+        """Equiangular spherical shell: az 0..360 by az_step, el el_min..el_max by el_step (deg). az/el
+        step 0 = single. Covers listening-room rings (el=0) and directivity grids. Poles deduped."""
+        cx, cy, cz = center
+        azs = MainWindow._axis_vals(0.0, 360.0 - (az_step if az_step > 0 else 0.0), az_step) if az_step > 0 else [0.0]
+        els = MainWindow._axis_vals(el_min, el_max, el_step)
+        seen, out = set(), []
+        for el in els:
+            er = math.radians(el)
+            for az in azs:
+                ar = math.radians(az)
+                p = (round(cx + r*math.cos(er)*math.cos(ar), 6),
+                     round(cy + r*math.cos(er)*math.sin(ar), 6),
+                     round(cz + r*math.sin(er), 6))
+                if p not in seen:
+                    seen.add(p); out.append(list(p))
+        return out
+
+    @staticmethod
+    def _sphere_fib(center, r, n):
+        """N near-uniform points on a shell via the golden-spiral (Fibonacci) distribution."""
+        cx, cy, cz = center; n = max(1, int(n)); ga = math.pi * (3 - math.sqrt(5))
+        out = []
+        for i in range(n):
+            z = 1 - 2*(i + 0.5)/n; rr = math.sqrt(max(0.0, 1 - z*z)); ph = ga * i
+            out.append([round(cx + r*rr*math.cos(ph), 6), round(cy + r*rr*math.sin(ph), 6), round(cz + r*z, 6)])
+        return out
+
     def _make_grid(self, kind):
-        """Placement-mode 'G' (kind = source/receiver, from the active S/R mode): build a rectangular
-        grid/tensor of points, then group-move it."""
-        import itertools
-        ax = self._grid_dialog(kind)
-        if not ax:
+        """Placement-mode 'G' (kind from the active S/R mode): build a box grid or spherical shell of
+        points, then group-move it."""
+        res = self._grid_dialog(kind)
+        if not res:
             return
-        pts = list(itertools.product(*[self._axis_vals(*a) for a in ax]))
+        shape, pr = res
+        if shape == "box":
+            import itertools
+            pts = list(itertools.product(*[self._axis_vals(*a) for a in pr["ax"]]))
+        elif shape == "azel":
+            pts = self._sphere_azel(pr["center"], pr["r"], pr["az_step"], pr["el_min"], pr["el_max"], pr["el_step"])
+        else:
+            pts = self._sphere_fib(pr["center"], pr["r"], pr["n"])
         if not pts:
             return
         if len(pts) > 4000:
@@ -6171,28 +6205,63 @@ class MainWindow(QMainWindow):
         self._sb.showMessage(f"Deleted {len(items)} point(s).")
 
     def _grid_dialog(self, kind):
-        """Ask per-axis (start, end, step) for a grid of `kind`. Returns ((xs,xe,xst),(ys,..),(zs,..)) or None."""
-        dlg = QDialog(self); dlg.setWindowTitle(f"Create grid of {kind}s")
-        dlg.setStyleSheet(f"QDialog{{background:{PAL['bg']};color:{PAL['text']};}}"
-                          f"QLabel{{color:{PAL['text']};}}")
-        g = QGridLayout(dlg)
-        for c, h in enumerate(("start", "end", "step (0 = single)")):
+        """Box grid or spherical shell of `kind`. Returns (shape, params) or None. shapes:
+        'box' -> {ax}; 'azel' -> {center,r,az_step,el_min,el_max,el_step}; 'fib' -> {center,r,n}."""
+        from PySide6.QtWidgets import QComboBox, QStackedWidget, QWidget
+        dlg = QDialog(self); dlg.setWindowTitle(f"Create {kind} array")
+        dlg.setStyleSheet(f"QDialog{{background:{PAL['bg']};color:{PAL['text']};}}QLabel{{color:{PAL['text']};}}")
+        root = QVBoxLayout(dlg)
+        shape = QComboBox(); shape.addItems(["Box grid", "Sphere — az × el", "Sphere — Fibonacci"])
+        root.addWidget(shape)
+        stack = QStackedWidget(); root.addWidget(stack)
+
+        def sb(v, mn=-1e4, mx=1e4, dec=3):
+            s = QDoubleSpinBox(); s.setRange(mn, mx); s.setDecimals(dec); s.setValue(v); return s
+
+        # page 0 — box grid (start/end/step per axis; step 0 = single)
+        p0 = QWidget(); g = QGridLayout(p0)
+        for c, h in enumerate(("start", "end", "step (0=single)")):
             g.addWidget(QLabel(h), 0, c + 1)
-        def sb(v):
-            s = QDoubleSpinBox(); s.setRange(-1e4, 1e4); s.setDecimals(3); s.setValue(v); return s
-        rows = {}
-        for r, axname in enumerate(("x", "y", "z")):
-            g.addWidget(QLabel(axname), r + 1, 0)
-            s0, s1, st = sb(0.0), sb(1.0), sb(0.0)
-            rows[axname] = (s0, s1, st)
-            for c, w in enumerate((s0, s1, st)):
+        box = {}
+        for r, a in enumerate("xyz"):
+            g.addWidget(QLabel(a), r + 1, 0); box[a] = (sb(0.0), sb(1.0), sb(0.0))
+            for c, w in enumerate(box[a]):
                 g.addWidget(w, r + 1, c + 1)
-        ok = QPushButton("Create"); cancel = QPushButton("Cancel")
+        stack.addWidget(p0)
+
+        # page 1 — equiangular az × el shell (defaults: 8-point horizontal ring at head height)
+        p1 = QWidget(); f1 = QGridLayout(p1)
+        az = dict(cx=sb(0.0), cy=sb(0.0), cz=sb(1.6), r=sb(1.0, 0), azs=sb(45.0, 0, 360),
+                  elmn=sb(0.0, -90, 90), elmx=sb(0.0, -90, 90), els=sb(0.0, 0, 180))
+        for i, (lb, w) in enumerate([("center x", az["cx"]), ("center y", az["cy"]), ("center z", az["cz"]),
+                                     ("radius", az["r"]), ("az step°", az["azs"]),
+                                     ("el min°", az["elmn"]), ("el max°", az["elmx"]), ("el step° (0=single)", az["els"])]):
+            f1.addWidget(QLabel(lb), i, 0); f1.addWidget(w, i, 1)
+        stack.addWidget(p1)
+
+        # page 2 — Fibonacci near-uniform shell
+        p2 = QWidget(); f2 = QGridLayout(p2)
+        fib = dict(cx=sb(0.0), cy=sb(0.0), cz=sb(1.6), r=sb(1.0, 0), n=sb(32, 1, 100000, 0))
+        for i, (lb, w) in enumerate([("center x", fib["cx"]), ("center y", fib["cy"]), ("center z", fib["cz"]),
+                                     ("radius", fib["r"]), ("N points", fib["n"])]):
+            f2.addWidget(QLabel(lb), i, 0); f2.addWidget(w, i, 1)
+        stack.addWidget(p2)
+
+        shape.currentIndexChanged.connect(stack.setCurrentIndex)
+        row = QHBoxLayout(); ok = QPushButton("Create"); cancel = QPushButton("Cancel")
         ok.clicked.connect(dlg.accept); cancel.clicked.connect(dlg.reject)
-        g.addWidget(cancel, 4, 2); g.addWidget(ok, 4, 3)
+        row.addStretch(); row.addWidget(cancel); row.addWidget(ok); root.addLayout(row)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
-        return tuple((rows[a][0].value(), rows[a][1].value(), rows[a][2].value()) for a in ("x", "y", "z"))
+        i = shape.currentIndex()
+        if i == 0:
+            return "box", {"ax": tuple((box[a][0].value(), box[a][1].value(), box[a][2].value()) for a in "xyz")}
+        if i == 1:
+            return "azel", {"center": (az["cx"].value(), az["cy"].value(), az["cz"].value()), "r": az["r"].value(),
+                            "az_step": az["azs"].value(), "el_min": az["elmn"].value(),
+                            "el_max": az["elmx"].value(), "el_step": az["els"].value()}
+        return "fib", {"center": (fib["cx"].value(), fib["cy"].value(), fib["cz"].value()),
+                       "r": fib["r"].value(), "n": int(fib["n"].value())}
 
     def _on_table_row_selected(self, kind):
         """A row was selected in a point table -> highlight it in the 3D scene.
@@ -7551,6 +7620,10 @@ class MainWindow(QMainWindow):
             self._layer_list.addItem(item)
         self._mat_panel.set_project(self._proj_root)
         self._mat_panel.populate([g["name"] for g in groups])
+        # populate() selects material row 0 (needed so edits attribute to a row); don't let that
+        # auto-highlight a surface in the 3D scene on load.
+        self._gl.clear_selection()
+        self._layer_list.setCurrentRow(-1)
 
     def _show_no_layer_selected(self):
         # Leave the material table selection intact: it must always keep one row
