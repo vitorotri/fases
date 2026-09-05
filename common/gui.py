@@ -720,6 +720,7 @@ class GLViewer(QOpenGLWidget):
     mergeSiblings    = Signal(str)                          # RMB -> collapse '<base>_N' exploded pieces back to '<base>'
     cleanseLayers    = Signal()                             # RMB -> drop zero/sliver-area layers + dump layer areas
     groupXfDone      = Signal(list)                         # point group move/rotate committed -> [(kind, idx), …] to sync tables
+    modeLabelChanged = Signal(str)                          # current interaction mode -> status-bar badge
     pointsDeleted    = Signal(list)                         # edit-mode multi-delete -> [(kind, idx), …] to drop rows
 
     # placement modes
@@ -747,6 +748,8 @@ class GLViewer(QOpenGLWidget):
         self._pt_sel = []         # edit-mode multi-selection of points: [(kind, idx), …] (highlighted)
         self._pt_box = False      # True while an edit-mode rubber-band box-select is in progress
         self._nav_mode = False    # RMB-toggled: WAXD fly navigation active (else keys inert)
+        self._show_help = False   # '?' toggles the shortcuts overlay
+        self._last_mode_label = None   # last emitted mode string (status-bar badge)
         self._fly_keys = set()    # WAXD keys currently held for CadnaA-style fly navigation
         self._fly_timer = QTimer(self); self._fly_timer.setInterval(16)  # ~60 fps continuous move
         self._fly_timer.timeout.connect(self._fly_tick)
@@ -1584,7 +1587,13 @@ class GLViewer(QOpenGLWidget):
         self._paint_colorbar(gp)
         if self._rect is not None:
             self._paint_copy_rect(gp)
+        if self._show_help:
+            self._paint_help(gp)                   # '?' shortcuts overlay (on-demand, centred)
         gp.end()
+        lbl = self._mode_label()                   # report mode to the status-bar badge (bottom-right)
+        if lbl != self._last_mode_label:
+            self._last_mode_label = lbl
+            self.modeLabelChanged.emit(lbl)
 
     def _prop_center_world(self, xf):
         pr = self._props[xf["idxs"][0]]; c = pr.center()           # primary prop of the group
@@ -2659,6 +2668,54 @@ class GLViewer(QOpenGLWidget):
 
         painter.end()
 
+    def _mode_label(self):
+        """Short label for the current interaction mode -> the persistent corner chip."""
+        if self._fpv is not None:            return "RECEIVER VIEW"
+        if self._gxf is not None:            return "GROUP ROTATE" if self._gxf["mode"] == "r" else "GROUP MOVE"
+        if self._xform is not None:          return {"p": "PROP MOVE", "r": "PROP ROTATE", "s": "PROP SCALE"}[self._xform["mode"]]
+        if self._mode == self.MODE_SRC:      return "PLACE SOURCE"
+        if self._mode == self.MODE_REC:      return "PLACE RECEIVER"
+        if self._mode == self.MODE_SLICE:    return "SLICE"
+        if self._surf_pick:                  return "SURFACE SELECT"
+        if self._nav_mode:                   return "NAVIGATE"
+        if self._grab_held:                  return "EDIT POINTS"
+        if self._props_mode:                 return "DRAW / PROPS"
+        return "VIEW"
+
+    _HELP = [
+        ("VIEW / NAVIGATE", ["LMB drag orbit · MMB pan · wheel zoom",
+                             "Space  fly nav (W/X fwd·back, A/D strafe, Q/Z height, mouse looks)",
+                             "T  reset view · RMB  scene menu"]),
+        ("POINTS (Simulation)", ["S / R  place source / receiver  (+ G  make a grid/shell array)",
+                                 "E  edit: drag a point · box-select many · G move · R rotate · Del delete",
+                                 "hold X / Y / Z  lock an axis"]),
+        ("PROPS (Draw mode)", ["P / R / S  move / rotate / scale · X/Y/Z lock",
+                               "C (idle)  copy-select · hold C (moving)  collision",
+                               "Ctrl+Z  undo"]),
+        ("SURFACES (RMB menu)", ["rectangle-select → Group / Explode / Cleanse layers"]),
+    ]
+
+    def _paint_help(self, p):
+        """Semi-transparent shortcuts panel, toggled with '?'."""
+        from PySide6.QtCore import QRect
+        W, H = self.width(), self.height()
+        bw, bh = min(560, W - 40), min(320, H - 40)
+        x = (W - bw) // 2; y = (H - bh) // 2
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QColor(PAL["accent"])); p.setBrush(QColor(15, 18, 24, 236))
+        p.drawRoundedRect(x, y, bw, bh, 8, 8)
+        cy = y + 24
+        p.setPen(QColor(PAL["accent2"])); p.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        p.drawText(QRect(x, cy - 16, bw, 20), Qt.AlignmentFlag.AlignHCenter, "Keyboard & mouse — press ? to close")
+        cy += 14
+        for title, rows in self._HELP:
+            cy += 14
+            p.setPen(QColor(PAL["accent"])); p.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+            p.drawText(x + 16, cy, title); cy += 4
+            p.setPen(QColor(PAL["text"])); p.setFont(QFont("Monospace", 8))
+            for r in rows:
+                cy += 13; p.drawText(x + 26, cy, r)
+
     # ── mouse / keyboard ────────────────────────────────────
     def leaveEvent(self, e):
         self._hover_world = None
@@ -2946,6 +3003,8 @@ class GLViewer(QOpenGLWidget):
 
     def keyPressEvent(self, e):
         key = e.key()
+        if key == Qt.Key.Key_Question:          # '?' toggles the shortcuts overlay in any mode
+            self._show_help = not self._show_help; self.update(); e.accept(); return
         # Point group transform modal: G/R switch move/rotate, X/Y/Z pick axis, Enter commits, Esc cancels.
         if self._gxf is not None:
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -5622,10 +5681,7 @@ class MainWindow(QMainWindow):
         self._slice_btn.clicked.connect(lambda: self._toggle_placement("slice"))
         place_bar.addWidget(self._slice_btn)
 
-        self._hint_lbl = QLabel(
-                      "Rotate: LMB   Ctrl+LMB roll   Pan: MMB   Scroll: zoom   "
-                      "T: reset view   S: src   R: rec   hold X/Y/Z: lock axis (move mouse)   LMB: place   "
-                      "E then LMB-drag: edit/move point (hold X/Y/Z to lock)   RMB: del   Ctrl+Z: undo   Esc: cancel")
+        self._hint_lbl = QLabel("press  ?  in the 3D view for shortcuts")   # full cheatsheet is the ? overlay now
         place_bar.addWidget(self._hint_lbl)
         place_bar.addStretch()
         # bottom-align the buttons so the bottom margin (not layout centering) sets their height,
@@ -5729,6 +5785,11 @@ class MainWindow(QMainWindow):
         self._sb = QStatusBar()
         self.setStatusBar(self._sb)
         self._sb.showMessage("Ready.  Open a project folder to begin.")
+        self._mode_lbl = QLabel("VIEW   ·   ? = shortcuts")     # persistent mode badge, bottom-right
+        self._mode_lbl.setStyleSheet(f"color:{PAL['accent2']};font-weight:bold;padding:0 8px;")
+        self._sb.addPermanentWidget(self._mode_lbl)
+        self._gl.modeLabelChanged.connect(
+            lambda s: self._mode_lbl.setText(f"{s}   ·   ? = shortcuts"))
 
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._undo_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
