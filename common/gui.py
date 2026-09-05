@@ -5841,8 +5841,8 @@ class MainWindow(QMainWindow):
         elif mode == "draw":
             self._panel_locked = False
             self._results.hide()
+            self._open_props()          # loads props JSON first, so the sketch footprints populate on first entry
             self._open_sketch()
-            self._open_props()
 
     def _open_sketch(self):
         """Open the 2D domain sketcher (its own top-level window). Created once, reused."""
@@ -8723,6 +8723,7 @@ class PropsWindow(QWidget):
         p.layer = self._layer.currentText().strip() or self.p3.DEFAULT_LAYER
         self._list.item(row).setText(f"{p.source}  [{p.layer}]")
         self.gl.update()
+        self.gl.propsChanged.emit()          # refresh the 2D sketch footprints live (not just the 3D view)
 
     def _selected_rows(self):
         return sorted(self._list.row(it) for it in self._list.selectedItems())
