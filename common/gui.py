@@ -719,6 +719,8 @@ class GLViewer(QOpenGLWidget):
     explodeSurface   = Signal(int)                         # RMB "Explode" -> split ONE picked group (by index)
     mergeSiblings    = Signal(str)                          # RMB -> collapse '<base>_N' exploded pieces back to '<base>'
     cleanseLayers    = Signal()                             # RMB -> drop zero/sliver-area layers + dump layer areas
+    groupXfDone      = Signal(list)                         # point group move/rotate committed -> [(kind, idx), …] to sync tables
+    pointsDeleted    = Signal(list)                         # edit-mode multi-delete -> [(kind, idx), …] to drop rows
 
     # placement modes
     MODE_NONE  = 0
@@ -741,6 +743,13 @@ class GLViewer(QOpenGLWidget):
         # camera
         self._yaw   = self.ISO_YAW      # starting view only — free to orbit after (isometric x/y/z)
         self._pitch = self.ISO_PITCH
+        self._gxf = None          # active point group transform (move/rotate) or None
+        self._pt_sel = []         # edit-mode multi-selection of points: [(kind, idx), …] (highlighted)
+        self._pt_box = False      # True while an edit-mode rubber-band box-select is in progress
+        self._nav_mode = False    # RMB-toggled: WAXD fly navigation active (else keys inert)
+        self._fly_keys = set()    # WAXD keys currently held for CadnaA-style fly navigation
+        self._fly_timer = QTimer(self); self._fly_timer.setInterval(16)  # ~60 fps continuous move
+        self._fly_timer.timeout.connect(self._fly_tick)
         self._free_x = 0.0        # Alt+LMB free tumble around screen X
         self._free_y = 0.0        # Alt+LMB free tumble around screen Y
         self._roll  =  0.0        # Ctrl+LMB roll around view axis
@@ -963,6 +972,53 @@ class GLViewer(QOpenGLWidget):
                 xx += step
             yy += step
         return names
+
+    def _rot_all(self):
+        """The arcball's composite rotation (world→eye), matching the glRotatef order in _setup_camera:
+        Rz(roll)·Rx(free_x)·Ry(free_y)·Rx(pitch)·Rz(yaw)."""
+        r = math.radians
+        def Rx(a): c, s = math.cos(a), math.sin(a); return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+        def Ry(a): c, s = math.cos(a), math.sin(a); return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+        def Rz(a): c, s = math.cos(a), math.sin(a); return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        return (Rz(r(self._roll)) @ Rx(r(self._free_x)) @ Ry(r(self._free_y))
+                @ Rx(r(self._pitch)) @ Rz(r(self._yaw)))
+
+    def _fly_steer(self, dx, dy):
+        """Cockpit mouselook: turn about the EYE, not the pivot. Rotate, then move the pivot so the eye
+        position is unchanged (eye = pivot + R.T·[-pan_x,-pan_y,dist]). Without this, yaw/pitch orbit
+        the scene around a point ahead of you."""
+        off = np.array([-self._pan[0], -self._pan[1], self._dist], float)
+        eye = np.asarray(self._pivot, float) + self._rot_all().T @ off
+        self._yaw   += dx * 0.2
+        self._pitch += dy * 0.2
+        self._pivot = (eye - self._rot_all().T @ off).astype(np.float32)
+
+    def set_nav_mode(self, on):
+        """Toggle CadnaA-style fly navigation (WAXD move, mouse steers while W/X held). Off = keys inert."""
+        self._nav_mode = bool(on)
+        if not on:
+            self._fly_keys.clear(); self._fly_timer.stop()
+        self.setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def _fly_tick(self):
+        """CadnaA-style fly: move the camera along its view dir / strafe while WAXD are held. Translating
+        the pivot translates the eye (arcball), so _dist/angles stay put."""
+        if not self._fly_keys or self._fpv is not None or self._view_dir is None:
+            return
+        vd = np.asarray(self._view_dir, np.float64)
+        up = np.array([0, 0, 1.0])                              # Q/Z change height along world up
+        right = np.cross(vd, up); rn = np.linalg.norm(right)
+        right = right / rn if rn > 1e-6 else np.array([1.0, 0, 0])
+        K = Qt.Key
+        move = (vd    * (K.Key_W in self._fly_keys) - vd    * (K.Key_X in self._fly_keys)
+                + right * (K.Key_D in self._fly_keys) - right * (K.Key_A in self._fly_keys)
+                + up    * (K.Key_Q in self._fly_keys) - up    * (K.Key_Z in self._fly_keys))
+        n = np.linalg.norm(move)
+        if n > 1e-9:
+            step = max(self._scene_span, 1e-3) * 0.02          # ~1.2 spans/sec at 60 fps
+            self._pivot = (np.asarray(self._pivot, np.float64) + move / n * step).astype(np.float32)
+            self.update()
 
     def _pick_group_idx(self, qpos):
         """Index into self._groups of the nearest surface hit by the ray through qpos, or -1. Same
@@ -1517,6 +1573,8 @@ class GLViewer(QOpenGLWidget):
             self._draw_drag_guide()
         elif self._xform is not None:
             self._draw_xform_guide()               # crosshair + locked-axis line, like the drag guide
+        if self._gxf is not None:
+            self._draw_gxf_guide()                 # point group transform: centroid crosshair + axis line
         self._draw_hud()
         # origin marker + source/receiver glyphs, drawn last as a QPainter overlay
         gp = QPainter(self)
@@ -1552,6 +1610,33 @@ class GLViewer(QOpenGLWidget):
             ext = self._dist * 1.5
             ax = {'X': (1, 0, 0), 'Y': (0, 1, 0), 'Z': (0, 0, 1)}[xf["axis"]]
             glLineWidth(2.0)
+            glBegin(GL_LINES)
+            glVertex3f(p[0]-ax[0]*ext, p[1]-ax[1]*ext, p[2]-ax[2]*ext)
+            glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
+            glEnd()
+        glEnable(GL_LIGHTING)
+
+    def _draw_gxf_guide(self):
+        """Point group move/rotate: crosshair at the group centroid + the locked-axis line, so the axis
+        is visible while transforming."""
+        gx = self._gxf
+        if gx is None:
+            return
+        p = np.asarray(gx["centroid"], float)
+        glDisable(GL_LIGHTING)
+        # neutral white crosshair marks the centroid; only the LOCKED axis gets a long coloured line.
+        glColor4f(1.0, 1.0, 1.0, 1.0); glLineWidth(1.5)
+        d = self._dist * 0.04
+        glBegin(GL_LINES)
+        glVertex3f(p[0]-d, p[1], p[2]); glVertex3f(p[0]+d, p[1], p[2])
+        glVertex3f(p[0], p[1]-d, p[2]); glVertex3f(p[0], p[1]+d, p[2])
+        glVertex3f(p[0], p[1], p[2]-d); glVertex3f(p[0], p[1], p[2]+d)
+        glEnd()
+        if gx.get("axis"):
+            ext = self._dist * 1.5
+            ax = {'X': (1, 0, 0), 'Y': (0, 1, 0), 'Z': (0, 0, 1)}[gx["axis"]]
+            col = AXIS_COLORS[gx["axis"]]
+            glColor4f(col[0], col[1], col[2], 1.0); glLineWidth(2.5)
             glBegin(GL_LINES)
             glVertex3f(p[0]-ax[0]*ext, p[1]-ax[1]*ext, p[2]-ax[2]*ext)
             glVertex3f(p[0]+ax[0]*ext, p[1]+ax[1]*ext, p[2]+ax[2]*ext)
@@ -2315,8 +2400,11 @@ class GLViewer(QOpenGLWidget):
 
     def _draw_sources(self):
         for i, pt in enumerate(self._sources):
-            hl  = (i == self._hl_src)
-            if self._outside_domain(pt[0], pt[1], pt[2]):
+            sel = ("source", i) in self._pt_sel
+            hl  = (i == self._hl_src) or sel
+            if sel:
+                col = HL_COLOR
+            elif self._outside_domain(pt[0], pt[1], pt[2]):
                 col = OUTSIDE_COLOR
             else:
                 col = HL_COLOR if hl else SRC_COLOR
@@ -2324,8 +2412,11 @@ class GLViewer(QOpenGLWidget):
 
     def _draw_receivers(self):
         for i, pt in enumerate(self._receivers):
-            hl  = (i == self._hl_rec) or (i in self._sel_recs)
-            if self._outside_domain(pt[0], pt[1], pt[2]):
+            sel = ("receiver", i) in self._pt_sel
+            hl  = (i == self._hl_rec) or (i in self._sel_recs) or sel
+            if sel:
+                col = HL_COLOR
+            elif self._outside_domain(pt[0], pt[1], pt[2]):
                 col = OUTSIDE_COLOR
             else:
                 col = HL_COLOR if hl else REC_COLOR
@@ -2546,6 +2637,10 @@ class GLViewer(QOpenGLWidget):
         self._last_pos  = e.position()
         self._mouse_btn = e.button()
         self._drag_moved = False
+        # Point group transform in progress: consume the press; the release commits (LMB) / cancels (RMB)
+        # so it can't fall through to place a spurious point in S/R mode.
+        if self._gxf is not None:
+            return
         # A modal prop transform in progress: LMB confirms, RMB cancels; consume so the camera stays put.
         if self._xform is not None:
             if e.button() == Qt.MouseButton.LeftButton:
@@ -2558,11 +2653,14 @@ class GLViewer(QOpenGLWidget):
         # Copy-select armed (C): LMB starts the rubber-band box; consume so it doesn't orbit.
         if self._copy_arm and e.button() == Qt.MouseButton.LeftButton:
             self._rect = [e.position(), e.position()]; self._copy_arm = False; return
-        # If edit mode (E) is armed and LMB is pressed, grab the nearest
-        # placed source/receiver instead of rotating the camera.
+        # Edit mode (E) + LMB: grab the nearest point to drag it, else start a rubber-band box-select
+        # of multiple points (release fills _pt_sel; then G/R transform, Delete removes).
         if (self._fpv is None and self._grab_held and e.button() == Qt.MouseButton.LeftButton
                 and self._mode == self.MODE_NONE):
             self._begin_point_drag(e.position())
+            if self._drag_kind is None:
+                self._rect = [e.position(), e.position()]; self._pt_box = True
+            return
 
     def mouseMoveEvent(self, e):
         if self._fpv is not None:      # receiver view: LMB looks, Ctrl+LMB rolls, position frozen
@@ -2578,6 +2676,15 @@ class GLViewer(QOpenGLWidget):
                 self._last_pos = e.position()
                 self.update()
             return
+        # ── grid group-move: mouse translates the new group (no button needed), eye/scene fixed ──
+        if self._gxf is not None:
+            self._gxf_apply(e.position()); self._last_pos = e.position(); return
+        # ── fly steering: while moving forward/back (W/X held), the mouse guides the view direction ──
+        if self._nav_mode and self._fpv is None:            # free-look: mouse turns the view in place (eye fixed)
+            if self._last_pos is not None:
+                self._fly_steer(e.position().x() - self._last_pos.x(),
+                                e.position().y() - self._last_pos.y())
+            self._last_pos = e.position(); self.update(); return
         # ── rubber-band box for copy-select: extend it, no orbit ──
         if self._rect is not None:
             self._rect[1] = e.position(); self.update(); return
@@ -2669,6 +2776,16 @@ class GLViewer(QOpenGLWidget):
         self._mouse_btn = None
         self._last_pos  = None
 
+        # Point group transform: LMB drops it, RMB cancels. Consumed here so S/R mode doesn't also place.
+        if self._gxf is not None and e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            self._gxf_commit(cancel=(e.button() == Qt.MouseButton.RightButton)); return
+
+        # Finish an edit-mode point box-select: fill the multi-selection (highlighted; then G/R/Delete).
+        if self._rect is not None and self._pt_box and e.button() == Qt.MouseButton.LeftButton:
+            self._pt_sel = self._find_points_in_rect(self._rect)
+            self._rect = None; self._pt_box = False
+            self.update(); return
+
         # Finish a surface rect-select: add the front-most enclosed surfaces to the selection (highlight).
         if self._rect is not None and self._surf_pick and e.button() == Qt.MouseButton.LeftButton:
             self._surf_sel |= self._find_surfaces_in_rect(self._rect)
@@ -2724,6 +2841,8 @@ class GLViewer(QOpenGLWidget):
                 kind, idx = self._find_nearest_point(e.position(), radius=30.0)
                 self.receiverPicked.emit(idx if kind == "receiver" else -1)
                 return
+            if self._props_mode or self._grab_held:      # positioning props / editing points: don't
+                return                                   # pick+highlight domain surfaces (annoying)
             self._do_ray_pick(e.position())
         if not moved and e.button() == Qt.MouseButton.RightButton:
             if self._fpv is not None or not self._do_point_remove(e.position()):  # empty -> scene menu
@@ -2795,6 +2914,30 @@ class GLViewer(QOpenGLWidget):
 
     def keyPressEvent(self, e):
         key = e.key()
+        # Point group transform modal: G/R switch move/rotate, X/Y/Z pick axis, Enter commits, Esc cancels.
+        if self._gxf is not None:
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._gxf_commit(); e.accept(); return
+            if key == Qt.Key.Key_Escape:
+                self._gxf_commit(cancel=True); e.accept(); return
+            if key in (Qt.Key.Key_G, Qt.Key.Key_R):
+                self._gxf["mode"] = 'g' if key == Qt.Key.Key_G else 'r'; self._gxf_reanchor()
+                e.accept(); return
+            if key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):   # HELD lock (release unlocks)
+                if not e.isAutoRepeat():
+                    self._gxf["axis"] = {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]
+                    self._gxf_reanchor()
+                e.accept(); return
+            e.accept(); return                              # swallow everything else during the modal
+        # Edit mode with a multi-selection: G move / R rotate the group; Delete removes it.
+        if (self._grab_held and self._pt_sel and self._mode == self.MODE_NONE and not self._props_mode):
+            if key == Qt.Key.Key_G:
+                self.start_group_xform(self._pt_sel, "g"); e.accept(); return
+            if key == Qt.Key.Key_R:
+                self.start_group_xform(self._pt_sel, "r"); e.accept(); return
+            if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                self.pointsDeleted.emit(list(self._pt_sel)); self._pt_sel = []
+                self.update(); e.accept(); return
         # ── Draw mode: modal prop transform. P move, R rotate, S scale; X/Y/Z lock axis (toggle);
         #    Enter confirms, Esc cancels. Blender-style: after the key, the mouse drives it (no button). ──
         if self._props_mode and self._mode == self.MODE_NONE:
@@ -2843,9 +2986,20 @@ class GLViewer(QOpenGLWidget):
             self.setCursor(Qt.CursorShape.OpenHandCursor if self._grab_held
                            else Qt.CursorShape.ArrowCursor)
             if not self._grab_held:
-                # leaving edit mode clears the hover highlight
+                # leaving edit mode clears the hover highlight + multi-selection
                 self.set_highlight(None, -1)
                 self.pointHovered.emit("", -1)
+                self._pt_sel = []
+            e.accept(); return
+        # WAXD fly navigation (idle only) — hold to move; mouse steers while W/X held. X = back (S is source).
+        if (self._nav_mode and self._fpv is None and self._mode == self.MODE_NONE and self._xform is None
+                and not self._props_mode and self._drag_kind is None
+                and key in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_X, Qt.Key.Key_D,
+                            Qt.Key.Key_Q, Qt.Key.Key_Z)):
+            if not e.isAutoRepeat():
+                self._fly_keys.add(key)
+                if not self._fly_timer.isActive():
+                    self._fly_timer.start()
             e.accept(); return
         # X/Y/Z while dragging a point -> constrain movement to that axis.
         if self._drag_kind is not None and key in (
@@ -2868,6 +3022,17 @@ class GLViewer(QOpenGLWidget):
         if e.isAutoRepeat():
             return
         key = e.key()
+        # Release a held fly key -> stop that direction (timer stops when none left).
+        if key in self._fly_keys and not e.isAutoRepeat():
+            self._fly_keys.discard(key)
+            if not self._fly_keys:
+                self._fly_timer.stop()
+            e.accept(); return
+        # Releasing the held X/Y/Z during a point group transform -> back to free.
+        if self._gxf is not None and key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
+            if self._gxf.get("axis") == {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]:
+                self._gxf["axis"] = None; self._gxf_reanchor()
+            e.accept(); return
         # Releasing X/Y/Z during a modal prop transform -> back to free (held, like everywhere else).
         if self._xform is not None and key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
             self._xform_reanchor()                                # continue from here (no jump)
@@ -2965,6 +3130,7 @@ class GLViewer(QOpenGLWidget):
         dh = m.addAction("Exit dollhouse view" if getattr(self, "_dollhouse", False)
                          else "Dollhouse view")
         oo = m.addAction("Perspective view" if self._ortho else "Top-down (ortho) view")
+        nv = m.addAction("Exit navigation mode" if self._nav_mode else "Navigation mode (WAXD fly)")
         m.addSeparator()
         ev = m.addAction("🎧︎  Enter receiver view")
         chosen = m.exec(gpos)
@@ -2992,6 +3158,8 @@ class GLViewer(QOpenGLWidget):
             self.update()
         elif chosen is oo:                                  # scene-wide plan view (props + src/rec later)
             self.set_ortho(not self._ortho)
+        elif chosen is nv:
+            self.set_nav_mode(not self._nav_mode)
         elif chosen is ev:
             self.fpvRequested.emit()
 
@@ -3013,6 +3181,122 @@ class GLViewer(QOpenGLWidget):
                 except Exception:
                     pass
         return best_kind, best_idx
+
+    def _lst(self, kind):
+        return self._sources if kind == "source" else self._receivers
+
+    def _find_points_in_rect(self, rect):
+        """[(kind, idx), …] of sources+receivers whose glyph projects inside the screen rectangle."""
+        self.makeCurrent()
+        W, H = self.width(), self.height(); vp = [0, 0, int(W), int(H)]
+        x0, x1 = sorted((rect[0].x(), rect[1].x())); y0, y1 = sorted((rect[0].y(), rect[1].y()))
+        out = []
+        for kind in ("source", "receiver"):
+            for i, pt in enumerate(self._lst(kind)):
+                try:
+                    sx, sy, sz = gluProject(float(pt[0]), float(pt[1]), float(pt[2]), self._mv, self._proj, vp)
+                    if sz < 0 or sz > 1:
+                        continue
+                    if x0 <= sx <= x1 and y0 <= (H - sy) <= y1:
+                        out.append((kind, i))
+                except Exception:
+                    pass
+        return out
+
+    def start_group_xform(self, items, mode):
+        """Modal move ('g') / rotate ('r') of a set of points (items = [(kind, idx), …]). Mouse drives it,
+        click/Enter commits, Esc/RMB cancels. X/Y/Z pick the axis. Out-of-domain points render yellow.
+        Used by grid creation (move) and edit-mode multi-select (move/rotate)."""
+        items = [(k, i) for (k, i) in items if 0 <= i < len(self._lst(k))]
+        if not items:
+            return
+        self._gxf = {"items": items, "mode": mode,
+                     "orig": [list(self._lst(k)[i][:3]) for (k, i) in items]}
+        self._gxf_reanchor()
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.update()
+
+    def start_group_move(self, kind, idxs):          # grid-creation entry point (translate)
+        self.start_group_xform([(kind, i) for i in idxs], "g")
+
+    def _gxf_reanchor(self):
+        """Re-base the transform on the CURRENT coords (start, or after a mode/axis switch) so continuing
+        never jumps and the current result is preserved."""
+        gx = self._gxf
+        gx["base"] = [list(self._lst(k)[i][:3]) for (k, i) in gx["items"]]
+        gx["centroid"] = np.mean(np.asarray(gx["base"], float), axis=0)
+        gx["anchor"] = None; gx["anchor_ang"] = None
+
+    def _gxf_apply(self, qpos):
+        (self._gxf_move if self._gxf["mode"] == "g" else self._gxf_rotate)(qpos)
+
+    def _gxf_move(self, qpos):
+        gx = self._gxf; self.makeCurrent()
+        W, H = self.width(), self.height(); vp = [0, 0, int(W), int(H)]
+        c = np.asarray(gx["centroid"], float)
+        mx, myf = float(qpos.x()), float(H) - float(qpos.y())
+        try:
+            if gx.get("axis"):
+                # slide the group centroid along the world axis to the point closest to the mouse RAY
+                # (view-independent — same trick as single-point drag, so it tracks the cursor exactly).
+                if gx["anchor"] is None:
+                    gx["anchor"] = c.copy(); return
+                a0 = gx["anchor"]
+                ax = {'X': np.array([1., 0, 0]), 'Y': np.array([0, 1., 0]), 'Z': np.array([0, 0, 1.])}[gx["axis"]]
+                ro = np.array(gluUnProject(mx, myf, 0.0, self._mv, self._proj, vp), float)
+                rd = np.array(gluUnProject(mx, myf, 1.0, self._mv, self._proj, vp), float) - ro
+                w0 = a0 - ro; b = ax @ rd; cc = rd @ rd; d0 = ax @ w0; e0 = rd @ w0
+                denom = cc - b * b
+                if abs(denom) < 1e-9:
+                    return
+                d = ax * ((b * e0 - cc * d0) / denom)            # displacement of centroid along the axis
+            else:
+                _, _, sz = gluProject(float(c[0]), float(c[1]), float(c[2]), self._mv, self._proj, vp)
+                world = np.array(gluUnProject(mx, myf, float(sz), self._mv, self._proj, vp), float)
+                if gx["anchor"] is None:
+                    gx["anchor"] = world; return
+                d = world - gx["anchor"]
+        except Exception:
+            return
+        for n, (kind, idx) in enumerate(gx["items"]):
+            b = gx["base"][n]; self._lst(kind)[idx] = [b[0] + d[0], b[1] + d[1], b[2] + d[2]]
+        self.update()
+
+    def _gxf_rotate(self, qpos):
+        gx = self._gxf; self.makeCurrent()
+        W, H = self.width(), self.height(); vp = [0, 0, int(W), int(H)]
+        c = gx["centroid"]
+        try:
+            cxs, cys, _ = gluProject(float(c[0]), float(c[1]), float(c[2]), self._mv, self._proj, vp)
+        except Exception:
+            return
+        ang = math.atan2((float(H) - float(qpos.y())) - cys, float(qpos.x()) - cxs)
+        if gx["anchor_ang"] is None:
+            gx["anchor_ang"] = ang; return
+        R = self._axis_rot_np(gx.get("axis") or 'Z', ang - gx["anchor_ang"])   # default vertical (Z)
+        for n, (kind, idx) in enumerate(gx["items"]):
+            p = c + R @ (np.asarray(gx["base"][n], float) - c)
+            self._lst(kind)[idx] = [float(p[0]), float(p[1]), float(p[2])]
+        self.update()
+
+    @staticmethod
+    def _axis_rot_np(axis, th):
+        c, s = math.cos(th), math.sin(th)
+        if axis == 'X': return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+        if axis == 'Y': return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+    def _gxf_commit(self, cancel=False):
+        gx = self._gxf; self._gxf = None
+        self._pt_sel = []                                # drop the highlight once the group op is done
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        if gx and cancel:
+            for n, (kind, idx) in enumerate(gx["items"]):
+                if 0 <= idx < len(self._lst(kind)):
+                    self._lst(kind)[idx] = list(gx["orig"][n])
+        if gx and not cancel:
+            self.groupXfDone.emit(gx["items"])
+        self.update()
 
     def _begin_point_drag(self, qpos):
         """
@@ -5260,6 +5544,8 @@ class MainWindow(QMainWindow):
         self._gl.fpvPoseChanged.connect(self._on_fpv_pose)
         self._results_sel = set(); self._sel_sync = False   # shared Results receiver selection
         self._gl.pointRemoved.connect(self._on_point_removed)
+        self._gl.groupXfDone.connect(self._on_group_xf)
+        self._gl.pointsDeleted.connect(self._on_points_deleted)
         gl_vlay.addWidget(self._gl, stretch=1)      # GL stays in the layout (never re-parented)
         # Results plots are an OVERLAY on top of the scene (QOpenGLWidget crashes if stacked),
         # shown/hidden by the mode bar and positioned clear of the left panel in _layout_panel.
@@ -5820,6 +6106,94 @@ class MainWindow(QMainWindow):
         self._refresh_gl_points()
         self._sb.showMessage(f"Placed {mode} at ({x:.3f}, {y:.3f}, {z:.3f}) m  —  drag again to add another, Esc to finish")
 
+    @staticmethod
+    def _axis_vals(s, e, step):
+        """Equally-spaced values from s to e by |step|. step<=0 (or s==e) -> single value [s]
+        (no multiplication on that axis)."""
+        s, e, step = float(s), float(e), float(step)
+        if step <= 0 or abs(e - s) < 1e-12:
+            return [s]
+        lo, hi = (s, e) if e >= s else (e, s)
+        return [round(v, 6) for v in np.arange(lo, hi + step * 0.5, step)]
+
+    def _make_grid(self, kind):
+        """Placement-mode 'G' (kind = source/receiver, from the active S/R mode): build a rectangular
+        grid/tensor of points, then group-move it."""
+        import itertools
+        ax = self._grid_dialog(kind)
+        if not ax:
+            return
+        pts = list(itertools.product(*[self._axis_vals(*a) for a in ax]))
+        if not pts:
+            return
+        if len(pts) > 4000:
+            B = QMessageBox.StandardButton
+            if QMessageBox.question(self, "Large grid",
+                    f"This creates {len(pts)} points. Continue?", B.Yes | B.No, B.No) != B.Yes:
+                return
+        self._remember_points_for_undo()
+        tbl = self._src_tbl if kind == "source" else self._rec_tbl
+        start = tbl._tbl.rowCount()
+        for x, y, z in pts:
+            tbl.add_point(x, y, z)
+        self._refresh_gl_points()
+        self._gl.start_group_move(kind, list(range(start, start + len(pts))))
+        self._sb.showMessage(f"{len(pts)} {kind}s created — move with the mouse, click/Enter to drop, Esc to keep.")
+
+    def _on_group_xf(self, items):
+        """A point group move/rotate (or grid drop) committed -> write coords back into the tables.
+        Snapshot ALL coords FIRST: each update_point fires changed -> _refresh_gl_points, which rebuilds
+        gl._sources from the table, clobbering the not-yet-synced points if we read them mid-loop."""
+        self._remember_points_for_undo()
+        snap = []
+        for kind, i in items:
+            lst = self._gl._sources if kind == "source" else self._gl._receivers
+            if 0 <= i < len(lst):
+                p = lst[i]; snap.append((kind, i, float(p[0]), float(p[1]), float(p[2])))
+        for kind, i, x, y, z in snap:
+            (self._src_tbl if kind == "source" else self._rec_tbl).update_point(i, x, y, z)
+        self._sb.showMessage(f"Updated {len(snap)} point(s).")
+
+    def _on_points_deleted(self, items):
+        """Edit-mode multi-delete -> remove the selected rows (descending, per table)."""
+        if not items:
+            return
+        self._remember_points_for_undo()
+        for kind, tbl in (("source", self._src_tbl), ("receiver", self._rec_tbl)):
+            rows = sorted((i for k, i in items if k == kind), reverse=True)
+            for r in rows:
+                if 0 <= r < tbl._tbl.rowCount():
+                    tbl._tbl.removeRow(r)
+                    if tbl._has_pose and r < len(tbl.poses):
+                        del tbl.poses[r]
+            if rows:
+                tbl.changed.emit()
+        self._sb.showMessage(f"Deleted {len(items)} point(s).")
+
+    def _grid_dialog(self, kind):
+        """Ask per-axis (start, end, step) for a grid of `kind`. Returns ((xs,xe,xst),(ys,..),(zs,..)) or None."""
+        dlg = QDialog(self); dlg.setWindowTitle(f"Create grid of {kind}s")
+        dlg.setStyleSheet(f"QDialog{{background:{PAL['bg']};color:{PAL['text']};}}"
+                          f"QLabel{{color:{PAL['text']};}}")
+        g = QGridLayout(dlg)
+        for c, h in enumerate(("start", "end", "step (0 = single)")):
+            g.addWidget(QLabel(h), 0, c + 1)
+        def sb(v):
+            s = QDoubleSpinBox(); s.setRange(-1e4, 1e4); s.setDecimals(3); s.setValue(v); return s
+        rows = {}
+        for r, axname in enumerate(("x", "y", "z")):
+            g.addWidget(QLabel(axname), r + 1, 0)
+            s0, s1, st = sb(0.0), sb(1.0), sb(0.0)
+            rows[axname] = (s0, s1, st)
+            for c, w in enumerate((s0, s1, st)):
+                g.addWidget(w, r + 1, c + 1)
+        ok = QPushButton("Create"); cancel = QPushButton("Cancel")
+        ok.clicked.connect(dlg.accept); cancel.clicked.connect(dlg.reject)
+        g.addWidget(cancel, 4, 2); g.addWidget(ok, 4, 3)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return tuple((rows[a][0].value(), rows[a][1].value(), rows[a][2].value()) for a in ("x", "y", "z"))
+
     def _on_table_row_selected(self, kind):
         """A row was selected in a point table -> highlight it in the 3D scene.
         Guarded so the reverse (G-hover -> select row) does not loop."""
@@ -6133,10 +6507,22 @@ class MainWindow(QMainWindow):
             self._slice_btn.setChecked(not self._slice_btn.isChecked())
             self._toggle_placement("slice")
             e.accept(); return
+        if key == Qt.Key.Key_G and self._gl._mode in (GLViewer.MODE_SRC, GLViewer.MODE_REC):
+            self._make_grid("source" if self._gl._mode == GLViewer.MODE_SRC else "receiver")  # S/R + G -> grid
+            e.accept(); return
         if key == Qt.Key.Key_T and self._gl._mode == GLViewer.MODE_NONE:
             # reset the 3D view to the exact initial visualization
             self._gl._reset_view()
             self._sb.showMessage("View reset.")
+            e.accept(); return
+        if key == Qt.Key.Key_Space and self._gl._mode == GLViewer.MODE_NONE:
+            on = not self._gl._nav_mode
+            self._gl.set_nav_mode(on)
+            self._sb.showMessage("Navigation mode: WAXD fly, mouse looks." if on else "Navigation mode off.")
+            e.accept(); return
+        if key == Qt.Key.Key_Escape and self._gl._nav_mode:
+            self._gl.set_nav_mode(False)
+            self._sb.showMessage("Navigation mode off.")
             e.accept(); return
         if key == Qt.Key.Key_Escape:
             was_placing = (self._src_btn.isChecked() or self._rec_btn.isChecked()
