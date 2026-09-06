@@ -2040,30 +2040,67 @@ class GLViewer(QOpenGLWidget):
                 return False
             idxs = [idx]; self._prop_sel = idx
         self._xform = {"mode": mode, "axis": None, "idxs": list(idxs), "anchor": cpos,
-                       "bases": self._snapshot(idxs), "pivot": self._group_pivot(idxs),
-                       "collide": False, "ok": self._snapshot(idxs), "static": None}
+                       "bases": self._snapshot(idxs), "pivot": self._group_pivot(idxs)}
         self.update()
         return True
 
-    def _prop_aabb(self, p):
-        v = np.asarray(p.world()[0], float)
-        return v.min(0), v.max(0)
+    def _scene_tris_ABC(self, exclude=()):
+        """Triangle vertex arrays (A,B,C) of the room mesh + every OTHER prop — the surfaces a prop can
+        rest on. None if the scene is empty."""
+        A, B, C = [], [], []
+        v = np.asarray(self._verts, float)
+        room = [np.asarray(g["tris"]) for g in self._groups
+                if not g.get("is_bbox") and len(g["tris"]) and "ceiling" not in g["name"].lower()]
+        if len(v) and room:
+            rt = np.concatenate(room); A.append(v[rt[:, 0]]); B.append(v[rt[:, 1]]); C.append(v[rt[:, 2]])
+        for j, p in enumerate(self._props):
+            if j in exclude:
+                continue
+            pv, pt = p.world(); pv = np.asarray(pv, float); pt = np.asarray(pt)
+            if len(pt):
+                A.append(pv[pt[:, 0]]); B.append(pv[pt[:, 1]]); C.append(pv[pt[:, 2]])
+        if not A:
+            return None
+        return np.concatenate(A), np.concatenate(B), np.concatenate(C)
 
-    def _xform_collides(self):
-        """AABB collision for the moving props: outside the domain box (walls/floor/ceiling of a box room)
-        or overlapping any static prop. ponytail: axis-aligned bounding boxes — approximate for rotated or
-        concave meshes and interior/non-box walls; upgrade to per-triangle tests only if needed."""
-        xf = self._xform
-        dmn, dmx = np.asarray(self._domain_min, float), np.asarray(self._domain_max, float)
-        eps = 1e-6
-        for i in xf["idxs"]:
-            amn, amx = self._prop_aabb(self._props[i])
-            if np.any(amn < dmn - eps) or np.any(amx > dmx + eps):
-                return True
-            for bmn, bmx in xf["static"]:
-                if np.all(amn < bmx - eps) and np.all(amx > bmn + eps):
-                    return True
-        return False
+    @staticmethod
+    def _top_z_at(x, y, A, B, C):
+        """Highest surface z under the vertical line (x,y) among triangles ABC (ceilings already excluded
+        by _scene_tris_ABC, vertical walls skip via zero xy-area). None if the column hits nothing."""
+        a2, v0, v1 = A[:, :2], B[:, :2] - A[:, :2], C[:, :2] - A[:, :2]
+        px, py = x - a2[:, 0], y - a2[:, 1]
+        den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
+        ok = np.abs(den) > 1e-12
+        ds = np.where(ok, den, 1.0)
+        u = (px * v1[:, 1] - v1[:, 0] * py) / ds
+        w = (v0[:, 0] * py - px * v0[:, 1]) / ds
+        inside = ok & (u >= -1e-9) & (w >= -1e-9) & (u + w <= 1 + 1e-9)
+        z = A[:, 2] + u * (B[:, 2] - A[:, 2]) + w * (C[:, 2] - A[:, 2])
+        z = np.where(inside, z, -np.inf)
+        m = float(z.max()) if z.size else -np.inf
+        return None if m == -np.inf else m
+
+    def _drop_prop(self, i, exclude=None):
+        """Rest prop i's bottom on the highest surface (stage/floor/other prop) directly beneath its
+        footprint; fall back to the domain floor. Sampled at the footprint centre + corners."""
+        if not (0 <= i < len(self._props)):
+            return
+        p = self._props[i]
+        v = np.asarray(p.world()[0], float)
+        amn, amx = v.min(0), v.max(0)
+        top = 0.0                                              # fallback: rest base at z=0 (room floor)
+        ABC = self._scene_tris_ABC(exclude if exclude is not None else {i})
+        if ABC is not None:
+            A, B, C = ABC
+            ex = amn[0] + (amx[0] - amn[0]) * 0.02; ex1 = amx[0] - (amx[0] - amn[0]) * 0.02
+            ey = amn[1] + (amx[1] - amn[1]) * 0.02; ey1 = amx[1] - (amx[1] - amn[1]) * 0.02
+            samples = [((amn[0] + amx[0]) / 2, (amn[1] + amx[1]) / 2),
+                       (ex, ey), (ex1, ey), (ex1, ey1), (ex, ey1)]
+            hits = [self._top_z_at(x, y, A, B, C) for x, y in samples]
+            hits = [h for h in hits if h is not None]
+            if hits:
+                top = max(hits)
+        p.pos = [p.pos[0], p.pos[1], p.pos[2] + (top - amn[2])]
 
     def _xform_reanchor(self):
         """Re-snapshot the base transforms + mouse anchor to the CURRENT state, so toggling an axis
@@ -2084,6 +2121,10 @@ class GLViewer(QOpenGLWidget):
                 if 0 <= i < len(self._props):
                     p = self._props[i]
                     p.pos, p.rot, p.scale = list(b["pos"]), list(b["rot"]), list(b["scale"])
+        else:                                                      # settle each prop onto the surface below
+            ex = set(xf["idxs"])
+            for i in xf["idxs"]:
+                self._drop_prop(i, exclude=ex)
         self._xform = None
         self.propsChanged.emit(); self.update()
 
@@ -2120,6 +2161,10 @@ class GLViewer(QOpenGLWidget):
                     pass
             for i, b in zip(xf["idxs"], xf["bases"]):
                 bp = b["pos"]; self._props[i].pos = [bp[0] + delta[0], bp[1] + delta[1], bp[2] + delta[2]]
+            if xf["axis"] != "Z":                    # ride the surface below LIVE (so you see where it lands);
+                ex = set(xf["idxs"])                 # skip when Z-locked so you can set height by hand
+                for i in xf["idxs"]:
+                    self._drop_prop(i, exclude=ex)
         elif xf["mode"] == "r":
             axis = xf["axis"] or "Z"; k = ai[axis]; ang = dx * 0.5; piv = xf["pivot"]  # 0.5 deg/px
             for i, b in zip(xf["idxs"], xf["bases"]):
@@ -2140,17 +2185,6 @@ class GLViewer(QOpenGLWidget):
                     ns = list(b["scale"]); ns[k] = b["scale"][k] * f
                 p.pos = [piv[m] + noff[m] - cm[m] for m in range(3)]      # move from pivot + scale each
                 p.scale = ns
-        # collision (held C): reject a frame that overlaps a static prop or leaves the domain -> keep the
-        # last valid state, so the prop slides up to the obstacle instead of entering it.
-        if xf.get("collide"):
-            if xf["static"] is None:
-                moving = set(xf["idxs"])
-                xf["static"] = [self._prop_aabb(self._props[j]) for j in range(len(self._props)) if j not in moving]
-            if self._xform_collides():
-                for i, b in zip(xf["idxs"], xf["ok"]):
-                    p = self._props[i]; p.pos, p.rot, p.scale = list(b["pos"]), list(b["rot"]), list(b["scale"])
-            else:
-                xf["ok"] = self._snapshot(xf["idxs"])
         self.update()
 
     def _find_props_in_rect(self, rect):
@@ -2203,8 +2237,30 @@ class GLViewer(QOpenGLWidget):
         self.propsChanged.emit(); self.update()
         return True
 
+    def _view_ground_xy(self):
+        """(x,y) where the centre of the view meets the z=0 ground plane — so a new prop lands where the
+        user is looking. Falls back to the orbit pivot when the view is near-horizontal."""
+        try:
+            self.makeCurrent()
+            W, H = self.width(), self.height()
+            ro, rd = ray_from_screen(W / 2.0, H / 2.0, W, H, self._mv, self._proj)
+            ro = np.asarray(ro, float); rd = np.asarray(rd, float)
+            if abs(rd[2]) > 1e-6:
+                p = ro + rd * (-ro[2] / rd[2])
+                if np.all(np.isfinite(p)):
+                    return float(p[0]), float(p[1])
+        except Exception:
+            pass
+        return float(self._pivot[0]), float(self._pivot[1])
+
     def add_prop(self, prop):
+        cx, cy = self._view_ground_xy()
+        prop.pos = [cx, cy, 0.0]                          # rough; then centre the footprint on (cx,cy)
+        v = np.asarray(prop.world()[0], float); mn, mx = v.min(0), v.max(0)
+        prop.pos[0] += cx - (mn[0] + mx[0]) / 2.0
+        prop.pos[1] += cy - (mn[1] + mx[1]) / 2.0
         self._props.append(prop); self._prop_sel = len(self._props) - 1
+        self._drop_prop(self._prop_sel)                  # base rests on stage/floor there (fallback z=0)
         self.propsChanged.emit(); self.update()          # refresh panel + 2D footprints live
 
     def remove_prop(self, i):
@@ -2687,10 +2743,10 @@ class GLViewer(QOpenGLWidget):
                              "Space  fly nav (W/X fwd·back, A/D strafe, Q/Z height, mouse looks)",
                              "T  reset view · RMB  scene menu"]),
         ("POINTS (Simulation)", ["S / R  place source / receiver  (+ G  make a grid/shell array)",
-                                 "E  edit: drag a point · box-select many · G move · R rotate · Del delete",
+                                 "E  edit: drag a point · box-select many · P move · R rotate · Del delete",
                                  "hold X / Y / Z  lock an axis"]),
         ("PROPS (Draw mode)", ["P / R / S  move / rotate / scale · X/Y/Z lock",
-                               "C (idle)  copy-select · hold C (moving)  collision",
+                               "C  copy-select · props auto-rest on the surface below (stage/floor)",
                                "Ctrl+Z  undo"]),
         ("SURFACES (RMB menu)", ["rectangle-select → Group / Explode / Cleanse layers"]),
     ]
@@ -3011,8 +3067,8 @@ class GLViewer(QOpenGLWidget):
                 self._gxf_commit(); e.accept(); return
             if key == Qt.Key.Key_Escape:
                 self._gxf_commit(cancel=True); e.accept(); return
-            if key in (Qt.Key.Key_G, Qt.Key.Key_R):
-                self._gxf["mode"] = 'g' if key == Qt.Key.Key_G else 'r'; self._gxf_reanchor()
+            if key in (Qt.Key.Key_P, Qt.Key.Key_R):        # P move / R rotate (consistent with props)
+                self._gxf["mode"] = 'g' if key == Qt.Key.Key_P else 'r'; self._gxf_reanchor()
                 e.accept(); return
             if key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):   # HELD lock (release unlocks)
                 if not e.isAutoRepeat():
@@ -3020,9 +3076,9 @@ class GLViewer(QOpenGLWidget):
                     self._gxf_reanchor()
                 e.accept(); return
             e.accept(); return                              # swallow everything else during the modal
-        # Edit mode with a multi-selection: G move / R rotate the group; Delete removes it.
+        # Edit mode with a multi-selection: P move / R rotate the group; Delete removes it.
         if (self._grab_held and self._pt_sel and self._mode == self.MODE_NONE and not self._props_mode):
-            if key == Qt.Key.Key_G:
+            if key == Qt.Key.Key_P:
                 self.start_group_xform(self._pt_sel, "g"); e.accept(); return
             if key == Qt.Key.Key_R:
                 self.start_group_xform(self._pt_sel, "r"); e.accept(); return
@@ -3056,10 +3112,6 @@ class GLViewer(QOpenGLWidget):
                     self._xform['mode'] = {Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]
                     self._xform['axis'] = None
                     self.update(); e.accept(); return
-                if key == Qt.Key.Key_C and not e.isAutoRepeat():         # HELD: collision on (block overlaps)
-                    self._xform['collide'] = True; self._xform['static'] = None
-                    self._xform['ok'] = self._snapshot(self._xform['idxs'])
-                    e.accept(); return
             if self._xform is None and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
                 self.push_props_undo()                            # so Ctrl+Z reverts this transform
                 if self._xform_start({Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]):
@@ -3128,9 +3180,6 @@ class GLViewer(QOpenGLWidget):
             if self._gxf.get("axis") == {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]:
                 self._gxf["axis"] = None; self._gxf_reanchor()
             e.accept(); return
-        # Releasing held C during a prop transform -> collision off.
-        if self._xform is not None and key == Qt.Key.Key_C:
-            self._xform['collide'] = False; e.accept(); return
         # Releasing X/Y/Z during a modal prop transform -> back to free (held, like everywhere else).
         if self._xform is not None and key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):
             self._xform_reanchor()                                # continue from here (no jump)
