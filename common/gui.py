@@ -6051,6 +6051,20 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _reset_scene_editors(self):
+        """Project switch -> clear the in-session sketch + props (the loaders are guarded against clobbering
+        in-session state, so without this the new project shows the PREVIOUS project's domain), then load
+        the new project's saved editors."""
+        self._gl._props = []; self._gl._prop_sel = -1; self._gl.update()
+        sk = getattr(self, "_sketch", None)
+        if sk is not None:
+            c = sk.canvas
+            c.shapes = []; c._shape_sel = None; c._shape_xform = None
+            c._psel = set(); c._esel = set(); c.sel = None; c._undo = []
+            c.selectionChanged.emit(); c.update()
+            self._load_sketch_json()
+        self._load_props_json()
+
     def _save_sketch_json(self):
         """Persist the editable sketch. Guard against overwriting a saved sketch with an empty one."""
         import json
@@ -7539,6 +7553,7 @@ class MainWindow(QMainWindow):
         self._proj_root = root
         self._proj_label.setText(root)
         self._results.set_project(root)
+        self._reset_scene_editors()            # fresh project -> empty domain sketch, not the last one's
         # seed the file contract so the project is immediately runnable-shaped
         self._write_config(os.path.join(root, "config", "config.txt"))
         self._src_tbl.save_file(os.path.join(root, "input", "src", "src.txt"))
@@ -7569,6 +7584,7 @@ class MainWindow(QMainWindow):
         self._gl.clear_animation()      # new project -> reload animation on next play
         self._proj_label.setText(d)
         self._results.set_project(d)
+        self._reset_scene_editors()     # load THIS project's sketch/props, drop the previous project's
         man = self._read_manifest(self._manifest_path())
 
         def resolve(rel):

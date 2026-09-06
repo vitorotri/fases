@@ -901,6 +901,15 @@ class _Canvas(QWidget):
                     self._shape_xform = None; self.selectionChanged.emit(); self.update(); return
             elif self._shape_sel is not None and not ctrl and e.key() in (Qt.Key.Key_R, Qt.Key.Key_S):
                 self._start_shape_xform('r' if e.key() == Qt.Key.Key_R else 's'); return
+            elif ctrl and e.key() == Qt.Key.Key_D and self._shape_sel is not None \
+                    and self._shape_sel < len(self.shapes):        # duplicate the selected shape (offset)
+                self._snap()
+                off = (self.h * 2) if getattr(self, "h", 0) else 0.5
+                dup = copy.deepcopy(self.shapes[self._shape_sel])
+                for p in dup["pts"]:
+                    p[0] += off; p[1] += off
+                self.shapes.append(dup); self._shape_sel = len(self.shapes) - 1   # select copy -> draggable
+                self.selectionChanged.emit(); self.update(); return
         if self._tool == "edge" and e.key() == Qt.Key.Key_Escape and self._esel:   # clear edge selection
             self._esel = set(); self.selectionChanged.emit(); self.update(); return
         if ctrl and e.key() == Qt.Key.Key_K:                        # close the active shape
