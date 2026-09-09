@@ -795,9 +795,25 @@ K_all = 0; L_all = 0
 # Central hard/soft registry (ALL.mat) lives in the same dir as the materials.
 soft_reg = _read_soft_registry(os.path.dirname(mat_files[0])) if mat_files else {}
 
-# Cache: alpha_key -> (src_fit_path, src_imp_path, K, L, result_tuple)
+# Cache: alpha_key -> (src_fit_path, K, L, result_tuple)
 # Avoids re-fitting materials that share identical octave-band absorptions.
 _alpha_cache = {}
+
+# ONE summary panel per UNIQUE material, not per layer. A BRAS-style scene has
+# hundreds of identical tiles: a panel each built a ~20x20 subplot grid, three
+# times over (~84x64 inch figures), which took minutes of matplotlib time AFTER a
+# single real fit — and read as "every tile was refitted". The fitting itself was
+# already deduplicated by _alpha_cache; only the plot was not.
+_plot_by_key = {}          # alpha_key -> [name, R_tgt, R_hat, rms, n_layers_sharing]
+_n_fitted = 0; _n_copied = 0
+
+
+def _register_plot(key, name, R_tgt, R_hat, rms):
+    e = _plot_by_key.get(key)
+    if e is None:
+        _plot_by_key[key] = [name, R_tgt, R_hat, rms, 1]
+    else:
+        e[4] += 1          # another layer shares these alphas: count it, don't re-plot
 
 for m in mat_files:
     base = os.path.splitext(os.path.basename(m))[0]
@@ -824,7 +840,9 @@ for m in mat_files:
         print(f"[{base}] unchanged — kept existing .fit (skipped refit)")
         results.append((base, R_tgt, R_hat, rms))
         K_all = max(K_all, K); L_all = max(L_all, L)
-        _alpha_cache[_alpha_key(m, soft)] = (coefs_path, K, L, (base, R_tgt, R_hat, rms))
+        _k = _alpha_key(m, soft)
+        _alpha_cache.setdefault(_k, (coefs_path, K, L, (base, R_tgt, R_hat, rms)))
+        _register_plot(_k, base, R_tgt, R_hat, rms)
         continue
 
     key = _alpha_key(m, soft)
@@ -839,11 +857,15 @@ for m in mat_files:
             shutil.copy2(_si, os.path.splitext(coefs_path)[0] + ".imp")
         _cached_name, R_tgt, R_hat, rms = cached_result
         results.append((base, R_tgt, R_hat, rms))
+        _register_plot(key, _cached_name, R_tgt, R_hat, rms)
+        _n_copied += 1
     else:
         name, R_tgt, R_hat, K, L, rms = fit_material(m, coefs_path, soft=soft)
         results.append((name, R_tgt, R_hat, rms))
         K_all = max(K_all, K); L_all = max(L_all, L)
         _alpha_cache[key] = (coefs_path, K, L, (name, R_tgt, R_hat, rms))
+        _register_plot(key, name, R_tgt, R_hat, rms)
+        _n_fitted += 1
 
     K_all = max(K_all, K); L_all = max(L_all, L)
 
@@ -908,8 +930,15 @@ print("=" * 60 + "\n")
 # this is only a non-blocking/multi-material presentation layer.
 # ============================================================
 
+print(f"\n[fminconFIT] {len(results)} layer(s): {_n_fitted} fitted, {_n_copied} copied from an "
+      f"identical material, {len(_plot_by_key)} unique material(s) plotted.\n")
+
 if _args.no_plot:
     sys.exit(0)
+
+# Collapse the panels to the unique materials (see _register_plot).
+results = [(f"{nm}  (+{c - 1} identical)" if c > 1 else nm, tgt, hat, rms)
+           for nm, tgt, hat, rms, c in _plot_by_key.values()]
 
 n = len(results)
 ncols = int(np.ceil(np.sqrt(n)))
