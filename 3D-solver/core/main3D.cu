@@ -1588,9 +1588,9 @@ int main(int argc, char *argv[]){
         				// no fractional delay (amplitude validation)
             			//e_ism[t_0] += (float)gS_0 * gS_0;
             			// no fractional delay
-            			p_hf[flat(t_0, r, Nt)] += gS_0; // --> keeps direct ray's amplitude
+            			//p_hf[flat(t_0, r, Nt)] += gS_0; // --> keeps direct ray's amplitude
             			// fractional delay
-            			//deposit(tau_0, gS_0, r, d_0); // direct ray (coherent)
+            			deposit(tau_0, gS_0, r, d_0); // direct ray (coherent)
         			}
     			}
 				// image sources loop
