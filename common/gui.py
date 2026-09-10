@@ -3315,15 +3315,18 @@ class GLViewer(QOpenGLWidget):
         cln_s = m.addAction("Cleanse phantom layers")
         # Only meaningful when the OBJ was actually shifted on import (centred-origin scenes
         # like the BRAS auditorium); otherwise the two frames are identical.
-        sp_s = m.addAction("Shift scene to positive octant")
-        sp_s.setCheckable(True)
-        sp_s.setChecked(bool(getattr(self, "_shift_enabled", True)))
-        of_s = None
-        if any(getattr(self, "_obj_shift", (0, 0, 0))):
-            sh = self._obj_shift
-            of_s = m.addAction(f"Coordinates in original OBJ frame  (offset {sh[0]:g}, {sh[1]:g}, {sh[2]:g})")
-            of_s.setCheckable(True)
-            of_s.setChecked(bool(getattr(self, "_orig_frame", False)))
+        # Two ALTERNATING options in one exclusive group: the scene is read either in the
+        # shifted (solver) frame or in the file's own frame -- never both, never neither.
+        from PySide6.QtGui import QActionGroup
+        sh = getattr(self, "_obj_shift", (0, 0, 0))
+        on = bool(getattr(self, "_shift_enabled", True))
+        cm = m.addMenu("Scene coordinates")
+        grp = QActionGroup(cm); grp.setExclusive(True)
+        sp_s = cm.addAction("Shifted to positive octant"
+                            + (f"  (by {sh[0]:g}, {sh[1]:g}, {sh[2]:g})" if any(sh) else ""))
+        of_s = cm.addAction("Original OBJ frame")
+        for a, checked in ((sp_s, on), (of_s, not on)):
+            a.setCheckable(True); a.setChecked(checked); grp.addAction(a)
         m.addSeparator()
 
         ax = m.addAction("Hide axes" if self._axes_visible else "Show axes")
@@ -3349,12 +3352,12 @@ class GLViewer(QOpenGLWidget):
             self._surf_sel = set(); self.update(); return
         if chosen is cln_s:
             self.cleanseLayers.emit(); return
-        if chosen is sp_s:
-            self._shift_enabled = not getattr(self, "_shift_enabled", True)
-            self.shiftPolicyToggled.emit(self._shift_enabled); return
-        if of_s is not None and chosen is of_s:
-            self._orig_frame = not getattr(self, "_orig_frame", False)
-            self.origFrameToggled.emit(self._orig_frame); return
+        if chosen in (sp_s, of_s):
+            want = (chosen is sp_s)
+            if want != bool(getattr(self, "_shift_enabled", True)):
+                self._shift_enabled = want
+                self.shiftPolicyToggled.emit(want)
+            return
         if chosen is ax:
             self._axes_visible = not self._axes_visible
             self.update()
@@ -7677,6 +7680,8 @@ class MainWindow(QMainWindow):
             # (solver) coordinates -- this only records which frame to SHOW them in.
             f.write(f"orig_frame = {int(bool(getattr(self._gl, '_orig_frame', False)))}\n")
             f.write(f"shift_positive = {int(bool(getattr(self._gl, '_shift_enabled', True)))}\n")
+            # the user's own OBJ, not the _positive/_merged copies derived from it
+            f.write(f"scene_src = {getattr(self, '_obj_orig_path', '') or ''}\n")
             # Which frame src.txt/rec.txt are stored in: they hold RAW + this offset.
             # Needed so a later OBJ load translates by the DELTA, never the full shift.
             _os_ = getattr(self, "_obj_shift", (0.0, 0.0, 0.0))
@@ -7787,6 +7792,9 @@ class MainWindow(QMainWindow):
         except ValueError:
             self._obj_shift = (0.0, 0.0, 0.0)
         self._gl._shift_enabled = (man.get("shift_positive", "1") == "1")
+        _src = man.get("scene_src", "")
+        if _src and os.path.isfile(_src):
+            self._obj_orig_path = _src        # so the frame can still be switched later
         if scene and os.path.isfile(scene):
             self._load_obj_path(scene)          # repopulates layers + materials
         else:
@@ -7916,9 +7924,13 @@ class MainWindow(QMainWindow):
         try:
             # Never edit the user's original. If the mesh straddles/negatives the
             # axes, write a shifted COPY next to it and load that; else load as-is.
-            # the user's file, before any _positive rewrite -- reloading on a policy
-            # change must start from THIS, not from the shifted copy we may load below
-            if not path.endswith("_positive" + os.path.splitext(path)[1]):
+            # The user's OWN file, before any derived rewrite. Switching coordinate frame
+            # must reload from THIS -- reloading a derived copy re-reads already-shifted
+            # geometry and the frame never changes. Derived names are suffixed on the stem,
+            # and they CHAIN (foo_positive_merged.obj), so test the stem for any of them.
+            _stem = os.path.splitext(os.path.basename(path))[0]
+            if not any(_stem.endswith(sfx) or (sfx + "_") in _stem
+                       for sfx in ("_positive", "_merged", "_grouped")):
                 self._obj_orig_path = path
             base, ext = os.path.splitext(path)
             shifted = base + "_positive" + ext
@@ -7935,11 +7947,10 @@ class MainWindow(QMainWindow):
             # src.txt/rec.txt are canonically in the SHIFTED frame, so they already carry
             # `prev`. Re-apply only the difference, otherwise the points double-shift.
             d = tuple(self._obj_shift[i] - prev[i] for i in range(3))
-            if any(d):
-                moved = self._translate_points(d)
-                if moved:
-                    print(f"[OBJ] scene origin moved by {d}; translated {moved} source/receiver "
-                          f"point(s) to stay put relative to the geometry")
+            moved = self._translate_points(d) if any(d) else 0
+            print(f"[frame] shift {prev} -> {self._obj_shift}  delta={tuple(round(v,4) for v in d)}"
+                  f"  translated={moved} point(s)"
+                  + ("  (delta is zero -> points left alone)" if not any(d) else ""))
             self._apply_orig_frame(getattr(self._gl, "_orig_frame", False))
             self._set_solver_offset_from(path)
             if shift != (0.0, 0.0, 0.0):
@@ -8079,6 +8090,7 @@ class MainWindow(QMainWindow):
                   f"src/rec written to file with offset {tuple(round(v,4) for v in off)}")
 
     def _on_shift_policy(self, on):
+        self._gl._orig_frame = False          # display offset is meaningless without a shift
         """RMB toggle: rewrite the OBJ to the positive octant, or load it as-is.
         Either way src.txt/rec.txt end up in the frame main3D expects, so results
         do not change -- only which coordinates you see and type."""
