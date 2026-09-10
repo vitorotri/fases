@@ -270,9 +270,18 @@ def hornikx_cotte_constrained_fit(
     K = int(len(zeta0))
     L = int(len(alpha0))
 
+    # SSP-RK3 stability. 2.5127 (real axis) and 1.732 (imaginary axis) are each the correct
+    # 1-D limit, but a COMPLEX pair uses both at once and the region is not a rectangle: the
+    # corner (-2.5127 + 1.732i) amplifies 2.35x PER STEP. Scaling the box by 0.76 makes the
+    # whole rectangle feasible (corner |R| = 0.985; the box max is 1.0 only AT THE ORIGIN,
+    # where an undamped pole is legitimately marginal), so the optimizer searches a set where
+    # every point is stable instead of being projected back afterwards -- which fits better,
+    # because a projected optimum is not the constrained optimum.
+    # Real poles keep the full real-axis reach; only the complex pair needs the shrink.
+    _RK3_BOX = 0.76
     zeta_max  = 2.5127 / dt
-    alpha_max = 2.5127 / dt
-    beta_max  = min(1.732 / dt, omega_cutoff)
+    alpha_max = 2.5127 * _RK3_BOX / dt
+    beta_max  = min(1.732 * _RK3_BOX / dt, omega_cutoff)
 
     def inv_sigmoid(y):
         y = np.clip(np.asarray(y, float), 1e-12, 1-1e-12)
@@ -320,6 +329,53 @@ def hornikx_cotte_constrained_fit(
         x_best, K, L, zeta_max, alpha_max, beta_max)
     return Rinf, A, B, C, zeta, alpha, beta
 
+
+
+def _rk3_amp(z):
+    """|amplification| of SSP-RK3 (Shu-Osher) for the scalar test problem y' = z*y.
+    The ADE states are advanced with exactly this scheme in functions3D.cuh
+    (ADE_solver: phi += dt*(w_in - zeta*phi), likewise psi_1/psi_2)."""
+    return abs(1.0 + z + z * z / 2.0 + z ** 3 / 6.0)
+
+
+def stabilize_poles(zeta, alpha, beta, dt, margin=0.999):
+    """Pull every ADE pole inside the SSP-RK3 stability region for THIS dt.
+
+    hornikx_cotte_constrained_fit bounds the poles with a BOX -- zeta,alpha <= 2.5127/dt
+    and beta <= 1.732/dt. Each edge is the correct 1-D limit, but a complex pair uses both
+    at once and the RK3 region is not a rectangle: at the corner (-2.5127 + 1.732i) the
+    amplification is 2.35 PER STEP, so the boundary blows up. Coarse grids make it likelier,
+    not rarer -- a bigger dt shrinks the box, so the fit presses the poles against it.
+
+    Real poles are scaled to the real-axis limit; complex pairs are scaled by a COMMON
+    factor, which preserves the pole's argument (its damping ratio) and only lowers the
+    resonance frequency. Returns (zeta, alpha, beta, n_fixed).
+    """
+    zeta = np.array(zeta, float, copy=True)
+    alpha = np.array(alpha, float, copy=True)
+    beta = np.array(beta, float, copy=True)
+    fixed = 0
+
+    for k in range(len(zeta)):
+        if _rk3_amp(complex(-zeta[k] * dt, 0.0)) > margin and zeta[k] > 0:
+            zeta[k] = 2.5127 / dt * 0.999
+            fixed += 1
+
+    for l in range(len(alpha)):
+        z = complex(-alpha[l] * dt, beta[l] * dt)
+        if _rk3_amp(z) <= margin:
+            continue
+        lo, hi = 0.0, 1.0                      # largest r in (0,1] with |R(r*z)| <= margin
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            if _rk3_amp(mid * z) <= margin:
+                lo = mid
+            else:
+                hi = mid
+        alpha[l] *= lo
+        beta[l] *= lo
+        fixed += 1
+    return zeta, alpha, beta, fixed
 
 
 def R_from_alpha(alpha):
@@ -736,6 +792,13 @@ def fit_material(read_file, coefs_path, soft=False):
     # ------------------------------------------------------------
     # SAVE IN C++ FORMAT
     # ------------------------------------------------------------
+    # Guarantee the poles are inside the RK3 stability region for THIS dt, whatever the
+    # optimizer returned. Done here so EVERY .fit on disk is stable by construction.
+    zeta, alpha, beta, _nfix = stabilize_poles(zeta, alpha, beta, dt)
+    if _nfix:
+        print(f"[{name}] {_nfix} pole(s) were outside the SSP-RK3 stability region for "
+              f"dt={dt:.4g} s -- pulled inside (the boundary would otherwise blow up)")
+
     K = len(zeta)
     L = len(alpha)
 
