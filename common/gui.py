@@ -7816,6 +7816,19 @@ class MainWindow(QMainWindow):
         self._gl._orig_frame = (man.get("orig_frame", "0") == "1")
         self._apply_orig_frame(self._gl._orig_frame)
 
+        # src/rec were read ABOVE, before _load_obj_path knew the mesh's bmin -- so
+        # load_file subtracted a _solver_off of zero. Re-read them now that the offset is
+        # known, or save_file would ADD it to values that never had it subtracted and every
+        # point would drift by bmin ("[!] Receiver outside domain").
+        if any(getattr(self._src_tbl, "_solver_off", (0, 0, 0))):
+            if os.path.isfile(srcp):
+                self._src_tbl.load_file(srcp)
+            if os.path.isfile(recp):
+                self._rec_tbl.load_file(recp)
+            self._refresh_gl_points()
+            print(f"[frame] re-read src/rec with solver offset "
+                  f"{tuple(round(v, 4) for v in self._src_tbl._solver_off)}")
+
         # Persist the manifest now so opening a project always records current
         # state (scene path included) even if no .mat/config was touched.
         self._write_manifest()
@@ -7969,20 +7982,35 @@ class MainWindow(QMainWindow):
                 path = shifted
             verts, groups, split_mtl = parse_obj(path, return_split=True)
             raw_n = len(groups)
-            # material names are meaningful -> never fuse two different ones
-            groups = merge_coplanar_groups(verts, groups, respect_names=split_mtl)
+            # A file WE wrote is already canonical: its groups are exactly the layers the GUI
+            # shows. Re-merging it is wrong twice over -- write_obj emits no `usemtl`, so the
+            # material split does not re-detect, respect_names goes off, and the coplanar merge
+            # fuses different materials back together (8 layers -> 3); the group count then
+            # differs from raw_n so ANOTHER _merged file is written, every single open.
+            already_merged = False
+            try:
+                with open(path) as _f:
+                    already_merged = _f.readline().startswith("# merged scene")
+            except OSError:
+                pass
+            if not already_merged:
+                # material names are meaningful -> never fuse two different ones
+                groups = merge_coplanar_groups(verts, groups, respect_names=split_mtl)
             n_faces_before = sum(len(g["tris"]) for g in groups)
-            groups = drop_degenerate_faces(verts, groups)   # purge zero-area slivers + the phantom layers they made
+            if not already_merged:
+                groups = drop_degenerate_faces(verts, groups)   # purge zero-area slivers + the phantom layers they made
             # `split_mtl` forces the rewrite: raw_n is counted AFTER parse_obj, so a
             # material split is already inside it and the two tests below would both pass
             # -- leaving main3D to read the ORIGINAL file, see one group where the GUI shows
             # several, and die looking up a .fit that isn't in its layer list.
-            if (split_mtl or len(groups) != raw_n
+            if not already_merged and (split_mtl or len(groups) != raw_n
                     or sum(len(g["tris"]) for g in groups) != n_faces_before):
                 # the file's groups no longer match what the GUI shows/materials. Persist the cleaned
                 # set to a derived copy (never the user's original) so the solver reads the same layers
                 # — else main3D looks up a .fit for a merged-away group and crashes.
                 base0, ext0 = os.path.splitext(path)
+                if base0.endswith("_merged"):        # belt-and-braces: never chain the suffix
+                    base0 = base0[: -len("_merged")]
                 merged_path = base0 + "_merged" + ext0
                 write_obj(merged_path, verts, groups)
                 path = merged_path
