@@ -310,9 +310,20 @@ def triangulate_face(face, vertices):
     return tris
 
 
-def parse_obj(path: str):
+def parse_obj(path: str, return_split: bool = False):
     """
     Parse vertices and grouped faces from an OBJ file.
+
+    Material split: exporters (SketchUp, Blender) often emit ONE object carrying
+    several `usemtl` blocks -- the whole room arrives as a single layer, and the
+    per-surface materials are invisible. When a file has more distinct `usemtl`
+    names than `o`/`g` names we therefore treat each `usemtl` as a group boundary
+    and name the group after the material. Files that already group per surface
+    are untouched (the count test fails), so this cannot rename existing layers.
+    Repeats of a material merge back into one group, as the solver does.
+    `return_split` -> (verts, groups, split_used); the caller MUST force the
+    derived _merged OBJ to disk when it is True, because main3D reads only `g`/`o`
+    and would otherwise see one group where the GUI shows several.
 
     Group handling: an object may be introduced by an ``o`` line, a ``g`` line,
     or BOTH (some exporters emit ``o chair1`` immediately followed by
@@ -323,6 +334,22 @@ def parse_obj(path: str):
     tokens (e.g. ``g Mesh1 ceiling Model``) resolve to the second token, which
     is the human-readable layer name used elsewhere in the GUI.
     """
+    # pre-scan: does this file group by material rather than by object?
+    n_mtl, n_grp = set(), set()
+    try:
+        with open(path) as _f:
+            for _l in _f:
+                _t = _l.split()
+                if not _t:
+                    continue
+                if _t[0] == "usemtl" and len(_t) > 1:
+                    n_mtl.add(_t[1])
+                elif _t[0] in ("o", "g") and len(_t) > 1:
+                    n_grp.add(_t[1])
+    except OSError:
+        pass
+    split_mtl = len(n_mtl) > len(n_grp)
+
     vertices, groups = [], []
     cur_name, cur_tris = None, []
 
@@ -357,6 +384,11 @@ def parse_obj(path: str):
                     flush()
                     cur_tris = []
                     cur_name = new_name
+            elif tok[0] == "usemtl" and split_mtl and len(tok) > 1:
+                if tok[1] != cur_name:
+                    flush()
+                    cur_tris = []
+                    cur_name = tok[1]
             elif tok[0] == "f":
                 face = []
                 for t in tok[1:]:
@@ -366,9 +398,18 @@ def parse_obj(path: str):
                 if len(face) < 3: continue
                 cur_tris.extend(triangulate_face(face, vertices))
     flush()
+    if split_mtl:                      # one material = one layer, however scattered
+        merged = {}          # dicts keep insertion order (3.7+)
+        for g in groups:
+            if g["name"] in merged:
+                merged[g["name"]] = {"name": g["name"],
+                                     "tris": np.vstack([merged[g["name"]]["tris"], g["tris"]])}
+            else:
+                merged[g["name"]] = g
+        groups = list(merged.values())
     verts = (np.array(vertices, np.float32) if vertices
              else np.zeros((0,3), np.float32))
-    return verts, groups
+    return (verts, groups, split_mtl) if return_split else (verts, groups)
 
 
 # GENERIC (non-axis-aligned) ray directions for the point-in-mesh test. Room walls are axis-aligned, so
@@ -719,6 +760,8 @@ class GLViewer(QOpenGLWidget):
     explodeSurface   = Signal(int)                         # RMB "Explode" -> split ONE picked group (by index)
     mergeSiblings    = Signal(str)                          # RMB -> collapse '<base>_N' exploded pieces back to '<base>'
     cleanseLayers    = Signal()                             # RMB -> drop zero/sliver-area layers + dump layer areas
+    origFrameToggled = Signal(bool)                         # RMB -> show src/rec coords in the original OBJ frame
+    shiftPolicyToggled = Signal(bool)                       # RMB -> rewrite the OBJ to the positive octant, or load as-is
     groupXfDone      = Signal(list)                         # point group move/rotate committed -> [(kind, idx), …] to sync tables
     modeLabelChanged = Signal(str)                          # current interaction mode -> status-bar badge
     pointsDeleted    = Signal(list)                         # edit-mode multi-delete -> [(kind, idx), …] to drop rows
@@ -3270,6 +3313,17 @@ class GLViewer(QOpenGLWidget):
             grp_s = m.addAction(f"Group {len(self._surf_sel)} selected → layer…")
             clr_s = m.addAction("Clear surface selection")
         cln_s = m.addAction("Cleanse phantom layers")
+        # Only meaningful when the OBJ was actually shifted on import (centred-origin scenes
+        # like the BRAS auditorium); otherwise the two frames are identical.
+        sp_s = m.addAction("Shift scene to positive octant")
+        sp_s.setCheckable(True)
+        sp_s.setChecked(bool(getattr(self, "_shift_enabled", True)))
+        of_s = None
+        if any(getattr(self, "_obj_shift", (0, 0, 0))):
+            sh = self._obj_shift
+            of_s = m.addAction(f"Coordinates in original OBJ frame  (offset {sh[0]:g}, {sh[1]:g}, {sh[2]:g})")
+            of_s.setCheckable(True)
+            of_s.setChecked(bool(getattr(self, "_orig_frame", False)))
         m.addSeparator()
 
         ax = m.addAction("Hide axes" if self._axes_visible else "Show axes")
@@ -3295,6 +3349,12 @@ class GLViewer(QOpenGLWidget):
             self._surf_sel = set(); self.update(); return
         if chosen is cln_s:
             self.cleanseLayers.emit(); return
+        if chosen is sp_s:
+            self._shift_enabled = not getattr(self, "_shift_enabled", True)
+            self.shiftPolicyToggled.emit(self._shift_enabled); return
+        if of_s is not None and chosen is of_s:
+            self._orig_frame = not getattr(self, "_orig_frame", False)
+            self.origFrameToggled.emit(self._orig_frame); return
         if chosen is ax:
             self._axes_visible = not self._axes_visible
             self.update()
@@ -3601,6 +3661,23 @@ class GLViewer(QOpenGLWidget):
 # ─────────────────────────────────────────────────────────────
 #  Material editor
 # ─────────────────────────────────────────────────────────────
+class _RunStatusBar(QStatusBar):
+    """Status bar where the solver's time-left owns the line while a run is active.
+
+    ~25 call sites push transient text (placement hints, 'Placed source at…', mode
+    changes). Any of them used to wipe the ETA until the next progress line arrived.
+    While `hold` is set only priority messages get through, so 'time left' stays put.
+    """
+    def __init__(self):
+        super().__init__()
+        self.hold = False
+
+    def showMessage(self, text, timeout=0, priority=False):
+        if self.hold and not priority:
+            return                      # a run is active: don't clobber the ETA
+        super().showMessage(text, timeout)
+
+
 class _FitAllThread(QThread):
     """Runs the fitter on all materials in the background. The script pops its
     summary figure; this thread streams the process output line-by-line (so the
@@ -5016,11 +5093,42 @@ class PointTable(QWidget):
             btn_row.addWidget(b)
         lay.addLayout(btn_row)
 
+    # Coordinates are shown/typed in the ORIGINAL OBJ frame; the solver needs the
+    # shifted (positive-octant) frame. world = displayed + _off, where _off is the
+    # shift gui.py applied on import. Zero by default -> identical to the old behaviour.
+    # This exists because main3D converts src/rec with "(int)(val/h)+3" and applies NO
+    # -bmin term, so the table MUST hand it shifted coordinates even when the user is
+    # reading BRAS's centred-origin numbers.
+    _off = (0.0, 0.0, 0.0)
+
+    # Added when WRITING src.txt/rec.txt, subtracted when reading them back.
+    # main3D converts with "(int)(val/h)+3", i.e. it assumes the mesh's bmin already
+    # sits at zero (the +3 is only the ghost pad) -- but parse_obj_3d shifts geometry
+    # by -bmin on EVERY axis, negative or not. So the file must carry (world - bmin).
+    # Zero whenever the OBJ was rewritten to start at the origin.
+    _solver_off = (0.0, 0.0, 0.0)
+
+    def set_solver_offset(self, off):
+        """Offset applied on save/load only -- the table and the 3D view keep the
+        loaded OBJ's own coordinates."""
+        self._solver_off = tuple(float(v) for v in off)
+
+    def set_origin_offset(self, off):
+        """Re-display every row in a new frame. `off` is world-minus-displayed."""
+        off = tuple(float(v) for v in off)
+        if off == tuple(self._off):
+            return
+        pts = self.get_points()          # -> world, using the OLD offset
+        self._off = off
+        self.set_points(pts, emit_changed=False)   # -> display, using the NEW offset
+        self.changed.emit()
+
     def _add(self, x=1.0, y=1.0, z=1.0, amp=1.0, freq=100.0, name=None):
         self._tbl.blockSignals(True)
         r = self._tbl.rowCount(); self._tbl.insertRow(r)
         # column 0: editable name, default to the 1-based row number
         self._tbl.setItem(r, 0, QTableWidgetItem(name if name else str(r + 1)))
+        x, y, z = (x - self._off[0], y - self._off[1], z - self._off[2])   # world -> displayed
         vals = [x, y, z] + ([amp] if self._has_amp else []) + ([freq] if self._has_freq else [])
         for c, v in enumerate(vals):
             self._tbl.setItem(r, self._coff + c, QTableWidgetItem(f"{v:.4g}"))
@@ -5079,7 +5187,7 @@ class PointTable(QWidget):
         if not (0 <= idx < self._tbl.rowCount()):
             return
         self._tbl.blockSignals(True)
-        for c, v in enumerate((x, y, z)):
+        for c, v in enumerate((x - self._off[0], y - self._off[1], z - self._off[2])):
             self._tbl.setItem(idx, self._coff + c, QTableWidgetItem(f"{v:.4g}"))
         self._tbl.blockSignals(False)
         self.changed.emit()
@@ -5179,6 +5287,8 @@ class PointTable(QWidget):
                     item = self._tbl.item(r, c)
                     if item is None: raise ValueError("empty cell")
                     row.append(float(item.text()))
+                for _i in range(min(3, len(row))):       # displayed -> world
+                    row[_i] += self._off[_i]
                 pts.append(tuple(row))
             except (TypeError, ValueError): pass
         return pts
@@ -5208,6 +5318,8 @@ class PointTable(QWidget):
         self._tbl.setRowCount(0)
         for pt in pts:
             vals = list(pt[:ncoord])
+            for _i in range(min(3, len(vals))):          # world -> displayed
+                vals[_i] = float(vals[_i]) - self._off[_i]
             if len(vals) < ncoord:
                 vals += full_def[len(vals):ncoord]
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
@@ -5230,6 +5342,9 @@ class PointTable(QWidget):
                 r = self._tbl.rowCount(); self._tbl.insertRow(r)
                 self._tbl.setItem(r, 0, QTableWidgetItem(str(r + 1)))  # default name
                 for c, v in enumerate(vals[:ncoord]):
+                    if c < 3:                            # file -> world -> displayed
+                        try: v = f"{float(v) - self._solver_off[c] - self._off[c]:.6g}"
+                        except ValueError: pass
                     self._tbl.setItem(r, self._coff + c, QTableWidgetItem(v))
         npath = path + ".names"                         # restore names from the sidecar, if present
         if os.path.isfile(npath):
@@ -5254,6 +5369,8 @@ class PointTable(QWidget):
             hdr = "x y z" + (" p0" if self._has_amp else "") + (" f0" if self._has_freq else "")
             f.write("# " + hdr + "\n")
             for pt in self.get_points():
+                pt = tuple(pt[i] + self._solver_off[i] if i < 3 else pt[i]
+                           for i in range(len(pt)))       # world -> solver frame
                 f.write("  ".join(f"{v:.6g}" for v in pt) + "\n")
         # names go in a sidecar (one per line, row-matched) so the numeric file main3D parses
         # stays untouched. spaces in names are fine — one name per line.
@@ -5289,7 +5406,9 @@ class SolverThread(QThread):
         try:
             self._proc = subprocess.Popen(cmd, cwd=self._cwd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", bufsize=1)
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                # own process group, so stop() can signal the solver AND anything it spawns
+                start_new_session=(os.name != "nt"))
             for line in self._proc.stdout:
                 line = line.rstrip()
                 self.output.emit(line)
@@ -5302,8 +5421,39 @@ class SolverThread(QThread):
             self.output.emit(f"[ERROR] {ex}"); self.done.emit(-1)
 
     def stop(self):
-        if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
+        """SIGTERM the process group, then SIGKILL whatever survives.
+
+        A CUDA binary inside a kernel launch routinely ignores SIGTERM. The old code
+        sent one and returned, so quitting/force-quitting the GUI left the solver
+        running and still holding its GPU context -- the next run then dies with
+        CUDA error 999 and the orphan sits unkillable in D state until a reboot.
+        Killing the whole group also catches anything the solver spawned.
+        """
+        p = self._proc
+        if not p or p.poll() is not None:
+            return
+        import signal
+
+        def _sig(s):
+            try:
+                os.killpg(os.getpgid(p.pid), s)        # whole group
+            except (ProcessLookupError, PermissionError, AttributeError, OSError):
+                try: p.send_signal(s)                  # Windows / no group: just the child
+                except Exception: pass
+
+        _sig(signal.SIGTERM)
+        try:
+            p.wait(timeout=3)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        _sig(getattr(signal, "SIGKILL", signal.SIGTERM))
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            # SIGKILL can't touch a task blocked in the NVIDIA driver (D state).
+            self.output.emit("[!] solver ignored SIGKILL -- stuck in the GPU driver (D state). "
+                             "The GPU context will not free until reboot.")
 
 
 class ResultsView(QWidget):
@@ -5680,6 +5830,8 @@ class MainWindow(QMainWindow):
         self._gl.explodeSurface.connect(self._on_explode_surface)
         self._gl.mergeSiblings.connect(self._on_merge_siblings)
         self._gl.cleanseLayers.connect(self._on_cleanse_layers)
+        self._gl.origFrameToggled.connect(self._apply_orig_frame)
+        self._gl.shiftPolicyToggled.connect(self._on_shift_policy)
         self._gl.pointPlaced.connect(self._on_point_placed)
         self._gl.pointMoved.connect(self._on_point_moved)
         self._gl.pointDragStarted.connect(self._remember_points_for_undo)
@@ -5831,7 +5983,7 @@ class MainWindow(QMainWindow):
         self._tabs.show(); self._tabs.raise_()
 
         # status bar
-        self._sb = QStatusBar()
+        self._sb = _RunStatusBar()
         self.setStatusBar(self._sb)
         self._sb.showMessage("Ready.  Open a project folder to begin.")
         self._mode_lbl = QLabel("VIEW   ·   ? = shortcuts")     # persistent mode badge, bottom-right
@@ -7521,6 +7673,14 @@ class MainWindow(QMainWindow):
             f.write(f"matdir    = {os.path.join(root, 'input', 'mat')}\n")
             f.write(f"layers    = {layers}\n")
             f.write(f"show_bbox = {int(self._bbox_chk.isChecked())}\n")
+            # Display frame for src/rec coordinates. The FILES always hold shifted
+            # (solver) coordinates -- this only records which frame to SHOW them in.
+            f.write(f"orig_frame = {int(bool(getattr(self._gl, '_orig_frame', False)))}\n")
+            f.write(f"shift_positive = {int(bool(getattr(self._gl, '_shift_enabled', True)))}\n")
+            # Which frame src.txt/rec.txt are stored in: they hold RAW + this offset.
+            # Needed so a later OBJ load translates by the DELTA, never the full shift.
+            _os_ = getattr(self, "_obj_shift", (0.0, 0.0, 0.0))
+            f.write(f"obj_shift = {_os_[0]:.10g} {_os_[1]:.10g} {_os_[2]:.10g}\n")
             if dmax is not None:
                 f.write("# domain extent (Lx Ly Lz) is derived from the scene AABB; informational only:\n")
                 f.write(f"# domain  = {float(dmax[0]):.6g} {float(dmax[1]):.6g} {float(dmax[2]):.6g}\n")
@@ -7618,12 +7778,25 @@ class MainWindow(QMainWindow):
         if not (scene and os.path.isfile(scene)):
             cand  = sorted(glob.glob(os.path.join(d, "input", "scene", "*.obj")))
             scene = cand[0] if cand else ""   # first by name if several present
+        # The frame src.txt/rec.txt were saved in. Restore it BEFORE the OBJ loads so the
+        # delta-translate compares against the right baseline; without it the load would
+        # see prev=(0,0,0) and shift already-shifted points a second time.
+        try:
+            _sh = [float(v) for v in man.get("obj_shift", "0 0 0").split()]
+            self._obj_shift = tuple(_sh[:3]) if len(_sh) >= 3 else (0.0, 0.0, 0.0)
+        except ValueError:
+            self._obj_shift = (0.0, 0.0, 0.0)
+        self._gl._shift_enabled = (man.get("shift_positive", "1") == "1")
         if scene and os.path.isfile(scene):
             self._load_obj_path(scene)          # repopulates layers + materials
         else:
             self._mat_panel.set_project(d)      # wire materials for a later OBJ
 
         self._bbox_chk.setChecked(man.get("show_bbox", "0") == "1")   # restore bbox toggle
+        # Restore the coordinate display frame. AFTER _load_obj_path, which is what
+        # computes _obj_shift; with no shift the two frames coincide and this is a no-op.
+        self._gl._orig_frame = (man.get("orig_frame", "0") == "1")
+        self._apply_orig_frame(self._gl._orig_frame)
 
         # Persist the manifest now so opening a project always records current
         # state (scene path included) even if no .mat/config was touched.
@@ -7743,19 +7916,47 @@ class MainWindow(QMainWindow):
         try:
             # Never edit the user's original. If the mesh straddles/negatives the
             # axes, write a shifted COPY next to it and load that; else load as-is.
+            # the user's file, before any _positive rewrite -- reloading on a policy
+            # change must start from THIS, not from the shifted copy we may load below
+            if not path.endswith("_positive" + os.path.splitext(path)[1]):
+                self._obj_orig_path = path
             base, ext = os.path.splitext(path)
             shifted = base + "_positive" + ext
-            shift = shift_to_positive(path, shifted)   # writes `shifted` only if a shift is needed
+            if getattr(self._gl, "_shift_enabled", True):
+                shift = shift_to_positive(path, shifted)   # writes `shifted` only if a shift is needed
+            else:
+                shift = (0.0, 0.0, 0.0)                    # load as-is; solver offset covers it
+            # Remember it: the scene menu can re-display src/rec coordinates in the
+            # ORIGINAL frame (BRAS publishes centred-origin positions), while the tables
+            # keep handing the solver shifted ones.
+            prev = tuple(getattr(self, "_obj_shift", (0.0, 0.0, 0.0)))
+            self._obj_shift = tuple(float(v) for v in shift)
+            self._gl._obj_shift = self._obj_shift
+            # src.txt/rec.txt are canonically in the SHIFTED frame, so they already carry
+            # `prev`. Re-apply only the difference, otherwise the points double-shift.
+            d = tuple(self._obj_shift[i] - prev[i] for i in range(3))
+            if any(d):
+                moved = self._translate_points(d)
+                if moved:
+                    print(f"[OBJ] scene origin moved by {d}; translated {moved} source/receiver "
+                          f"point(s) to stay put relative to the geometry")
+            self._apply_orig_frame(getattr(self._gl, "_orig_frame", False))
+            self._set_solver_offset_from(path)
             if shift != (0.0, 0.0, 0.0):
                 print(f"[OBJ] off the positive octant; loading shifted copy "
                       f"(by {shift}): {os.path.basename(shifted)}")
                 path = shifted
-            verts, groups = parse_obj(path)
+            verts, groups, split_mtl = parse_obj(path, return_split=True)
             raw_n = len(groups)
             groups = merge_coplanar_groups(verts, groups)   # fuse per-triangle splits of a flat surface
             n_faces_before = sum(len(g["tris"]) for g in groups)
             groups = drop_degenerate_faces(verts, groups)   # purge zero-area slivers + the phantom layers they made
-            if len(groups) != raw_n or sum(len(g["tris"]) for g in groups) != n_faces_before:
+            # `split_mtl` forces the rewrite: raw_n is counted AFTER parse_obj, so a
+            # material split is already inside it and the two tests below would both pass
+            # -- leaving main3D to read the ORIGINAL file, see one group where the GUI shows
+            # several, and die looking up a .fit that isn't in its layer list.
+            if (split_mtl or len(groups) != raw_n
+                    or sum(len(g["tris"]) for g in groups) != n_faces_before):
                 # the file's groups no longer match what the GUI shows/materials. Persist the cleaned
                 # set to a derived copy (never the user's original) so the solver reads the same layers
                 # — else main3D looks up a .fit for a merged-away group and crashes.
@@ -7853,6 +8054,62 @@ class MainWindow(QMainWindow):
         exploded = [{"name": f"surface_{start + i}", "tris": tr} for i, tr in enumerate(comps)]
         self._rewrite_scene(exploded + others,
                             f"Exploded '{g['name']}' into {len(comps)} surfaces (surface_{start}…).")
+
+    def _set_solver_offset_from(self, path):
+        """src.txt must hold (world - bmin): parse_obj_3d shifts the mesh by -bmin on
+        EVERY axis while main3D reads sources as (int)(val/h)+3. Zero once the OBJ has
+        been rewritten to start at the origin; non-zero when it is loaded as-is."""
+        mn = [float("inf")] * 3
+        try:
+            with open(path) as f:
+                for ln in f:
+                    t = ln.split()
+                    if t and t[0] == "v" and len(t) >= 4:
+                        for i in range(3):
+                            mn[i] = min(mn[i], float(t[i + 1]))
+        except (OSError, ValueError):
+            return
+        if any(m == float("inf") for m in mn):
+            return
+        off = tuple(-m for m in mn)
+        for t in (self._src_tbl, self._rec_tbl):
+            t.set_solver_offset(off)
+        if any(abs(v) > 1e-9 for v in off):
+            print(f"[OBJ] loaded as-is (min {tuple(round(m,4) for m in mn)}); "
+                  f"src/rec written to file with offset {tuple(round(v,4) for v in off)}")
+
+    def _on_shift_policy(self, on):
+        """RMB toggle: rewrite the OBJ to the positive octant, or load it as-is.
+        Either way src.txt/rec.txt end up in the frame main3D expects, so results
+        do not change -- only which coordinates you see and type."""
+        self._sb.showMessage("Scene shifted to the positive octant" if on
+                             else "Scene loaded as-is (original coordinates)")
+        src = getattr(self, "_obj_orig_path", None) or self._obj_path
+        if src and os.path.isfile(src):
+            self._load_obj_path(src)
+
+    def _translate_points(self, d):
+        """Move every source/receiver by `d` (world frame). Uses update_point per row so
+        names/amplitude/frequency survive -- set_points would reset the name column."""
+        moved = 0
+        for t in (self._src_tbl, self._rec_tbl):
+            pts = t.get_points()                      # world (shifted) frame
+            for i, pt in enumerate(pts):
+                t.update_point(i, pt[0] + d[0], pt[1] + d[1], pt[2] + d[2])
+            moved += len(pts)
+        return moved
+
+    def _apply_orig_frame(self, on):
+        """Show src/rec coordinates in the original OBJ frame (BRAS publishes centred-origin
+        positions) while the tables keep feeding the solver shifted ones. Purely a display
+        change: main3D converts src.txt with "(int)(val/h)+3" and applies no -bmin, so the
+        world frame the tables emit must stay the shifted one."""
+        off = tuple(self._obj_shift) if on else (0.0, 0.0, 0.0)
+        for t in (self._src_tbl, self._rec_tbl):
+            t.set_origin_offset(off)
+        self._sb.showMessage(
+            f"Coordinates now in the ORIGINAL OBJ frame (offset {off[0]:g}, {off[1]:g}, {off[2]:g})"
+            if on else "Coordinates now in the shifted (solver) frame")
 
     def _on_cleanse_layers(self):
         """RMB 'Cleanse phantom layers' -> drop zero/sliver-area groups and rewrite. Also prints every
@@ -8384,6 +8641,10 @@ class MainWindow(QMainWindow):
     def _launch_solver(self, cmd):
         import time
         self._t_start = time.time()                    # for the live ETA (see _on_solver_progress)
+        # time-left takes over the status bar for the whole run (released in _on_solver_done)
+        self._sb.hold = False
+        self._sb.showMessage("Simulating… estimating time left…", priority=True)
+        self._sb.hold = True
         self._log.append(f"$ cd {self._proj_root}\n$ " + " ".join(cmd))
         self._log.append("-"*60)
         self._set_running(True)
@@ -8471,9 +8732,11 @@ class MainWindow(QMainWindow):
         if t0 and pct > 0:                             # live ETA: extrapolate from elapsed / percent
             import time
             remaining = (time.time() - t0) * (100 - pct) / pct
-            self._sb.showMessage(f"Simulating… {pct}%  ·  ~{self._fmt_eta(remaining)} left")
+            self._sb.showMessage(f"Simulating… {pct}%  ·  ~{self._fmt_eta(remaining)} left",
+                                 priority=True)
 
     def _stop_solver(self):
+        self._sb.hold = False       # user aborted: release the ETA hold
         if self._solver_thread and self._solver_thread.isRunning():
             self._solver_thread.stop()
             self._log.append("\n[!] Stopped by user.")
@@ -8728,6 +8991,7 @@ class MainWindow(QMainWindow):
             self._ray_dock.hide()
 
     def _on_solver_done(self, rc):
+        self._sb.hold = False       # run over: the status bar is everyone's again
         # Auralization: if more sources queued and this one succeeded, run the next.
         if rc == 0 and self._aural_queue:
             self._run_source(self._aural_queue.pop(0))
@@ -8880,6 +9144,18 @@ class PropsWindow(QWidget):
 
 # ─────────────────────────────────────────────────────────────
 def main():
+    # Crash/freeze diagnostics. A segfault inside the Qt/GL stack normally kills the
+    # process with no Python traceback at all; faulthandler prints the C-level and
+    # Python stacks to stderr instead. The SIGUSR1 hook covers the FREEZE case, where
+    # there is no crash to catch: `kill -USR1 <pid>` dumps where every thread is stuck
+    # without attaching a debugger or disturbing the process.
+    import faulthandler, signal
+    faulthandler.enable()
+    if hasattr(signal, "SIGUSR1"):        # POSIX only
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+        print(f"[gui] pid {os.getpid()} — 'kill -USR1 {os.getpid()}' dumps all thread stacks",
+              flush=True)
+
     fmt = QSurfaceFormat()
     fmt.setDepthBufferSize(24); fmt.setSamples(4)
     QSurfaceFormat.setDefaultFormat(fmt)
