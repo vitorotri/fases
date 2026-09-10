@@ -532,17 +532,25 @@ def feature_edges(verts, tris, angle_thresh_deg=5.0, weld_tol=1e-5):
     return np.array(out, np.int32) if out else np.zeros((0, 2), np.int32)
 
 
-def merge_coplanar_groups(verts, groups, angle_thresh_deg=5.0, weld_tol=1e-5):
+def merge_coplanar_groups(verts, groups, angle_thresh_deg=5.0, weld_tol=1e-5,
+                          respect_names=False):
     """Union non-bbox groups joined by a HIDDEN (non-crease) shared edge -> a surface split across
     per-triangle groups becomes ONE selectable layer. Uses the SAME angle as the wireframe crease test
     (feature_edges), so the invariant holds: if the diagonal line is hidden, the layer is merged. Two
     surfaces meeting at a real crease (> angle) stay separate. Returns a new [{name, tris}] list;
-    bbox groups pass through unchanged."""
+    bbox groups pass through unchanged.
+
+    respect_names: never fuse two groups with DIFFERENT names. Set when the grouping carries
+    meaning -- e.g. groups split from `usemtl`, where each name is a real material. Without it
+    a floor of linoleum meeting parquet at a hidden coplanar edge silently collapses into one
+    layer under whichever name came first, and you lose the material you need to assign
+    absorption to. Auto-generated groupings (obj1..objN) still want the blanket merge."""
     from collections import defaultdict
     q = np.round(verts / weld_tol).astype(np.int64)
     _, inv = np.unique(q, axis=0, return_inverse=True)
     cos_thr = math.cos(math.radians(angle_thresh_deg))
     n = len(groups)
+    gname = [g["name"] for g in groups]
     gi = [i for i, g in enumerate(groups) if not _is_bbox(g["name"]) and len(g["tris"])]
     parent = list(range(n))
 
@@ -563,7 +571,9 @@ def merge_coplanar_groups(verts, groups, angle_thresh_deg=5.0, weld_tol=1e-5):
         for tl in edge_tris.values():
             for k in range(1, len(tl)):                  # any hidden (non-crease) edge fuses the groups
                 t0, t1 = tl[0], tl[k]
-                if tri_grp[t0] != tri_grp[t1] and abs(float(fn[t0] @ fn[t1])) >= cos_thr:
+                if tri_grp[t0] != tri_grp[t1] and abs(float(fn[t0] @ fn[t1])) >= cos_thr \
+                        and not (respect_names
+                                 and gname[int(tri_grp[t0])] != gname[int(tri_grp[t1])]):
                     parent[find(int(tri_grp[t0]))] = find(int(tri_grp[t1]))
     order, merged = [], {}
     for i, g in enumerate(groups):
@@ -7959,7 +7969,8 @@ class MainWindow(QMainWindow):
                 path = shifted
             verts, groups, split_mtl = parse_obj(path, return_split=True)
             raw_n = len(groups)
-            groups = merge_coplanar_groups(verts, groups)   # fuse per-triangle splits of a flat surface
+            # material names are meaningful -> never fuse two different ones
+            groups = merge_coplanar_groups(verts, groups, respect_names=split_mtl)
             n_faces_before = sum(len(g["tris"]) for g in groups)
             groups = drop_degenerate_faces(verts, groups)   # purge zero-area slivers + the phantom layers they made
             # `split_mtl` forces the rewrite: raw_n is counted AFTER parse_obj, so a
