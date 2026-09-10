@@ -1090,9 +1090,25 @@ int main(int argc, char *argv[]){
 	
 	// -------------------------------- Memory assessment for animations --------------------------------------
 	
+	// FATAL, not a warning. Every cudaMalloc above (48 of them, lines 371-1062) discards its
+	// return code, so this sticky error is the only thing standing between a failed allocation
+	// and a null/garbage device pointer. It used to only printf and fall through -- the run then
+	// reached the timestep loop and handed that pointer to cudaMemcpy(...DeviceToHost), so the
+	// COPY ENGINE read unmapped memory: "Xid 31 MMU Fault: ENGINE HOST6 HUBCLIENT_HOST ...
+	// ACCESS_TYPE_READ". That poisons the context (every later call returns 999) and the process
+	// then wedges in uvm_va_space_destroy -- D state, unkillable, reboot required.
+	// Dying here instead keeps the context clean and names the real problem: not enough VRAM.
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
-		printf("[!] CUDA error: %s\n", cudaGetErrorString(err));
+		size_t freeB = 0, totB = 0;
+		cudaMemGetInfo(&freeB, &totB);
+		printf("\n[!] CUDA error before the time loop: %s\n"
+		       "    GPU memory: %.2f GB free of %.2f GB.\n"
+		       "    A device allocation failed. Lower the cutoff frequency (coarser grid),\n"
+		       "    shorten the simulation, or free the GPU, then re-run.\n\n",
+		       cudaGetErrorString(err), freeB / 1e9, totB / 1e9);
+		fflush(stdout);
+		return -1;
 	}
 	
 	// ---- animation frame sampling ----
@@ -1588,7 +1604,7 @@ int main(int argc, char *argv[]){
         				// no fractional delay (amplitude validation)
             			//e_ism[t_0] += (float)gS_0 * gS_0;
             			// no fractional delay
-            			//p_hf[flat(t_0, r, Nt)] += gS_0; // --> keeps direct ray's amplitude
+            			//p_hf[flat(t_0, r, Nt)] += gS_0; // --> keeps direct ray's amplitude (for test)
             			// fractional delay
             			deposit(tau_0, gS_0, r, d_0); // direct ray (coherent)
         			}
