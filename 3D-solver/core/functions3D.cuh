@@ -474,16 +474,29 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	float Cy = (j + 0.5f) * h;
     	float Cz = (k + 0.5f) * h;
     	
-    	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid) 
-    	float Wx = Cx + s * nx;
-    	float Wy = Cy + s * ny;
-    	float Wz = Cz + s * nz;
-	
-    	// interpolation point slightly inside the fluid along n
-    	float l = s + 2.0f * h; 
-    	float Dx = Wx - l * nx;
-    	float Dy = Wy - l * ny;
-    	float Dz = Wz - l * nz;
+    	// (the boundary footpoint W = C + s*n is implicit: the probe below is measured from
+    	//  the cell centre, and C - l*n with l = 2h is exactly the old W - (s + 2h)*n)
+    	// Interpolation point inside the fluid, along -n from the cell centre.
+    	//
+    	// A FIXED 2h probe assumes the fluid gap on this side is wider than 2h. Where two
+    	// surfaces face each other closer than that -- closely spaced ceiling diffusers at
+    	// low points-per-wavelength -- the probe lands in (or behind) the opposing solid, so
+    	// pD/uD are read from a cell that is itself being driven by ITS boundary condition.
+    	// The two boundaries then feed each other with no damping and the field blows up.
+    	//
+    	// Walk the probe back until the SDF says it really is deeper in the fluid than this
+    	// cell (S(D) > s) -> 3 halvings + a 0.5h floor, not a full ray-march -- if a
+    	// gap is thinner than half a cell the grid cannot resolve it either way.
+    	float l = 2.0f * h;
+    	float Dx, Dy, Dz;
+    	#pragma unroll
+    	for (int t = 0; t < 3; ++t){
+    		Dx = Cx - l * nx;
+    		Dy = Cy - l * ny;
+    		Dz = Cz - l * nz;
+    		if (tricubic_interp(S, Nx, Ny, Nz, Dx, Dy, Dz, h) > s) break;   // in the fluid
+    		l = fmaxf(0.5f * h, 0.5f * l);
+    	}
 		
     	float pD = tricubic_interp(p_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
     	float uD = tricubic_interp(u_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
