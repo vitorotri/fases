@@ -474,30 +474,130 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	float Cy = (j + 0.5f) * h;
     	float Cz = (k + 0.5f) * h;
     	
-    	// (the boundary footpoint W = C + s*n is implicit: the probe below is measured from
-    	//  the cell centre, and C - l*n with l = 2h is exactly the old W - (s + 2h)*n)
-    	// Interpolation point inside the fluid, along -n from the cell centre.
+#ifndef ADAPTIVE_PROBE
+    	// ---- ORIGINAL (default): fixed probe, experimentally tuned -----------------------
+    	// footpoint on boundary: W = C - s * n_hat  (since S>0 fluid, S<0 solid)
+    	float Wx = Cx + s * nx;
+    	float Wy = Cy + s * ny;
+    	float Wz = Cz + s * nz;
+
+    	// interpolation point slightly inside the fluid along n
+    	float l = s + 2.0f * h;
+    	float Dx = Wx - l * nx;
+    	float Dy = Wy - l * ny;
+    	float Dz = Wz - l * nz;
+#else
+    	// ---- EXPERIMENTAL (make EXTRA=-DADAPTIVE_PROBE) ------------------------------------
+    	// Same probe as above, UNCHANGED (s + 2h from the footpoint is experimentally tuned).
     	//
-    	// A FIXED 2h probe assumes the fluid gap on this side is wider than 2h. Where two
-    	// surfaces face each other closer than that -- closely spaced ceiling diffusers at
-    	// low points-per-wavelength -- the probe lands in (or behind) the opposing solid, so
-    	// pD/uD are read from a cell that is itself being driven by ITS boundary condition.
-    	// The two boundaries then feed each other with no damping and the field blows up.
+    	// Two pathological cases -- a probe landing in solid (narrow gaps between ceiling
+    	// diffusers at low ppw) and a degenerate normal (medial axis / cell enclosed by solid)
+    	// -- get a RIGID fallback built from the cell's OWN state. Three earlier answers were
+    	// tried on the BRAS auditorium and each failed for a reason worth keeping:
+    	//   * read the probe anyway     -> injects undriven solid-interior garbage: blow-up
+    	//   * shorten the probe         -> samples a state the BC already wrote this substep,
+    	//                                  reflection applied ~twice (R^2): over-absorbs EVERYWHERE
+    	//   * skip the BC on the cell   -> punches a hole in the band. Solid cells are never
+    	//                                  written (oid=0xFF) and WENO evolves them as garbage;
+    	//                                  the band being overwritten every substep is what
+    	//                                  contains it. A hole turns a 1-2 cell diffuser slab
+    	//                                  into a resonator: a fixed spot on the ceiling ringing
+    	//                                  at one frequency and growing.
+    	// The band must therefore stay fully WRITTEN. Rigid-from-own-state does that while
+    	// reading no probe (no garbage) and applying no reflection coefficient (no R^2):
+    	//   (a) probe in solid:   kill the cell's normal velocity along n, keep p
+    	//   (b) degenerate normal: n is noise, so kill ALL velocity, keep p
+    	// Locally that is a perfectly rigid patch -- a small under-absorption exactly where the
+    	// grid cannot resolve the geometry anyway, and it cannot ring.
     	//
-    	// Walk the probe back until the SDF says it really is deeper in the fluid than this
-    	// cell (S(D) > s) -> 3 halvings + a 0.5h floor, not a full ray-march -- if a
-    	// gap is thinner than half a cell the grid cannot resolve it either way.
-    	float l = 2.0f * h;
-    	float Dx, Dy, Dz;
-    	#pragma unroll
-    	for (int t = 0; t < 3; ++t){
-    		Dx = Cx - l * nx;
-    		Dy = Cy - l * ny;
-    		Dz = Cz - l * nz;
-    		if (tricubic_interp(S, Nx, Ny, Nz, Dx, Dy, Dz, h) > s) break;   // in the fluid
-    		l = fmaxf(0.5f * h, 0.5f * l);
+    	// THE INVARIANT: the probe must still see MY wall as the nearest wall. On a flat wall
+    	// S(D) == s + 2h exactly. If S(D) < s + h, some OTHER surface is closer to the probe
+    	// than mine -- and that surface's band cells may be probing straight back at me.
+    	//
+    	// Two KDEBUG traces on the BRAS auditorium ceiling, both a fixed cell growing 10x
+    	// every ~35 steps, both the same disease:
+    	//  1) S along z: 0.33 0.41 [1.41] 0.76 0.04 -- a slot ~3.5 cells tall. The cell nearest
+    	//     the lower wall probed 2h UP onto the cell nearest the upper wall (S=0.76h); that
+    	//     one probed 2h DOWN onto the first (S=0.41h). Both BC-only (S<h), never evolved:
+    	//     each substep each reflected the other's reflection. No PDE in the loop.
+    	//  2) S along z: 0.66 0.08 [1.08] 2.03 1.33 -- 1.08h above a 1-cell plate, a ceiling
+    	//     ~3 cells higher. The cell probed UP onto S=1.33h; that cell (nearest: the
+    	//     ceiling) probed DOWN onto S=1.08h. Both EVOLVED (S>=h), so a "probe must land in
+    	//     an evolved cell" rule passed them -- but at chi=0.995 and 0.93 they are still
+    	//     ~95% BC-written, and the loop closed anyway.
+    	// "S(D) >= s + h" cuts both: 0.76 < 0.41+1, 1.33 < 1.08+1. It also subsumes the
+    	// in-solid test (S(D) <= 0 < s + h). Flat walls are untouched (S(D) = s+2h >= s+h with
+    	// a full cell of slack for tricubic error). Cost: cells in gaps narrower than ~6h and
+    	// the inner wedge of concave corners become rigid patches -- geometry the grid cannot
+    	// resolve at low ppw anyway, and a rigid patch cannot ring.
+    	const float PROBE_MARGIN = 1.0f * h;
+    	float Wx = Cx + s * nx;
+    	float Wy = Cy + s * ny;
+    	float Wz = Cz + s * nz;
+    	float l = s + 2.0f * h;
+    	float Dx = Wx - l * nx;
+    	float Dy = Wy - l * ny;
+    	float Dz = Wz - l * nz;
+    	{
+    		// (b) A true SDF has |grad S| == 1. The bisector of a 90-degree concave corner
+    		//     (S = min(dx,dz)) gives exactly sqrt(0.5^2+0.5^2) = 0.707 with the normal along
+    		//     the bisector -- a legitimate corner cell the normal path handles. Below that
+    		//     the normal is a blend of non-orthogonal surfaces, a plate edge or a medial
+    		//     axis: fictitious. KDEBUG trace 3 on the BRAS ceiling: |grad S| = 0.55 at a
+    		//     BC-only cell whose x-profile was not even monotone (0.12 0.54 [0.26] 1.21);
+    		//     100% of its value each substep came from a reflection along that normal,
+    		//     growing 10x per ~110 steps. A 0.1 threshold let it through.
+    		const bool bad_n     = (gn < 0.65f);
+    		// (a) another wall is nearer the probe than mine. Test BOTH the interpolated S at D
+    		//     and the S of the cell D falls in: tricubic smooths toward the interior and can
+    		//     lift S(D) just over the line while the target cell itself is well inside another
+    		//     wall's band. Audit of the BRAS CR4 field: (128,62,84) s=0.50h probed onto a cell
+    		//     with centre S=1.23h (< 1.5h, should be rigid) but S(D)=1.65h passed -- and that
+    		//     cell probed straight back. A closed BC<->BC loop that survived the check.
+    		bool in_solid = false;
+    		if (!bad_n){
+    			const float sD = tricubic_interp(S, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    			int ti = (int)floorf(Dx / h), tj = (int)floorf(Dy / h), tk = (int)floorf(Dz / h);
+    			ti = max(0, min(ti, Nx - 1)); tj = max(0, min(tj, Ny - 1)); tk = max(0, min(tk, Nz - 1));
+    			const float sC = S[flat3(ti, tj, tk, Nx, Ny)];
+    			const float sM = fminf(sD, sC);
+    			// Two tiers. (1) More than 1h short of the flat-wall expectation s+2h: another wall,
+    			// rigid unconditionally. (2) Between 0.25h and 1h short AND the target cell is
+    			// mostly BC output (S_target < 2h <=> chi > 0.5): that is BC feeding BC -- rigid.
+    			// A probe that falls a little short onto a mostly-INTERIOR cell is what the original
+    			// design always did next to walls and stays on the normal path.
+    			// Audit of the BRAS CR4 field (45,95,71), a 45-degree wedge: three BC-only cells
+    			// (s=0.50h) probed 0.76h short onto a 69%-BC cell of the other surface and grew at
+    			// 2.4%/step. Tier 1 alone let them through; a flat 0.5h slack would have caught
+    			// them but also turned 90k cells of stepped seating rigid. Tier 2 catches the
+    			// three and costs 27k. Tricubic reproduces a linear field exactly, so on a flat
+    			// wall S(D) = s+2h to ~1e-3 and neither tier can fire.
+    			in_solid = (sM < s + PROBE_MARGIN)
+    			        || (sC < 2.0f * h && sM < s + 1.75f * h);
+    		}
+    		if (bad_n || in_solid){
+    			// An unresolvable band cell becomes SOLID: p = u = 0, blended by the same chi as
+    			// the normal path. That is exactly what the static solid interior is, what
+    			// regularize_sdf does for axis-aligned cases, and a pure contraction
+    			// ((1-chi)*x every substep) -- it cannot pump energy under ANY geometry.
+    			//
+    			// The previous fallback ("rigid along n": remove the normal velocity, leave p
+    			// free) was REJECTED by the KDEBUG trace at (139,102,88) on the BRAS ceiling: a
+    			// ~5-cell coffer, solid on four sides, in which nearly every cell took the
+    			// fallback. Projecting u onto a normal that differs from cell to cell creates
+    			// artificial divergence; the pressure equation integrates that as a source, and
+    			// in a closed pocket it cannot radiate away. 2.5%/step, at the fallback cell
+    			// itself. Penalization with inconsistent normals is not a boundary condition.
+    			const float chi_r = chi_layered(s, h, tol);
+    			u[Cijk] *= (1.0f - chi_r);
+    			v[Cijk] *= (1.0f - chi_r);
+    			w[Cijk] *= (1.0f - chi_r);
+    			p[Cijk] *= (1.0f - chi_r);
+    			return;
+    		}
     	}
-		
+#endif
+
     	float pD = tricubic_interp(p_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
     	float uD = tricubic_interp(u_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
     	float vD = tricubic_interp(v_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
