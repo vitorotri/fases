@@ -906,7 +906,209 @@ inline static int build_sdf(Scene3D* sc, float h,
         if(S_gpu) std::free(S_gpu);     // keep the CPU narrow-band result
     }
 #endif
+
+    // A scene that encloses nothing is not simulatable: every cell is exterior, the
+    // immersed BC clamps the whole field to zero, and the run completes "successfully"
+    // with an all-zero IR and blank animation frames. That silent failure costs far more
+    // to diagnose than it costs to check, so refuse the run here instead.
+    // Typical cause: an OBJ of loose plates/panels with no watertight shell, or a
+    // "BoundingBox" group whose faces reference the wrong vertices.
+    {
+        const size_t Ncell = (size_t)(*Nx) * (size_t)(*Ny) * (size_t)(*Nz);
+        size_t n_in = 0;
+        for(size_t idx = 0; idx < Ncell; ++idx) if((*S)[idx] > 0.f) ++n_in;
+        if(n_in == 0){
+            std::fprintf(stderr,
+                "[SDF3D] Scene encloses no volume: 0 of %lld cells are inside the mesh.\n"
+                "        Nothing can propagate — the run would output an all-zero field.\n"
+                "        The OBJ needs a WATERTIGHT shell (floor + walls + ceiling);\n"
+                "        loose plates and open surfaces do not enclose a domain.\n",
+                (long long)Ncell);
+            std::free(*S); *S = nullptr; *Nx = *Ny = *Nz = 0;
+            return 0;
+        }
+        if(n_in * 1000 < Ncell)
+            std::fprintf(stderr,
+                "[SDF3D] warning: only %lld of %lld cells (%.3f %%) are inside the mesh —\n"
+                "        check that the shell is closed and correctly oriented.\n",
+                (long long)n_in, (long long)Ncell,
+                100.0 * (double)n_in / (double)Ncell);
+    }
     return 1;
+}
+
+// ============================================================
+// SDF regularization: retire geometry the grid cannot resolve (host, once)
+// ============================================================
+// The immersed BC assumes the SDF is LOCALLY ONE PLANE: a cell's normal points at one wall
+// and its probe (s+2h away from the footpoint) reads interior solution. Three KDEBUG traces
+// on the BRAS auditorium ceiling (4.5 ppw) were exactly the places that assumption fails:
+//   * a fluid slot ~3.5 cells tall  -> both walls' 3h bands overlap; the two nearest cells
+//     probe ONTO EACH OTHER and reflect each other's reflection forever (10x / ~35 steps)
+//   * a solid plate 1 cell thick    -> S>0 on both sides within a cell; no interior to anchor
+//   * a kink between surfaces        -> |grad S| = 0.55, the central-difference normal is fiction
+// Patching those in the kernel means guessing per cell per substep. Deciding ONCE here is
+// deterministic, inspectable (see the dump), and leaves the kernel's tuned probe alone.
+//
+// What it does (all axis-aligned, so concave CORNERS are NOT rounded -- a corner cell has
+// solid on one side per axis only, and is left exactly as the triangle SDF placed it):
+//   1. fluid runs bounded by solid on both ends and shorter than 2*tol (band overlap) -> solid
+//   2. solid runs shorter than 3 cells bounded by fluid on both ends -> grow by 1 each side
+//   3. repair S ONLY around converted cells: fluid keeps min(S_exact, dist to new solid) so
+//      the exact triangle SDF -- and every flat wall's sub-cell precision -- is untouched
+//      elsewhere; converted cells get -(dist to nearest fluid). Interface at the cell FACE
+//      (0.5h), matching how the exact SDF places a wall between two cell centres.
+// Diagonal slots (walls at 45 deg) are not caught by axis runs; the kernel's rigid fallback
+// remains as the net for those. ponytail: local brute-force distance repair in a cube of
+// radius R around each converted cell, not an exact EDT -- O(n_conv * (2R+1)^3), fine once.
+inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, float tol,
+                                 const char* dump_path)
+{
+    if(!S || Nx < 8 || Ny < 8 || Nz < 8) return 0;
+    const size_t N = (size_t)Nx * (size_t)Ny * (size_t)Nz;
+    auto id = [&](int i, int j, int k) -> size_t {
+        return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
+    };
+    const int GAP   = (int)std::ceil(2.0f * tol / h);   // fluid run <  GAP cells  -> fill  (band overlap)
+    const int PLATE = 3;                                 // solid run <  PLATE cells -> thicken to >= 3
+
+    std::vector<uint8_t> solid(N), mark(N, 0);          // mark: 1 = fill (gap), 2 = thicken (plate)
+    for(size_t q = 0; q < N; ++q) solid[q] = (S[q] <= 0.f) ? 1 : 0;
+
+    // scan every axis-aligned line for short bounded runs
+    auto scan_line = [&](int ax, int b, int c){
+        const int L = (ax == 0) ? Nx : (ax == 1) ? Ny : Nz;
+        auto at = [&](int t) -> size_t {
+            return ax == 0 ? id(t, b, c) : ax == 1 ? id(b, t, c) : id(b, c, t);
+        };
+        int t = 0;
+        while(t < L){
+            const uint8_t v = solid[at(t)];
+            int t1 = t;
+            while(t1 < L && solid[at(t1)] == v) ++t1;
+            const int len = t1 - t;
+            const bool bounded = (t > 0) && (t1 < L);     // not touching the domain edge
+            if(bounded){
+                if(!v && len < GAP)                        // thin FLUID slab between two solids
+                    for(int u = t; u < t1; ++u) mark[at(u)] = 1;
+                if(v && len < PLATE){                      // thin SOLID plate between two fluids
+                    mark[at(t - 1)]  = std::max<uint8_t>(mark[at(t - 1)],  2);
+                    mark[at(t1)]     = std::max<uint8_t>(mark[at(t1)],     2);
+                }
+            }
+            t = t1;
+        }
+    };
+    for(int k = 0; k < Nz; ++k) for(int j = 0; j < Ny; ++j) scan_line(0, j, k);
+    for(int k = 0; k < Nz; ++k) for(int i = 0; i < Nx; ++i) scan_line(1, i, k);
+    for(int j = 0; j < Ny; ++j) for(int i = 0; i < Nx; ++i) scan_line(2, i, j);
+
+    // collect conversions (fluid cells only -- a solid cell marked 2 is already solid)
+    std::vector<size_t> conv;
+    int n_gap = 0, n_plate = 0;
+    for(size_t q = 0; q < N; ++q){
+        if(mark[q] && !solid[q]){
+            conv.push_back(q);
+            (mark[q] == 1) ? ++n_gap : ++n_plate;
+        }
+    }
+    if(conv.empty()){
+        std::printf("[SDF3D] regularize: nothing below resolution (gap < %d cells, plate < %d cells)\n",
+                    GAP, PLATE);
+        return 0;
+    }
+
+    // apply: converted cells become solid
+    std::vector<uint8_t> conv_mask(N, 0);
+    for(size_t q : conv){ conv_mask[q] = 1; solid[q] = 1; }
+
+    // repair S in a shell around the conversions. Interface sits at the cell face: a fluid
+    // cell one centre away from new solid is 0.5h from the wall, not 1h.
+    const int R = (int)std::ceil(tol / h) + 3;
+    for(size_t q : conv){
+        const int i0 = (int)(q % Nx), j0 = (int)((q / Nx) % Ny), k0 = (int)(q / ((size_t)Nx * Ny));
+        float d_fluid = 1e30f;                              // for the converted cell's own S
+        for(int dk = -R; dk <= R; ++dk){
+            const int k = k0 + dk; if(k < 0 || k >= Nz) continue;
+            for(int dj = -R; dj <= R; ++dj){
+                const int j = j0 + dj; if(j < 0 || j >= Ny) continue;
+                for(int di = -R; di <= R; ++di){
+                    const int i = i0 + di; if(i < 0 || i >= Nx) continue;
+                    const size_t r = id(i, j, k);
+                    if(r == q) continue;
+                    const float d = h * std::sqrt((float)(di*di + dj*dj + dk*dk)) - 0.5f * h;
+                    if(!solid[r]){                          // fluid neighbour: new wall may be nearer
+                        if(d < S[r]) S[r] = std::max(d, 0.25f * h);
+                        if(d < d_fluid) d_fluid = d;
+                    }
+                }
+            }
+        }
+        S[q] = -std::max(d_fluid, 0.5f * h);
+    }
+
+    std::printf("[SDF3D] regularize: %d cell(s) below resolution converted to solid "
+                "(%d in fluid gaps < %d cells, %d thickening plates < %d cells); S repaired within %d cells.\n",
+                (int)conv.size(), n_gap, GAP, n_plate, PLATE, R);
+    if(dump_path){
+        if(FILE* f = std::fopen(dump_path, "w")){
+            std::fprintf(f, "# cells converted fluid->solid by regularize_sdf  (i j k reason)\n"
+                            "# reason: gap = fluid slab < %d cells between solids; plate = grown to thicken a solid < %d cells\n",
+                         GAP, PLATE);
+            for(size_t q : conv)
+                std::fprintf(f, "%d %d %d %s\n", (int)(q % Nx), (int)((q / Nx) % Ny),
+                             (int)(q / ((size_t)Nx * Ny)), mark[q] == 1 ? "gap" : "plate");
+            std::fclose(f);
+        }
+    }
+    return (int)conv.size();
+}
+
+// ============================================================
+// OID hole filling (host, once, after build_oid_dense)
+// ============================================================
+// A band cell (0 < S < tol) with no material is a HOLE: kernel_apply_BC_immersed_sdf returns
+// on oid==0xFF before writing, the band is not overwritten there, and the static solid
+// interior behind it can ring through the gap (a fixed spot at one frequency, growing).
+// regularize_sdf creates exactly these: it repairs S so a cell sees a newly FILLED gap as
+// its wall (S = 0.5h, one face away), but build_oid_dense assigns material by distance to
+// the ORIGINAL triangles, which are farther than tol -> no material. Audit of the BRAS CR4
+// run found 61 such cells, all at the ceiling (k=87..93), S = 0.37h..0.50h.
+// Fix: give every material-less band cell the material of the nearest band cell that has
+// one (expanding cube, radius 1..R). Deterministic, and it cannot invent a material.
+inline static int fill_oid_holes(const float* S, uint8_t* oid, int Nx, int Ny, int Nz, float tol)
+{
+    if(!S || !oid) return 0;
+    auto id = [&](int i, int j, int k) -> size_t {
+        return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
+    };
+    auto valid = [&](uint8_t o){ return o != 0 && o != 0xFF; };
+    const int R = 4;
+    int filled = 0, left = 0;
+    // collect first, assign after: a hole must not be filled from another hole's fresh value
+    std::vector<std::pair<size_t, uint8_t>> fixes;
+    for(int k = 0; k < Nz; ++k) for(int j = 0; j < Ny; ++j) for(int i = 0; i < Nx; ++i){
+        const size_t q = id(i, j, k);
+        if(!(S[q] > 0.f && S[q] < tol) || valid(oid[q])) continue;
+        uint8_t best = 0xFF; float bestd = 1e30f;
+        for(int r = 1; r <= R && best == 0xFF; ++r){
+            for(int dk = -r; dk <= r; ++dk) for(int dj = -r; dj <= r; ++dj) for(int di = -r; di <= r; ++di){
+                if(std::max({std::abs(di), std::abs(dj), std::abs(dk)}) != r) continue;   // shell only
+                const int a = i + di, b = j + dj, c = k + dk;
+                if(a < 0 || b < 0 || c < 0 || a >= Nx || b >= Ny || c >= Nz) continue;
+                const size_t t = id(a, b, c);
+                if(!(S[t] > 0.f && S[t] < tol) || !valid(oid[t])) continue;
+                const float d = (float)(di*di + dj*dj + dk*dk);
+                if(d < bestd){ bestd = d; best = oid[t]; }
+            }
+        }
+        if(best != 0xFF) fixes.emplace_back(q, best); else ++left;
+    }
+    for(auto& f : fixes){ oid[f.first] = f.second; ++filled; }
+    if(filled || left)
+        std::printf("[SDF3D] oid holes: %d band cell(s) had no material -> filled from nearest band cell; %d left (no material within %d cells)\n",
+                    filled, left, R);
+    return filled;
 }
 
 // ============================================================
