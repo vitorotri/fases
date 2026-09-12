@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <chrono>
 #include <ctime>
 #include <cstring>
 #include <new>
@@ -15,6 +16,29 @@
 #include "ism3D.h"
 #include "raytrace3D.h"
 #include "functions3D.cuh"
+
+// Name the kernel that faults, without needing compute-sanitizer/cuda-memcheck.
+// Kernel launches are async and their errors are STICKY: an illegal access inside a
+// kernel is not reported at the launch, it surfaces later at the next cudaMemcpy as
+// "Xid 31 MMU Fault ... ENGINE HOST" -- which points at the copy, not the culprit.
+// Build with -DKDEBUG to sync + check after every launch and die at the real one.
+// Off by default: zero cost in normal runs (the RK3 loop already syncs once per step).
+//   make clean && make EXTRA="-DKDEBUG -lineinfo"
+#ifdef KDEBUG
+#define KCHECK(name)                                                              \
+    do {                                                                          \
+        cudaError_t _e = cudaDeviceSynchronize();                                 \
+        if (_e == cudaSuccess) _e = cudaGetLastError();                           \
+        if (_e != cudaSuccess) {                                                  \
+            printf("\n[!] kernel %s failed at step n=%d: %s\n\n",                 \
+                   (name), n, cudaGetErrorString(_e));                            \
+            fflush(stdout);                                                       \
+            exit(EXIT_FAILURE);                                                   \
+        }                                                                         \
+    } while (0)
+#else
+#define KCHECK(name) do {} while (0)
+#endif
 
 unsigned long long available_ram_bytes() {
     long pages = sysconf(_SC_AVPHYS_PAGES);
@@ -320,18 +344,39 @@ int main(int argc, char *argv[]){
 		bool cached = std::getline(ck, old_key) && old_key == cache_key
 		           && (ck >> Nx >> Ny >> Nz >> Lx >> Ly >> Lz);
 		ck.close();
+		// Say WHY the cache is or is not used. "reusing cached" with S.bin deleted is
+		// impossible below, so a reason line settles which binary/dir actually ran.
+		const char* why = cached ? "key matches" : "no/old scene_cache.txt (scene, mtime, h or tol changed)";
 		if (cached){
 			size_t Ncells = (size_t)Nx*Ny*Nz;
 			S   = (float*)malloc(Ncells*sizeof(float));
 			oid = (uint8_t*)malloc(Ncells);
 			FILE *fS = fopen(out_file("S.bin").c_str(), "rb");
 			FILE *fO = fopen(out_file("oid.bin").c_str(), "rb");
+			if (!fS)      why = "S.bin missing";
+			else if (!fO) why = "oid.bin missing";
 			cached = S && oid && fS && fO
 			      && fread(S, sizeof(float), Ncells, fS) == Ncells
 			      && fread(oid, 1, Ncells, fO) == Ncells;
+			if (fS && fO && !cached) why = "S.bin/oid.bin short read (wrong size for this grid)";
 			if (fS) fclose(fS);
 			if (fO) fclose(fO);
 			if (!cached){ free(S); S = NULL; free(oid); oid = NULL; }
+		}
+		printf("\n[cache] %s -> %s   (%s)\n", cached ? "REUSING S.bin/oid.bin" : "REBUILDING SDF + OID",
+		       out_file("").c_str(), why);
+		if (cached){
+			// Say which geometry a cached S carries, so a stale pre-regularize cache is visible.
+			long nfix = 0; char ln[512];
+			if (FILE* fx = fopen(out_file("sdf_fixes.txt").c_str(), "r")){
+				while (fgets(ln, sizeof ln, fx)) if (ln[0] != '#') ++nfix;
+				fclose(fx);
+				printf("[cache] cached S was regularized: %ld cell(s) below resolution converted to solid "
+				       "(see output/sdf_fixes.txt)\n", nfix);
+			} else {
+				printf("[cache] cached S predates regularize_sdf (no sdf_fixes.txt) -- delete "
+				       "scene_cache.txt to rebuild with it\n");
+			}
 		}
 
 		if (cached){
@@ -344,28 +389,43 @@ int main(int argc, char *argv[]){
 			return -1;
 			}
 
+			// Retire geometry the grid cannot resolve (fluid slots thinner than the band
+			// overlap, plates thinner than 3 cells) BEFORE the OID map is built and before
+			// S.bin is cached, so the solver, the OID and the cache all see the same scene.
+			// Dump lists every converted cell for inspection. See parsing3D.h regularize_sdf.
+			regularize_sdf(S, Nx, Ny, Nz, h, tol, out_file("sdf_fixes.txt").c_str());
+
 			if(!build_oid_dense(sc, S, Nx, Ny, Nz, h, tol, &oid)){   // GPU, CPU fallback
 				fprintf(stderr,"Failed to build OID map\n");
 				free(S); scene_free(&sc);
 				return -1;
 			}
+			// Band cells left without a material (S repaired by regularize_sdf, OID keyed to the
+			// original triangles) are holes in the band -> resonators. Fill from neighbours.
+			fill_oid_holes(S, oid, Nx, Ny, Nz, tol);
 
-			FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
-			if (file_S) {
-				fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
-				fclose(file_S);
+			// --estimate is a READ-ONLY query (see above): it must not write the cache. It
+			// used to, so the GUI's pre-flight pass re-created S.bin/oid.bin/scene_cache.txt
+			// seconds before every real run -- deleting them looked like it did nothing, and
+			// the real run's log never showed the SDF being built. Only the real run caches.
+			if (!estimate_only){
+				FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
+				if (file_S) {
+					fwrite(S, sizeof(float), (size_t)Nx*Ny*Nz, file_S);
+					fclose(file_S);
+				}
+
+				FILE *file_oid = fopen(out_file("oid.bin").c_str(), "wb");
+				if (file_oid){
+					fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
+					fclose(file_oid);
+				}
+
+				// stamp the cache only after both bins are on disk
+				std::ofstream(out_file("scene_cache.txt"), std::ios::trunc)
+				    << cache_key << "\n" << Nx << " " << Ny << " " << Nz << " "
+				    << Lx << " " << Ly << " " << Lz << "\n";
 			}
-
-			FILE *file_oid = fopen(out_file("oid.bin").c_str(), "wb");
-			if (file_oid){
-				fwrite(oid, sizeof(uint8_t), (size_t)Nx*Ny*Nz, file_oid);
-				fclose(file_oid);
-			}
-
-			// stamp the cache only after both bins are on disk
-			std::ofstream(out_file("scene_cache.txt"), std::ios::trunc)
-			    << cache_key << "\n" << Nx << " " << Ny << " " << Nz << " "
-			    << Lx << " " << Ly << " " << Lz << "\n";
 		}
 
 		cudaMalloc(&d_oid, (size_t)Nx*Ny*Nz*sizeof(uint8_t));
@@ -1247,26 +1307,35 @@ int main(int argc, char *argv[]){
 		// (0)
 		
 		kernel_WENO_stage0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		KCHECK("WENO_stage0");
 			
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n, src_opt, d_src_freq);
+		KCHECK("inject_src_SSP");
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0, 1.0, 1.0, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+		KCHECK("apply_BC_immersed_sdf");
 			
 		// (1)
 			
 		kernel_WENO_stage1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		KCHECK("WENO_stage1");
 
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2, src_opt, d_src_freq);
+		KCHECK("inject_src_SSP");
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0, 1.0, 4.0, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
+		KCHECK("apply_BC_immersed_sdf");
 			
 		// (2)
 		
 		kernel_WENO_stage2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		KCHECK("WENO_stage2");
 			
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1, src_opt, d_src_freq);
+		KCHECK("inject_src_SSP");
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0, 2.0, 3.0, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+		KCHECK("apply_BC_immersed_sdf");
 
 		// sync
 		cudaDeviceSynchronize();
@@ -1288,6 +1357,37 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
+
+#ifdef KDEBUG
+		// Blow-up tracer: p0 is on the host anyway, so find the cell with the largest |p|
+		// and report it with everything the BC kernel would have known about it. Prints
+		// when |p|max first exceeds the trip level and then every time it grows 10x, so a
+		// run that diverges yields ~5 lines naming the FIRST bad cell -- not a guess.
+		{
+			static float trip = 1e3f;                 // ~ way above any physical pressure here
+			size_t am = 0; float pm = 0.f;
+			for (size_t q = 0; q < N; ++q){ float a = fabsf(p0[q]); if (a > pm){ pm = a; am = q; } }
+			if (pm > trip || (n % 200 == 0 && n > 0)){
+				int ii = (int)(am % Nx), jj = (int)((am / Nx) % Ny), kk = (int)(am / ((size_t)Nx*Ny));
+				auto SS = [&](int a,int b,int c){ return S[(size_t)a + (size_t)Nx*((size_t)b + (size_t)Ny*c)]; };
+				float gx=(SS(ii+1,jj,kk)-SS(ii-1,jj,kk))*(0.5f/h), gy=(SS(ii,jj+1,kk)-SS(ii,jj-1,kk))*(0.5f/h),
+				      gz=(SS(ii,jj,kk+1)-SS(ii,jj,kk-1))*(0.5f/h);
+				float gn = sqrtf(gx*gx+gy*gy+gz*gz);
+				printf("\n[trace] n=%d  |p|max=%.3e at (%d,%d,%d) = (%.3f,%.3f,%.3f) m\n"
+				       "        S=%.3f (%.2f h)  oid=%d  |gradS|=%.3f  band:%s  weno:%s\n"
+				       "        S along x: %.2f %.2f [%.2f] %.2f %.2f   z: %.2f %.2f [%.2f] %.2f %.2f  (in h)\n",
+				       n, pm, ii, jj, kk, (ii+0.5f)*h, (jj+0.5f)*h, (kk+0.5f)*h,
+				       S[am], S[am]/h, (int)oid[am], gn,
+				       (oid[am] != 0 && oid[am] != 0xFF) ? "yes" : "no",
+				       (S[am] < h) ? "SKIPPED" : "evolved",
+				       SS(ii-2,jj,kk)/h, SS(ii-1,jj,kk)/h, SS(ii,jj,kk)/h, SS(ii+1,jj,kk)/h, SS(ii+2,jj,kk)/h,
+				       SS(ii,jj,kk-2)/h, SS(ii,jj,kk-1)/h, SS(ii,jj,kk)/h, SS(ii,jj,kk+1)/h, SS(ii,jj,kk+2)/h);
+				fflush(stdout);
+				if (pm > trip) trip *= 10.f;
+				if (pm > 1e12f){ printf("[trace] diverged -- stopping.\n"); return -1; }
+			}
+		}
+#endif
 
 		// write animation slices
 		if (n % anim_step == 0){
