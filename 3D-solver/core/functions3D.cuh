@@ -438,6 +438,13 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 }
 
 // clean version
+#ifdef KDEBUG
+// How many band cells took the ADAPTIVE_PROBE fallback this substep. After
+// retire_unresolvable has run in preprocessing this should be ~0; a non-zero count names
+// cells the preprocessor missed (trilinear vs tricubic, or a case it does not test).
+__device__ unsigned int g_bc_fallback_hits = 0;
+#endif
+
 __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, float *__restrict__ p, int Nx, int Ny, int Nz, float h, float *S, uint8_t *__restrict__ oid, float rho, float c, int n, float dt, float *__restrict__ u_old, float *__restrict__ v_old, float *__restrict__ w_old, float *__restrict__ p_old, float tol, float *__restrict__ Rinf, float *__restrict__ Ak, float *__restrict__ zeta, float *__restrict__ Bl, float *__restrict__ Cl, float *__restrict__ alpha, float *__restrict__ beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *__restrict__ phi_left, float *__restrict__ phi_middle, float *__restrict__ phi_right, float *__restrict__ psi_1_left, float *__restrict__ psi_1_middle, float *__restrict__ psi_1_right, float *__restrict__ psi_2_left, float *__restrict__ psi_2_middle, float *__restrict__ psi_2_right){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
@@ -454,6 +461,20 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	// oid[] ranges from 1 to nMat, 255 elsewhere
 		const uint8_t o_ID = oid[Cijk]; // object's material ID
 		int b_ID = bmap[Cijk]; // boundary map for phi and psi (ADE)
+		if (o_ID == 0xFE){
+			// Cell removed by mark_unresolvable (parsing3D.h): a band cell on which the planar-wall
+			// assumption cannot hold -- bad normal, or probe reading another wall's band. Decided
+			// once, on the static SDF, with the same tests the ADAPTIVE_PROBE branch below runs;
+			// this path just skips the tricubic read of S. Becomes solid: a contraction on every
+			// field (see the fallback below for why nothing else is safe here). Must be tested
+			// BEFORE o_ID is used as a material index.
+			const float chi_r = chi_layered(s, h, tol);
+			u[Cijk] *= (1.0f - chi_r);
+			v[Cijk] *= (1.0f - chi_r);
+			w[Cijk] *= (1.0f - chi_r);
+			p[Cijk] *= (1.0f - chi_r);
+			return;
+		}
 		if (o_ID == 0 || o_ID == 0xFF || b_ID < 0) return;
 		
 		//if (s >= h) return; // no blending test
@@ -576,6 +597,9 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     			        || (sC < 2.0f * h && sM < s + 1.75f * h);
     		}
     		if (bad_n || in_solid){
+#ifdef KDEBUG
+    			atomicAdd(&g_bc_fallback_hits, 1u);
+#endif
     			// An unresolvable band cell becomes SOLID: p = u = 0, blended by the same chi as
     			// the normal path. That is exactly what the static solid interior is, what
     			// regularize_sdf does for axis-aligned cases, and a pure contraction

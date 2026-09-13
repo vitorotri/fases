@@ -961,6 +961,42 @@ inline static int build_sdf(Scene3D* sc, float h,
 // Diagonal slots (walls at 45 deg) are not caught by axis runs; the kernel's rigid fallback
 // remains as the net for those. ponytail: local brute-force distance repair in a cube of
 // radius R around each converted cell, not an exact EDT -- O(n_conv * (2R+1)^3), fine once.
+// Convert the listed fluid cells to solid and repair S in a shell around them. The exact
+// triangle SDF is kept everywhere else; a fluid neighbour gets min(S, dist to new solid) with
+// the interface at the cell FACE (0.5h), the converted cell gets -(dist to nearest fluid).
+// Shared by regularize_sdf (axis-aligned slabs/plates) and retire_unresolvable (BC tests).
+inline static void sdf_convert_and_repair(float* S, std::vector<uint8_t>& solid,
+                                          const std::vector<size_t>& conv,
+                                          int Nx, int Ny, int Nz, float h, float tol)
+{
+    auto id = [&](int i, int j, int k) -> size_t {
+        return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
+    };
+    for(size_t q : conv) solid[q] = 1;
+    const int R = (int)std::ceil(tol / h) + 3;
+    for(size_t q : conv){
+        const int i0 = (int)(q % Nx), j0 = (int)((q / Nx) % Ny), k0 = (int)(q / ((size_t)Nx * Ny));
+        float d_fluid = 1e30f;
+        for(int dk = -R; dk <= R; ++dk){
+            const int k = k0 + dk; if(k < 0 || k >= Nz) continue;
+            for(int dj = -R; dj <= R; ++dj){
+                const int j = j0 + dj; if(j < 0 || j >= Ny) continue;
+                for(int di = -R; di <= R; ++di){
+                    const int i = i0 + di; if(i < 0 || i >= Nx) continue;
+                    const size_t r = id(i, j, k);
+                    if(r == q) continue;
+                    const float d = h * std::sqrt((float)(di*di + dj*dj + dk*dk)) - 0.5f * h;
+                    if(!solid[r]){
+                        if(d < S[r]) S[r] = std::max(d, 0.25f * h);
+                        if(d < d_fluid) d_fluid = d;
+                    }
+                }
+            }
+        }
+        S[q] = -std::max(d_fluid, 0.5f * h);
+    }
+}
+
 inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, float tol,
                                  const char* dump_path)
 {
@@ -1018,34 +1054,9 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
         return 0;
     }
 
-    // apply: converted cells become solid
-    std::vector<uint8_t> conv_mask(N, 0);
-    for(size_t q : conv){ conv_mask[q] = 1; solid[q] = 1; }
-
-    // repair S in a shell around the conversions. Interface sits at the cell face: a fluid
-    // cell one centre away from new solid is 0.5h from the wall, not 1h.
-    const int R = (int)std::ceil(tol / h) + 3;
-    for(size_t q : conv){
-        const int i0 = (int)(q % Nx), j0 = (int)((q / Nx) % Ny), k0 = (int)(q / ((size_t)Nx * Ny));
-        float d_fluid = 1e30f;                              // for the converted cell's own S
-        for(int dk = -R; dk <= R; ++dk){
-            const int k = k0 + dk; if(k < 0 || k >= Nz) continue;
-            for(int dj = -R; dj <= R; ++dj){
-                const int j = j0 + dj; if(j < 0 || j >= Ny) continue;
-                for(int di = -R; di <= R; ++di){
-                    const int i = i0 + di; if(i < 0 || i >= Nx) continue;
-                    const size_t r = id(i, j, k);
-                    if(r == q) continue;
-                    const float d = h * std::sqrt((float)(di*di + dj*dj + dk*dk)) - 0.5f * h;
-                    if(!solid[r]){                          // fluid neighbour: new wall may be nearer
-                        if(d < S[r]) S[r] = std::max(d, 0.25f * h);
-                        if(d < d_fluid) d_fluid = d;
-                    }
-                }
-            }
-        }
-        S[q] = -std::max(d_fluid, 0.5f * h);
-    }
+    // apply + repair (shared with retire_unresolvable)
+    sdf_convert_and_repair(S, solid, conv, Nx, Ny, Nz, h, tol);
+    const int R = (int)std::ceil(tol / h) + 3;   // reported only
 
     std::printf("[SDF3D] regularize: %d cell(s) below resolution converted to solid "
                 "(%d in fluid gaps < %d cells, %d thickening plates < %d cells); S repaired within %d cells.\n",
@@ -1062,6 +1073,88 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
         }
     }
     return (int)conv.size();
+}
+
+// ============================================================
+// Mark band cells the immersed BC cannot handle (host, once, after fill_oid_holes)
+// ============================================================
+// kernel_apply_BC_immersed_sdf (ADAPTIVE_PROBE) decides per cell, per substep, whether its
+// planar-wall assumption holds -- from S, grad S and S at the probe target. ALL STATIC. So the
+// same three tests run here once, and every cell that would take the runtime fallback is
+// MARKED: oid = OID_RETIRED (0xFE). The kernel then contracts it to solid (p,u *= 1-chi)
+// without the tricubic read of S, and oid.bin shows exactly which cells were retired.
+//
+// S is deliberately NOT modified. A first version converted these cells to solid and
+// repaired S around them; on the BRAS CR4 field that CASCADED (133k, 168k, 129k, 122k cells
+// per pass, never converging) because the repaired S is cell-centre-quantised -- a staircase
+// whose kinks fail the normal test, whose neighbours then fail, and so on. The kernel fallback
+// never cascaded for one reason: it leaves the exact SDF alone. So does this.
+//
+// The three tests (identical to the kernel -- keep in sync, see test_bc_probe.py):
+//   N  |grad S| < 0.65        normal is fiction (kink, plate edge, medial axis; a 90-degree
+//                             concave corner bisector is 0.707 and legitimately passes)
+//   S1 min(S(D), S_target) < s + h          probe sees another wall as nearest
+//   S2 S_target < 2h && min(...) < s+1.75h  probe short onto a mostly-BC-written cell
+// Interpolation here is trilinear (tricubic lives in device code); the kernel's own tests
+// stay armed (ADAPTIVE_PROBE) and catch the sub-0.1h disagreements that leaves -- KDEBUG
+// prints how many, which should be ~0.
+static constexpr uint8_t OID_RETIRED = 0xFE;
+
+inline static int mark_unresolvable(const float* S, uint8_t* oid, int Nx, int Ny, int Nz,
+                                    float h, float tol, const char* dump_path)
+{
+    if(!S || !oid || Nx < 8 || Ny < 8 || Nz < 8) return 0;
+    auto id = [&](int i, int j, int k) -> size_t {
+        return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
+    };
+    auto trilerp = [&](float x, float y, float z) -> float {
+        float gx = x / h - 0.5f, gy = y / h - 0.5f, gz = z / h - 0.5f;
+        int i = (int)std::floor(gx), j = (int)std::floor(gy), k = (int)std::floor(gz);
+        i = std::max(0, std::min(i, Nx - 2)); j = std::max(0, std::min(j, Ny - 2)); k = std::max(0, std::min(k, Nz - 2));
+        const float fx = gx - i, fy = gy - j, fz = gz - k;
+        auto v = [&](int a, int b, int c){ return S[id(a, b, c)]; };
+        return (1-fx)*((1-fy)*((1-fz)*v(i,j,k)+fz*v(i,j,k+1))+fy*((1-fz)*v(i,j+1,k)+fz*v(i,j+1,k+1)))
+             +    fx *((1-fy)*((1-fz)*v(i+1,j,k)+fz*v(i+1,j,k+1))+fy*((1-fz)*v(i+1,j+1,k)+fz*v(i+1,j+1,k+1)));
+    };
+
+    FILE* dump = dump_path ? std::fopen(dump_path, "a") : nullptr;
+    if(dump) std::fprintf(dump, "# cells retired by mark_unresolvable (oid=0xFE)  (i j k reason)  N bad normal, S1 other wall nearer, S2 short onto BC-heavy\n");
+    int nN = 0, nS1 = 0, nS2 = 0, nband = 0;
+    for(int k = 3; k < Nz - 3; ++k) for(int j = 3; j < Ny - 3; ++j) for(int i = 3; i < Nx - 3; ++i){
+        const size_t q = id(i, j, k);
+        const float s = S[q];
+        if(!(s > 0.f && s < tol)) continue;                              // band cells only
+        if(oid[q] == 0 || oid[q] == 0xFF) continue;                      // no material: kernel skips anyway
+        ++nband;
+        const float gx = (S[id(i+1,j,k)] - S[id(i-1,j,k)]) * (0.5f / h);
+        const float gy = (S[id(i,j+1,k)] - S[id(i,j-1,k)]) * (0.5f / h);
+        const float gz = (S[id(i,j,k+1)] - S[id(i,j,k-1)]) * (0.5f / h);
+        const float gn = std::sqrt(gx*gx + gy*gy + gz*gz);
+        const char* r = nullptr;
+        if(gn < 0.65f){ r = "N"; ++nN; }
+        else {
+            const float nx = -gx/gn, ny = -gy/gn, nz = -gz/gn;
+            const float Cx = (i+0.5f)*h, Cy = (j+0.5f)*h, Cz = (k+0.5f)*h;
+            const float l = s + 2.f*h;
+            const float Dx = Cx + s*nx - l*nx, Dy = Cy + s*ny - l*ny, Dz = Cz + s*nz - l*nz;
+            int ti = (int)std::floor(Dx/h), tj = (int)std::floor(Dy/h), tk = (int)std::floor(Dz/h);
+            ti = std::max(0, std::min(ti, Nx-1)); tj = std::max(0, std::min(tj, Ny-1)); tk = std::max(0, std::min(tk, Nz-1));
+            const float sC = S[id(ti,tj,tk)];
+            const float sM = std::min(trilerp(Dx, Dy, Dz), sC);
+            if(sM < s + h)                          { r = "S1"; ++nS1; }
+            else if(sC < 2.f*h && sM < s + 1.75f*h) { r = "S2"; ++nS2; }
+        }
+        if(r){
+            oid[q] = OID_RETIRED;
+            if(dump) std::fprintf(dump, "%d %d %d %s\n", i, j, k, r);
+        }
+    }
+    if(dump) std::fclose(dump);
+    const int total = nN + nS1 + nS2;
+    std::printf("[SDF3D] retire: %d of %d band cell(s) marked oid=0xFE -> the BC treats them as solid "
+                "(bad normal %d, other wall nearer %d, short onto BC-heavy %d). S untouched.\n",
+                total, nband, nN, nS1, nS2);
+    return total;
 }
 
 // ============================================================
