@@ -403,6 +403,11 @@ int main(int argc, char *argv[]){
 			// Band cells left without a material (S repaired by regularize_sdf, OID keyed to the
 			// original triangles) are holes in the band -> resonators. Fill from neighbours.
 			fill_oid_holes(S, oid, Nx, Ny, Nz, tol);
+			// Mark (oid=0xFE) every band cell the immersed BC's planar-wall assumption cannot
+			// hold on -- the same three tests as the ADAPTIVE_PROBE kernel branch, run once
+			// here on the static field. S is NOT modified (a convert-and-repair version
+			// cascaded across the room). Appends to sdf_fixes.txt; visible in oid.bin.
+			mark_unresolvable(S, oid, Nx, Ny, Nz, h, tol, out_file("sdf_fixes.txt").c_str());
 
 			// --estimate is a READ-ONLY query (see above): it must not write the cache. It
 			// used to, so the GUI's pre-flight pass re-created S.bin/oid.bin/scene_cache.txt
@@ -1368,6 +1373,15 @@ int main(int argc, char *argv[]){
 			size_t am = 0; float pm = 0.f;
 			for (size_t q = 0; q < N; ++q){ float a = fabsf(p0[q]); if (a > pm){ pm = a; am = q; } }
 			if (pm > trip || (n % 200 == 0 && n > 0)){
+#ifdef ADAPTIVE_PROBE
+				{	// fallback hits accumulated since the last report (3 substeps per step)
+					unsigned int hits = 0;
+					cudaMemcpyFromSymbol(&hits, g_bc_fallback_hits, sizeof hits);
+					const unsigned int zero = 0; cudaMemcpyToSymbol(g_bc_fallback_hits, &zero, sizeof zero);
+					printf("[fallback] %u band-cell fallback hits since last report (%.1f per substep)\n",
+					       hits, hits / (3.0 * 200.0));
+				}
+#endif
 				int ii = (int)(am % Nx), jj = (int)((am / Nx) % Ny), kk = (int)(am / ((size_t)Nx*Ny));
 				auto SS = [&](int a,int b,int c){ return S[(size_t)a + (size_t)Nx*((size_t)b + (size_t)Ny*c)]; };
 				float gx=(SS(ii+1,jj,kk)-SS(ii-1,jj,kk))*(0.5f/h), gy=(SS(ii,jj+1,kk)-SS(ii,jj-1,kk))*(0.5f/h),
