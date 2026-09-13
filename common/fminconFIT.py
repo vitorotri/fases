@@ -277,9 +277,15 @@ def hornikx_cotte_constrained_fit(
     # where an undamped pole is legitimately marginal), so the optimizer searches a set where
     # every point is stable instead of being projected back afterwards -- which fits better,
     # because a projected optimum is not the constrained optimum.
-    # Real poles keep the full real-axis reach; only the complex pair needs the shrink.
+    # The SAME factor on the real poles. 2.5127 is the limit for y' = -zeta*y in ISOLATION;
+    # the ADE is not isolated -- phi is driven by w_in, which comes from the field the BC
+    # writes from the ADE output, which the probe reads back next substep. The coupled
+    # operator's spectral radius exceeds the scalar one. On the BRAS CR4 fits every real pole
+    # sat at zeta = 3067 with the limit at 3070 (99.9%), and the run showed a slow, sign-
+    # definite, non-oscillating exponential drift once the acoustic field had decayed -- the
+    # fingerprint of a REAL pole crossing marginal stability. Complex pairs already had 0.76.
     _RK3_BOX = 0.76
-    zeta_max  = 2.5127 / dt
+    zeta_max  = 2.5127 * _RK3_BOX / dt
     alpha_max = 2.5127 * _RK3_BOX / dt
     beta_max  = min(1.732 * _RK3_BOX / dt, omega_cutoff)
 
