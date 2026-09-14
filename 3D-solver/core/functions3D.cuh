@@ -443,6 +443,10 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
 // retire_unresolvable has run in preprocessing this should be ~0; a non-zero count names
 // cells the preprocessor missed (trilinear vs tricubic, or a case it does not test).
 __device__ unsigned int g_bc_fallback_hits = 0;
+// Decomposition of the BC at ONE cell (the trace's |p|max cell, set by main3D): which term
+// carries the growth -- the PDE value, the probe read, or the ADE memory.
+__device__ int   g_dbg_cell = -1;
+__device__ float g_dbg[8];   // p_pde, chi, pD, un_D, w_out, w_in, p_b, max|p_old| over the probe's 4x4x4 stencil
 #endif
 
 __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, float *__restrict__ p, int Nx, int Ny, int Nz, float h, float *S, uint8_t *__restrict__ oid, float rho, float c, int n, float dt, float *__restrict__ u_old, float *__restrict__ v_old, float *__restrict__ w_old, float *__restrict__ p_old, float tol, float *__restrict__ Rinf, float *__restrict__ Ak, float *__restrict__ zeta, float *__restrict__ Bl, float *__restrict__ Cl, float *__restrict__ alpha, float *__restrict__ beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *__restrict__ phi_left, float *__restrict__ phi_middle, float *__restrict__ phi_right, float *__restrict__ psi_1_left, float *__restrict__ psi_1_middle, float *__restrict__ psi_1_right, float *__restrict__ psi_2_left, float *__restrict__ psi_2_middle, float *__restrict__ psi_2_right){
@@ -461,9 +465,8 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	// oid[] ranges from 1 to nMat, 255 elsewhere
 		const uint8_t o_ID = oid[Cijk]; // object's material ID
 		int b_ID = bmap[Cijk]; // boundary map for phi and psi (ADE)
-		
 		if (o_ID == 0xFE){
-			// Cell removed by mark_unresolvable (parsing3D.h): a band cell on which the planar-wall
+			// RETIRED by mark_unresolvable (parsing3D.h): a band cell on which the planar-wall
 			// assumption cannot hold -- bad normal, or probe reading another wall's band. Decided
 			// once, on the static SDF, with the same tests the ADAPTIVE_PROBE branch below runs;
 			// this path just skips the tricubic read of S. Becomes solid: a contraction on every
@@ -476,7 +479,6 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
 			p[Cijk] *= (1.0f - chi_r);
 			return;
 		}
-		
 		if (o_ID == 0 || o_ID == 0xFF || b_ID < 0) return;
 		
 		//if (s >= h) return; // no blending test
@@ -664,7 +666,21 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
 		const float w_b = un_b*nz + utz;  	
     	
     	const float chi = chi_layered(s, h, tol);
-		
+
+#ifdef KDEBUG
+		if (Cijk == g_dbg_cell){
+			g_dbg[0] = p[Cijk]; g_dbg[1] = chi; g_dbg[2] = pD; g_dbg[3] = un;
+			g_dbg[4] = w_out_local; g_dbg[5] = w_in_local; g_dbg[6] = p_b;
+			int bi = max(1, min((int)floorf(Dx / h - 0.5f), Nx - 3));   // same base cell as tricubic_interp
+			int bj = max(1, min((int)floorf(Dy / h - 0.5f), Ny - 3));
+			int bk = max(1, min((int)floorf(Dz / h - 0.5f), Nz - 3));
+			float m = 0.f;
+			for (int c = -1; c <= 2; ++c) for (int b = -1; b <= 2; ++b) for (int a = -1; a <= 2; ++a)
+				m = fmaxf(m, fabsf(p_old[flat3(bi + a, bj + b, bk + c, Nx, Ny)]));
+			g_dbg[7] = m;
+		}
+#endif
+
 		// immersed boundary smoothing / blending with value computed with WENO (s > h) (Brinkman penalization)
 		// as well as full values (s <= h => chi = 1) / (s >= tol => chi = 0)
 		u[Cijk] = (1.0f - chi) * u[Cijk] + chi * u_b;

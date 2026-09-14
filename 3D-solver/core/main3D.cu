@@ -332,12 +332,12 @@ int main(int argc, char *argv[]){
 		A = mesh_group_areas(sc, &A_tot); // A[i] is aligned with Z[i].alpha[b], for band b (layered Z, no BoundingBox)
 		// created in the ISM section
 
-		// S.bin/oid.bin double as a cache, keyed by scene mtime + h + tol
+		// S.bin/oid.bin double as a cache, keyed by scene mtime + h + tol + parser version
 		std::error_code fec;
 		std::ostringstream key_s;
 		key_s << scene_str << " "
 		      << std::filesystem::last_write_time(scene_path, fec).time_since_epoch().count()
-		      << " " << h << " " << tol;
+		      << " " << h << " " << tol << " v" << PARSE3D_VERSION;
 		std::string cache_key = key_s.str(), old_key;
 
 		std::ifstream ck(out_file("scene_cache.txt"));
@@ -346,7 +346,7 @@ int main(int argc, char *argv[]){
 		ck.close();
 		// Say WHY the cache is or is not used. "reusing cached" with S.bin deleted is
 		// impossible below, so a reason line settles which binary/dir actually ran.
-		const char* why = cached ? "key matches" : "no/old scene_cache.txt (scene, mtime, h or tol changed)";
+		const char* why = cached ? "key matches" : "no/old scene_cache.txt (scene, mtime, h, tol or parser version changed)";
 		if (cached){
 			size_t Ncells = (size_t)Nx*Ny*Nz;
 			S   = (float*)malloc(Ncells*sizeof(float));
@@ -1392,6 +1392,17 @@ int main(int argc, char *argv[]){
 				       (S[am] < h) ? "SKIPPED" : "evolved",
 				       SS(ii-2,jj,kk)/h, SS(ii-1,jj,kk)/h, SS(ii,jj,kk)/h, SS(ii+1,jj,kk)/h, SS(ii+2,jj,kk)/h,
 				       SS(ii,jj,kk-2)/h, SS(ii,jj,kk-1)/h, SS(ii,jj,kk)/h, SS(ii,jj,kk+1)/h, SS(ii,jj,kk+2)/h);
+				{	// BC decomposition at the cell picked LAST report (values from its latest substep).
+					// Growth in p_pde -> the PDE stencil; in pD/stencil max -> the probe read (tricubic
+					// overshoot if pD > stencil max); in |w_in| >> |w_out| -> the ADE memory.
+					static int dbg_cell = -1; float d[8] = {0};
+					if (dbg_cell >= 0){
+						cudaMemcpyFromSymbol(d, g_dbg, sizeof d);
+						printf("        BC at last cell: p_pde=%.3e chi=%.2f | pD=%.3e un_D=%.3e stencil|p|max=%.3e | w_out=%.3e w_in=%.3e -> p_b=%.3e\n",
+						       d[0], d[1], d[2], d[3], d[7], d[4], d[5], d[6]);
+					}
+					dbg_cell = (int)am; cudaMemcpyToSymbol(g_dbg_cell, &dbg_cell, sizeof dbg_cell);
+				}
 				fflush(stdout);
 				if (pm > trip) trip *= 10.f;
 				if (pm > 1e12f){ printf("[trace] diverged -- stopping.\n"); return -1; }

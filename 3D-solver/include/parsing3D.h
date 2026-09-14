@@ -126,6 +126,10 @@ inline static size_t count_air_voxels(const float* S, size_t N){
 // wider per axis than the room. (V = n_air*h^3 already excludes it: the ghost is outside the
 // walls where S<0, so it is not counted.)
 static const int PARSE3D_GHOST = 3;
+// Bump whenever the S/OID pipeline changes (build_sdf, regularize_sdf rules, OID passes).
+// Part of the S.bin/oid.bin cache key in main3D, so a parser change forces a rebuild
+// instead of silently reusing bins made by older code.
+static const int PARSE3D_VERSION = 4;   // 1: gap+plate; 2: + slab rule, no 0xFE mask; 3: gap passes to a fixed point; 4: GAP = 3*tol
 
 // Air-only (room, no ghost) cell counts from the padded grid dims.
 inline static void air_dims(int Nx,int Ny,int Nz, int* Nx_air,int* Ny_air,int* Nz_air){
@@ -1005,7 +1009,13 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
     auto id = [&](int i, int j, int k) -> size_t {
         return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
     };
-    const int GAP   = (int)std::ceil(2.0f * tol / h);   // fluid run <  GAP cells  -> fill  (band overlap)
+    // Fluid run < GAP cells -> fill. 2*tol (band overlap) was not enough: KDEBUG trace on BRAS
+    // CR4 h=0.150, (201,131,25): a 7h-wide niche, every cell in it a band cell of one wall or
+    // the other, no interior; the normal velocity between the walls grew 1.01/step. The
+    // outermost band cell (s -> tol) probes to tol+2h from its wall and must still see its
+    // OWN wall as nearest (S(D) >= s+h), which needs gap >= 2*tol + 3h = 3*tol. 9 cells at
+    // tol=3h: 1.35 m at h=0.15. Cost on CR4: +42k cells (0.8 % of the grid) over 2*tol.
+    const int GAP   = (int)std::ceil(3.0f * tol / h);
     const int PLATE = 3;                                 // solid run <  PLATE cells -> thicken to >= 3
 
     std::vector<uint8_t> solid(N), mark(N, 0);          // mark: 1 = fill (gap), 2 = thicken (plate), 3 = slab
@@ -1033,7 +1043,7 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
     }
 
     // scan every axis-aligned line for short bounded runs
-    auto scan_line = [&](int ax, int b, int c){
+    auto scan_line = [&](int ax, int b, int c, bool plates){
         const int L = (ax == 0) ? Nx : (ax == 1) ? Ny : Nz;
         auto at = [&](int t) -> size_t {
             return ax == 0 ? id(t, b, c) : ax == 1 ? id(b, t, c) : id(b, c, t);
@@ -1048,7 +1058,7 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
             if(bounded){
                 if(!v && len < GAP)                        // thin FLUID slab between two solids
                     for(int u = t; u < t1; ++u) mark[at(u)] = 1;
-                if(v && len < PLATE){                      // thin SOLID plate between two fluids
+                if(plates && v && len < PLATE){            // thin SOLID plate between two fluids
                     mark[at(t - 1)]  = std::max<uint8_t>(mark[at(t - 1)],  2);
                     mark[at(t1)]     = std::max<uint8_t>(mark[at(t1)],     2);
                 }
@@ -1057,40 +1067,57 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
         }
     };
 
-    for(int k = 0; k < Nz; ++k) for(int j = 0; j < Ny; ++j) scan_line(0, j, k);
-    for(int k = 0; k < Nz; ++k) for(int i = 0; i < Nx; ++i) scan_line(1, i, k);
-    for(int j = 0; j < Ny; ++j) for(int i = 0; i < Nx; ++i) scan_line(2, i, j);
-
-    // collect conversions (fluid cells only -- a solid cell marked 2 is already solid)
-    std::vector<size_t> conv;
-    int n_gap = 0, n_plate = 0, n_slab = 0;
-    for(size_t q = 0; q < N; ++q){
-        if(mark[q] && !solid0[q]){
-            conv.push_back(q);
-            mark[q] == 1 ? ++n_gap : mark[q] == 2 ? ++n_plate : ++n_slab;
+    // Every conversion creates NEW solid, which can bound a short fluid run the same scan
+    // did not see. KDEBUG trace on BRAS CR4 at h=0.150, cell (185,90,90): a 3-cell slot
+    // `#bBb###` whose -x wall was a slab thickened in that very pass stayed open; the two
+    // BC-only cells on its walls probed each other (mutual pair) and grew 1.036/step. So
+    // pass 1 applies all rules, then GAP-only passes repeat until nothing changes. Gap-only
+    // because gap+plate together never settle (each fill makes a new thin plate, each
+    // thickening a new short gap: ~5k cells/pass on the seating steps, still growing at
+    // pass 8); gap alone converges geometrically (28k, 12k, 2k, ..., 86 at pass 12).
+    std::vector<size_t> conv;          // all converted cells, all passes
+    std::vector<uint8_t> why;          // 1 gap, 2 plate, 3 slab (parallel to conv, for the dump)
+    int n_gap = 0, n_plate = 0, n_slab = 0, passes = 0;
+    for(;;){
+        const bool plates = (passes == 0);
+        if(!plates) std::fill(mark.begin(), mark.end(), 0);
+        for(int k = 0; k < Nz; ++k) for(int j = 0; j < Ny; ++j) scan_line(0, j, k, plates);
+        for(int k = 0; k < Nz; ++k) for(int i = 0; i < Nx; ++i) scan_line(1, i, k, plates);
+        for(int j = 0; j < Ny; ++j) for(int i = 0; i < Nx; ++i) scan_line(2, i, j, plates);
+        // collect conversions (fluid cells of the map as built -- slab cells are in solid[] already)
+        const size_t first = conv.size();
+        for(size_t q = 0; q < N; ++q){
+            if(mark[q] && !solid0[q] && !(passes > 0 && solid[q])){
+                conv.push_back(q); why.push_back(mark[q]);
+                mark[q] == 1 ? ++n_gap : mark[q] == 2 ? ++n_plate : ++n_slab;
+            }
         }
+        ++passes;
+        if(conv.size() == first || passes >= 32) break;
+        // apply + repair (shared helper); marks the new cells solid for the next scan
+        std::vector<size_t> now(conv.begin() + (std::ptrdiff_t)first, conv.end());
+        sdf_convert_and_repair(S, solid, now, Nx, Ny, Nz, h, tol);
     }
     if(conv.empty()){
         std::printf("[SDF3D] regularize: nothing below resolution (gap < %d cells, plate < %d cells)\n",
                     GAP, PLATE);
         return 0;
     }
-
-    // apply + repair (shared with retire_unresolvable)
-    sdf_convert_and_repair(S, solid, conv, Nx, Ny, Nz, h, tol);
     const int R = (int)std::ceil(tol / h) + 3;   // reported only
 
     std::printf("[SDF3D] regularize: %d cell(s) below resolution converted to solid "
-                "(%d in fluid gaps < %d cells, %d thickening plates < %d cells, %d slabs with no interior cell); S repaired within %d cells.\n",
-                (int)conv.size(), n_gap, GAP, n_plate, PLATE, n_slab, R);
+                "(%d in fluid gaps < %d cells, %d thickening plates < %d cells, %d slabs with no interior cell) in %d pass(es); S repaired within %d cells.\n",
+                (int)conv.size(), n_gap, GAP, n_plate, PLATE, n_slab, passes, R);
     if(dump_path){
         if(FILE* f = std::fopen(dump_path, "w")){
             std::fprintf(f, "# cells converted fluid->solid by regularize_sdf  (i j k reason)\n"
                             "# reason: gap = fluid slab < %d cells between solids; plate = grown to thicken a solid < %d cells\n",
                          GAP, PLATE);
-            for(size_t q : conv)
+            for(size_t n = 0; n < conv.size(); ++n){
+                const size_t q = conv[n];
                 std::fprintf(f, "%d %d %d %s\n", (int)(q % Nx), (int)((q / Nx) % Ny),
-                             (int)(q / ((size_t)Nx * Ny)), mark[q] == 1 ? "gap" : mark[q] == 2 ? "plate" : "slab");
+                             (int)(q / ((size_t)Nx * Ny)), why[n] == 1 ? "gap" : why[n] == 2 ? "plate" : "slab");
+            }
             std::fclose(f);
         }
     }
