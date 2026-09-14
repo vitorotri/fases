@@ -35,6 +35,7 @@ deconv_reg = 1e-2   # ponytail: Tikhonov floor. Raise if low band gets noisy nea
 # NO side effects and can't crash merely because a run was interrupted (e.g. header.txt missing).
 _ready = False
 cfg = f_cutoff_sim = src_opt = dt = dt_half = fs_fv = f_cutoff = pulse_fs = sigma_s = lag = None
+pulse_xover_hint = None
 
 def _load_pulse():
     if not os.path.exists("../config/p_ref.bin"):
@@ -46,7 +47,7 @@ def _load_pulse():
 def _init():
     """Read config/header/pulse once (cwd must be the project's output/). Populates module globals.
     Called at the top of broadband_ir()/main() so importing the module touches no files."""
-    global _ready, cfg, f_cutoff_sim, src_opt, dt, dt_half, fs_fv, f_cutoff, pulse_fs, sigma_s, lag
+    global _ready, cfg, f_cutoff_sim, src_opt, dt, dt_half, fs_fv, f_cutoff, pulse_fs, sigma_s, lag, pulse_xover_hint
     if _ready:
         return
     # speed of sound + cutoff from config; dt from the solver's output/header.txt
@@ -81,9 +82,15 @@ def _init():
         _pk = int(_P.argmax()); _thr = _P[_pk] * 10 ** (-XOVER_DROP_DB / 20)
         _above = np.where((_f > _f[_pk]) & (_P >= _thr))[0]
         _fx = float(_f[_above[-1]]) if _above.size else float(_f[_pk])
-        if 0 < _fx <= f_cutoff_sim:
-            f_cutoff = _fx
-        print(f"[allIRs] crossover f_x = {f_cutoff:.1f} Hz  (pulse peak {_f[_pk]:.1f} Hz)")
+        # DIAGNOSTIC ONLY. This used to OVERRIDE the crossover, which decoupled it from main3D:
+        # main3D emits GA bands with centre >= 0.5*f_cutoff (f_cutoff=512 -> 256 -> lowest GA band
+        # 500, high-passed at 353 Hz), while this put the FVM low-pass at 203.5 Hz -> a HOLE from
+        # 203 to 353 Hz that no band covered, and a match window half inside it. The crossover
+        # is now taken from the GA bands actually present (broadband_ir); the pulse only tells you
+        # how well the FVM is excited up to it.
+        pulse_xover_hint = _fx
+        print(f"[allIRs] pulse peak {_f[_pk]:.1f} Hz, {XOVER_DROP_DB:.0f} dB down by {_fx:.1f} Hz "
+              f"(nominal crossover 0.5*f_cutoff = {f_cutoff:.1f} Hz)")
     # Fallback only (no p_ref.bin from an older run): source-pulse lag instead of deconv. Needs dt,
     # so skip it for a GA-only run (no low band to lag-align anyway).
     if dt is not None:
@@ -158,20 +165,31 @@ def broadband_ir(rec, src):
         if lp_e: w *= _shoulder(f, lp_e, False)
         return np.fft.irfft(np.fft.rfft(ir) * np.sqrt(w), n=ir.size)
 
-    if have_low:
-        LIR = _filt(LIR, None, f_cutoff)                   # FVM: single low-pass at f_cutoff
     present_fcs = [int(hf.split("_")[-1].split(".")[0]) for hf in high_files]
     lowest_fc = min(present_fcs) if present_fcs else None
+    # THE crossover: where the lowest GA band main3D actually wrote begins (its lower edge). The
+    # FVM owns everything below it -- including, at f_cutoff=512, the whole 250 Hz octave up to
+    # 353 Hz, by design. Derived from the files, so FVM and GA meet exactly and no hole can open
+    # whatever the pulse spectrum did. The pulse hint says how well the FVM is excited there.
+    fx = (lowest_fc / 2 ** 0.5) if (have_low and lowest_fc) else f_cutoff
+    globals()["f_cutoff"] = fx                             # the receiver plots mark the crossover from it
+    if have_low and lowest_fc:
+        hint = pulse_xover_hint
+        note = (f"; pulse is {XOVER_DROP_DB:.0f} dB down by {hint:.0f} Hz -> FVM weakly excited "
+                f"in {hint:.0f}-{fx:.0f} Hz" if (hint is not None and hint < fx) else "")
+        print(f"[allIRs] rec{rec} src{src}: crossover f_x = {fx:.1f} Hz (lower edge of GA band {lowest_fc}){note}")
+    if have_low:
+        LIR = _filt(LIR, None, fx)                         # FVM: single low-pass at the crossover
     H_IRs = []
     for hf in high_files:
         fc = int(hf.split("_")[-1].split(".")[0])          # band from HIR..._<band>.bin
-        if have_low and fc * 2 ** 0.5 <= f_cutoff:         # octave fully below crossover -> FVM has it
+        if have_low and fc * 2 ** 0.5 <= fx:               # octave fully below crossover -> FVM has it
             continue
         arr = np.fromfile(hf, np.float32)
         if not have_low and fc == lowest_fc:               # GA-only: lowest octave runs to DC (no FVM below)
             hp_e = None
         else:
-            hp_e = max(f_cutoff, fc / 2 ** 0.5)            # lowest kept band high-passes AT f_cutoff
+            hp_e = max(fx, fc / 2 ** 0.5)                  # lowest kept band high-passes AT the crossover
         lp_e = None if fc == octave_bands[-1] else fc * 2 ** 0.5   # top band runs to Nyquist
         H_IRs.append(_filt(arr, hp_e, lp_e))
 
@@ -184,10 +202,21 @@ def broadband_ir(rec, src):
     # f_cutoff to GA just above; median over a wide octave is robust (no narrow-band blow-up).
     if have_low and LIRp.any() and HIRp.any():             # nothing to match against in a GA-only run
         f = np.fft.rfftfreq(N, 1 / fs)
-        lo = (f >= f_cutoff / 2) & (f < f_cutoff)          # FVM strong here
-        hi = (f > f_cutoff) & (f <= f_cutoff * 2)          # GA strong here
+        lo = (f >= fx / 2) & (f < fx)                      # FVM strong here
+        hi = (f > fx) & (f <= fx * 2)                      # GA strong here
         L = np.median(np.abs(np.fft.rfft(LIRp))[lo])
         H = np.median(np.abs(np.fft.rfft(HIRp))[hi])
+        # Where does the match factor come from? Print every term so a +300 dB match can be
+        # attributed to the raw FVM level, the deconvolution gain, or a dead GA window.
+        _Q = np.abs(np.fft.rfft(pulse_fs, n=N)) if pulse_fs is not None else None
+        _rawt = np.fromfile(low_files[0], np.float32)
+        _raw = np.abs(np.fft.rfft(_rawt))
+        _fr = np.fft.rfftfreq(_rawt.size, 1 / fs_fv); _lo_raw = (_fr >= fx / 2) & (_fr < fx)
+        print(f"[allIRs] rec{rec} src{src}: match terms  L(FVM deconv, {fx/2:.0f}-{fx:.0f} Hz)={L:.3e}"
+              f"  H(GA, {fx:.0f}-{2*fx:.0f} Hz)={H:.3e}"
+              f"  raw FVM in window={np.median(_raw[_lo_raw]) if _lo_raw.any() else float('nan'):.3e}"
+              + (f"  |Q| max={_Q.max():.3e} median in window={np.median(_Q[lo]):.3e}" if _Q is not None else "  (no pulse)")
+              + f"  max|LIR|={np.abs(LIRp).max():.3e}  max|HIR|={np.abs(HIRp).max():.3e}")
         if H > 0:
             HIRp = HIRp * (L / H)
             print(f"[allIRs] rec{rec} src{src}: GA->FVM spectral match {20*np.log10(L/H):+.1f} dB")
@@ -250,10 +279,10 @@ def main():
             ax_t.plot(np.arange(ir.size) / fs, ir, lw=0.7, label=f"source {src}")
             f, mag = _fr(ir)
             ax_f.semilogx(f, mag, lw=0.7, label=f"source {src}")
-        ax_t.set_title(f"Receiver {rec} - Impulse Response")
+        ax_t.set_title(f"Receiver {rec} — Impulse Response")
         ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude")
         ax_t.grid(True); ax_t.legend()
-        ax_f.set_title(f"Receiver {rec} - Frequency Response")
+        ax_f.set_title(f"Receiver {rec} — Frequency Response")
         ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("Magnitude [dB]")
         ax_f.set_xlim(20, fs / 2); ax_f.grid(True, which="both"); ax_f.legend()
         fig.tight_layout()
