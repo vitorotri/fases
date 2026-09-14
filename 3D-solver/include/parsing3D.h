@@ -1008,8 +1008,29 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
     const int GAP   = (int)std::ceil(2.0f * tol / h);   // fluid run <  GAP cells  -> fill  (band overlap)
     const int PLATE = 3;                                 // solid run <  PLATE cells -> thicken to >= 3
 
-    std::vector<uint8_t> solid(N), mark(N, 0);          // mark: 1 = fill (gap), 2 = thicken (plate)
+    std::vector<uint8_t> solid(N), mark(N, 0);          // mark: 1 = fill (gap), 2 = thicken (plate), 3 = slab
     for(size_t q = 0; q < N; ++q) solid[q] = (S[q] <= 0.f) ? 1 : 0;
+    const std::vector<uint8_t> solid0 = solid;          // as built; conversions are fluid cells of THIS map
+
+    // A closed slab thinner than a cell can hold NO cell centre: S never crosses zero, so the
+    // plate rule below sees no solid run. Both sides still get bands with opposite normals,
+    // the ridge cell has |grad S| ~ 0, and the WENO stencils of the S >= h cells reach across
+    // the slab while the BC on each side claims a wall. Signature: S > 0 is a strict minimum
+    // along an axis AND the two rises add to ~2h cos(theta) (a groove bottom rises by a
+    // fraction of h, a slab through the cell by > h). BRAS CR4 at h=0.150: 10k such cells.
+    // Made solid HERE so the plate rule thickens them to 3 in the same scan.
+    {
+        const size_t st[3] = { 1, (size_t)Nx, (size_t)Nx * (size_t)Ny };
+        for(int k = 1; k < Nz - 1; ++k) for(int j = 1; j < Ny - 1; ++j) for(int i = 1; i < Nx - 1; ++i){
+            const size_t q = id(i, j, k);
+            const float s = S[q];
+            if(!(s > 0.f && s < h)) continue;
+            for(int a = 0; a < 3; ++a){
+                const float lo = S[q - st[a]] - s, hi = S[q + st[a]] - s;
+                if(lo > 0.f && hi > 0.f && lo + hi > h){ solid[q] = 1; mark[q] = 3; break; }
+            }
+        }
+    }
 
     // scan every axis-aligned line for short bounded runs
     auto scan_line = [&](int ax, int b, int c){
@@ -1035,17 +1056,18 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
             t = t1;
         }
     };
+
     for(int k = 0; k < Nz; ++k) for(int j = 0; j < Ny; ++j) scan_line(0, j, k);
     for(int k = 0; k < Nz; ++k) for(int i = 0; i < Nx; ++i) scan_line(1, i, k);
     for(int j = 0; j < Ny; ++j) for(int i = 0; i < Nx; ++i) scan_line(2, i, j);
 
     // collect conversions (fluid cells only -- a solid cell marked 2 is already solid)
     std::vector<size_t> conv;
-    int n_gap = 0, n_plate = 0;
+    int n_gap = 0, n_plate = 0, n_slab = 0;
     for(size_t q = 0; q < N; ++q){
-        if(mark[q] && !solid[q]){
+        if(mark[q] && !solid0[q]){
             conv.push_back(q);
-            (mark[q] == 1) ? ++n_gap : ++n_plate;
+            mark[q] == 1 ? ++n_gap : mark[q] == 2 ? ++n_plate : ++n_slab;
         }
     }
     if(conv.empty()){
@@ -1059,8 +1081,8 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
     const int R = (int)std::ceil(tol / h) + 3;   // reported only
 
     std::printf("[SDF3D] regularize: %d cell(s) below resolution converted to solid "
-                "(%d in fluid gaps < %d cells, %d thickening plates < %d cells); S repaired within %d cells.\n",
-                (int)conv.size(), n_gap, GAP, n_plate, PLATE, R);
+                "(%d in fluid gaps < %d cells, %d thickening plates < %d cells, %d slabs with no interior cell); S repaired within %d cells.\n",
+                (int)conv.size(), n_gap, GAP, n_plate, PLATE, n_slab, R);
     if(dump_path){
         if(FILE* f = std::fopen(dump_path, "w")){
             std::fprintf(f, "# cells converted fluid->solid by regularize_sdf  (i j k reason)\n"
@@ -1068,7 +1090,7 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
                          GAP, PLATE);
             for(size_t q : conv)
                 std::fprintf(f, "%d %d %d %s\n", (int)(q % Nx), (int)((q / Nx) % Ny),
-                             (int)(q / ((size_t)Nx * Ny)), mark[q] == 1 ? "gap" : "plate");
+                             (int)(q / ((size_t)Nx * Ny)), mark[q] == 1 ? "gap" : mark[q] == 2 ? "plate" : "slab");
             std::fclose(f);
         }
     }
@@ -1095,10 +1117,61 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
 //                             concave corner bisector is 0.707 and legitimately passes)
 //   S1 min(S(D), S_target) < s + h          probe sees another wall as nearest
 //   S2 S_target < 2h && min(...) < s+1.75h  probe short onto a mostly-BC-written cell
-// Interpolation here is trilinear (tricubic lives in device code); the kernel's own tests
-// stay armed (ADAPTIVE_PROBE) and catch the sub-0.1h disagreements that leaves -- KDEBUG
-// prints how many, which should be ~0.
+// Interpolation is the kernel's own tricubic (sdf_tricubic, a host port), so the mask IS the
+// kernel's decision; ADAPTIVE_PROBE's runtime re-test should then find nothing (KDEBUG counts).
 static constexpr uint8_t OID_RETIRED = 0xFE;
+
+// Host copy of functions3D.cuh's cubic_interp_1d / tricubic_interp (4-point Lagrange, cell-
+// centred, clamped to [1, N-3]). The mask must make EXACTLY the kernel's decision, and the
+// kernel samples S at the probe with THIS. Keep the two in sync.
+inline static float sdf_cubic_1d(float fm1, float f0, float f1, float f2, float s){
+    const float s2 = s * s;
+    const float w_m1 = -s * (s - 2.0f) * (s - 1.0f) / 6.0f;
+    const float w_0  =  (s - 2.0f) * (s - 1.0f) * (s + 1.0f) / 2.0f;
+    const float w_1  =  s * (-s2 + s + 2.0f) / 2.0f;
+    const float w_2  =  s * (s2 - 1.0f) / 6.0f;
+    return w_m1 * fm1 + w_0 * f0 + w_1 * f1 + w_2 * f2;
+}
+inline static float sdf_tricubic(const float* f, int Nx, int Ny, int Nz, float Dx, float Dy, float Dz, float h){
+    const float gx = Dx / h - 0.5f, gy = Dy / h - 0.5f, gz = Dz / h - 0.5f;
+    int i = (int)std::floor(gx), j = (int)std::floor(gy), k = (int)std::floor(gz);
+    i = std::max(1, std::min(i, Nx - 3)); j = std::max(1, std::min(j, Ny - 3)); k = std::max(1, std::min(k, Nz - 3));
+    const float sx = gx - i, sy = gy - j, sz = gz - k;
+    auto at = [&](int a, int b, int c){ return f[(size_t)a + (size_t)Nx * ((size_t)b + (size_t)Ny * c)]; };
+    float hy[4];
+    for(int zz = 0; zz < 4; ++zz){
+        const int kz = k - 1 + zz; float gxrow[4];
+        for(int yy = 0; yy < 4; ++yy){
+            const int jy = j - 1 + yy;
+            gxrow[yy] = sdf_cubic_1d(at(i-1,jy,kz), at(i,jy,kz), at(i+1,jy,kz), at(i+2,jy,kz), sx);
+        }
+        hy[zz] = sdf_cubic_1d(gxrow[0], gxrow[1], gxrow[2], gxrow[3], sy);
+    }
+    return sdf_cubic_1d(hy[0], hy[1], hy[2], hy[3], sz);
+}
+
+// EXPERIMENT (stands in for mark_unresolvable, which marks nothing meanwhile): a cell with
+// no material whose two OPPOSED neighbours (i+-1, j+-1 or k+-1) both carry a material gets
+// one of theirs (the -side one). Single pass on a snapshot, so it does not chain. Any cell,
+// band or not -- the kernel acts on oid alone.
+inline static int fill_oid_between(uint8_t* oid, int Nx, int Ny, int Nz)
+{
+    if(!oid || Nx < 3 || Ny < 3 || Nz < 3) return 0;
+    const size_t N = (size_t)Nx * (size_t)Ny * (size_t)Nz;
+    std::vector<uint8_t> src(oid, oid + N);
+    auto mat = [&](size_t q){ return src[q] != 0 && src[q] != 0xFF && src[q] != 0xFE; };
+    int n = 0;
+    for(int k = 1; k < Nz - 1; ++k) for(int j = 1; j < Ny - 1; ++j) for(int i = 1; i < Nx - 1; ++i){
+        const size_t q = (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
+        if(mat(q)) continue;
+        const size_t nb[3][2] = { {q - 1, q + 1}, {q - (size_t)Nx, q + (size_t)Nx},
+                                  {q - (size_t)Nx * Ny, q + (size_t)Nx * Ny} };
+        for(int a = 0; a < 3; ++a)
+            if(mat(nb[a][0]) && mat(nb[a][1])){ oid[q] = src[nb[a][0]]; ++n; break; }
+    }
+    std::printf("[SDF3D] fill_oid_between: %d cell(s) between two opposed material cells given a material\n", n);
+    return n;
+}
 
 inline static int mark_unresolvable(const float* S, uint8_t* oid, int Nx, int Ny, int Nz,
                                     float h, float tol, const char* dump_path)
@@ -1106,15 +1179,6 @@ inline static int mark_unresolvable(const float* S, uint8_t* oid, int Nx, int Ny
     if(!S || !oid || Nx < 8 || Ny < 8 || Nz < 8) return 0;
     auto id = [&](int i, int j, int k) -> size_t {
         return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
-    };
-    auto trilerp = [&](float x, float y, float z) -> float {
-        float gx = x / h - 0.5f, gy = y / h - 0.5f, gz = z / h - 0.5f;
-        int i = (int)std::floor(gx), j = (int)std::floor(gy), k = (int)std::floor(gz);
-        i = std::max(0, std::min(i, Nx - 2)); j = std::max(0, std::min(j, Ny - 2)); k = std::max(0, std::min(k, Nz - 2));
-        const float fx = gx - i, fy = gy - j, fz = gz - k;
-        auto v = [&](int a, int b, int c){ return S[id(a, b, c)]; };
-        return (1-fx)*((1-fy)*((1-fz)*v(i,j,k)+fz*v(i,j,k+1))+fy*((1-fz)*v(i,j+1,k)+fz*v(i,j+1,k+1)))
-             +    fx *((1-fy)*((1-fz)*v(i+1,j,k)+fz*v(i+1,j,k+1))+fy*((1-fz)*v(i+1,j+1,k)+fz*v(i+1,j+1,k+1)));
     };
 
     FILE* dump = dump_path ? std::fopen(dump_path, "a") : nullptr;
@@ -1140,7 +1204,7 @@ inline static int mark_unresolvable(const float* S, uint8_t* oid, int Nx, int Ny
             int ti = (int)std::floor(Dx/h), tj = (int)std::floor(Dy/h), tk = (int)std::floor(Dz/h);
             ti = std::max(0, std::min(ti, Nx-1)); tj = std::max(0, std::min(tj, Ny-1)); tk = std::max(0, std::min(tk, Nz-1));
             const float sC = S[id(ti,tj,tk)];
-            const float sM = std::min(trilerp(Dx, Dy, Dz), sC);
+            const float sM = std::min(sdf_tricubic(S, Nx, Ny, Nz, Dx, Dy, Dz, h), sC);
             if(sM < s + h)                          { r = "S1"; ++nS1; }
             else if(sC < 2.f*h && sM < s + 1.75f*h) { r = "S2"; ++nS2; }
         }

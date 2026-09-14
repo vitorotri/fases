@@ -400,14 +400,10 @@ int main(int argc, char *argv[]){
 				free(S); scene_free(&sc);
 				return -1;
 			}
-			// Band cells left without a material (S repaired by regularize_sdf, OID keyed to the
-			// original triangles) are holes in the band -> resonators. Fill from neighbours.
-			fill_oid_holes(S, oid, Nx, Ny, Nz, tol);
-			// Mark (oid=0xFE) every band cell the immersed BC's planar-wall assumption cannot
-			// hold on -- the same three tests as the ADAPTIVE_PROBE kernel branch, run once
-			// here on the static field. S is NOT modified (a convert-and-repair version
-			// cascaded across the room). Appends to sdf_fixes.txt; visible in oid.bin.
-			mark_unresolvable(S, oid, Nx, Ny, Nz, h, tol, out_file("sdf_fixes.txt").c_str());
+			// Post-OID passes tried on the BRAS CR4 ceiling and set aside (all in parsing3D.h):
+			//fill_oid_holes(S, oid, Nx, Ny, Nz, tol);      // band cells without a material <- nearest band material
+			//mark_unresolvable(S, oid, Nx, Ny, Nz, h, tol, out_file("sdf_fixes.txt").c_str());   // oid=0xFE mask
+			//fill_oid_between(oid, Nx, Ny, Nz);           // material for cells between two material cells
 
 			// --estimate is a READ-ONLY query (see above): it must not write the cache. It
 			// used to, so the GUI's pre-flight pass re-created S.bin/oid.bin/scene_cache.txt

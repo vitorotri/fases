@@ -461,6 +461,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	// oid[] ranges from 1 to nMat, 255 elsewhere
 		const uint8_t o_ID = oid[Cijk]; // object's material ID
 		int b_ID = bmap[Cijk]; // boundary map for phi and psi (ADE)
+		
 		if (o_ID == 0xFE){
 			// Cell removed by mark_unresolvable (parsing3D.h): a band cell on which the planar-wall
 			// assumption cannot hold -- bad normal, or probe reading another wall's band. Decided
@@ -475,6 +476,7 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
 			p[Cijk] *= (1.0f - chi_r);
 			return;
 		}
+		
 		if (o_ID == 0 || o_ID == 0xFF || b_ID < 0) return;
 		
 		//if (s >= h) return; // no blending test
