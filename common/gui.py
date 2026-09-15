@@ -5926,7 +5926,7 @@ class MainWindow(QMainWindow):
         root_lay.addWidget(gl_wrap, stretch=1)         # fills; panel overlays its left
 
 		# append "\uFE0E" in front of symbol to stay monochrome
-        self._tabs.addTab(self._build_scene_tab(),   "🗂\uFE0E  Scene")
+        self._tabs.addTab(self._build_scene_tab(),   "🞛\uFE0E  Scene")
         self._tabs.addTab(self._build_src_tab(),     "🔊\uFE0E  Sources")
         self._tabs.addTab(self._build_rec_tab(),     "🎙\uFE0E  Receivers")
         self._tabs.addTab(self._build_config_tab(),  "⚙\uFE0E  Setup")
@@ -7917,7 +7917,8 @@ class MainWindow(QMainWindow):
         if not reply.isValid():
             return
         self._sleep_inhibit_fd = reply.value()        # QDBusUnixFileDescriptor; keep it alive
-        bus.connect(svc, path, iface, "PrepareForSleep", self._on_prepare_for_sleep)
+        from PySide6.QtCore import SLOT
+        bus.connect(svc, path, iface, "PrepareForSleep", self, SLOT("_on_prepare_for_sleep(bool)"))
 
     @Slot(bool)
     def _on_prepare_for_sleep(self, going_down):
