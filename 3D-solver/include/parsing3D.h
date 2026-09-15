@@ -1013,9 +1013,9 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
     // CR4 h=0.150, (201,131,25): a 7h-wide niche, every cell in it a band cell of one wall or
     // the other, no interior; the normal velocity between the walls grew 1.01/step. The
     // outermost band cell (s -> tol) probes to tol+2h from its wall and must still see its
-    // OWN wall as nearest (S(D) >= s+h), which needs gap >= 2*tol + 3h = 3*tol. 9 cells at
-    // tol=3h: 1.35 m at h=0.15. Cost on CR4: +42k cells (0.8 % of the grid) over 2*tol.
-    const int GAP   = (int)std::ceil(3.0f * tol / h);
+    // OWN wall as nearest (S(D) >= s+h), which needs gap >= 2*tol + 3h: 9 cells at tol=3h
+    // (1.35 m at h=0.15), 7 at tol=2h. Cost on CR4: +42k cells (0.8 % of the grid) over 2*tol.
+    const int GAP   = (int)std::ceil(2.0f * tol / h) + 3;
     const int PLATE = 3;                                 // solid run <  PLATE cells -> thicken to >= 3
 
     std::vector<uint8_t> solid(N), mark(N, 0);          // mark: 1 = fill (gap), 2 = thicken (plate), 3 = slab
