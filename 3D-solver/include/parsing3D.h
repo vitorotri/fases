@@ -129,7 +129,7 @@ static const int PARSE3D_GHOST = 3;
 // Bump whenever the S/OID pipeline changes (build_sdf, regularize_sdf rules, OID passes).
 // Part of the S.bin/oid.bin cache key in main3D, so a parser change forces a rebuild
 // instead of silently reusing bins made by older code.
-static const int PARSE3D_VERSION = 4;   // 1: gap+plate; 2: + slab rule, no 0xFE mask; 3: gap passes to a fixed point; 4: GAP = 3*tol
+static const int PARSE3D_VERSION = 5;   // 1: gap+plate; 2: + slab rule, no 0xFE mask; 3: gap passes to a fixed point; 4: GAP = 2*tol+3h; 5: deep-solid S capped at -(R+1)h
 
 // Air-only (room, no ghost) cell counts from the padded grid dims.
 inline static void air_dims(int Nx,int Ny,int Nz, int* Nx_air,int* Ny_air,int* Nz_air){
@@ -942,33 +942,29 @@ inline static int build_sdf(Scene3D* sc, float h,
 }
 
 // ============================================================
-// SDF regularization: retire geometry the grid cannot resolve (host, once)
+// SDF regularization: remove geometry the grid cannot resolve (host, once)
 // ============================================================
 // The immersed BC assumes the SDF is LOCALLY ONE PLANE: a cell's normal points at one wall
-// and its probe (s+2h away from the footpoint) reads interior solution. Three KDEBUG traces
-// on the BRAS auditorium ceiling (4.5 ppw) were exactly the places that assumption fails:
-//   * a fluid slot ~3.5 cells tall  -> both walls' 3h bands overlap; the two nearest cells
-//     probe ONTO EACH OTHER and reflect each other's reflection forever (10x / ~35 steps)
-//   * a solid plate 1 cell thick    -> S>0 on both sides within a cell; no interior to anchor
-//   * a kink between surfaces        -> |grad S| = 0.55, the central-difference normal is fiction
-// Patching those in the kernel means guessing per cell per substep. Deciding ONCE here is
-// deterministic, inspectable (see the dump), and leaves the kernel's tuned probe alone.
-//
-// What it does (all axis-aligned, so concave CORNERS are NOT rounded -- a corner cell has
-// solid on one side per axis only, and is left exactly as the triangle SDF placed it):
-//   1. fluid runs bounded by solid on both ends and shorter than 2*tol (band overlap) -> solid
-//   2. solid runs shorter than 3 cells bounded by fluid on both ends -> grow by 1 each side
-//   3. repair S ONLY around converted cells: fluid keeps min(S_exact, dist to new solid) so
-//      the exact triangle SDF -- and every flat wall's sub-cell precision -- is untouched
-//      elsewhere; converted cells get -(dist to nearest fluid). Interface at the cell FACE
-//      (0.5h), matching how the exact SDF places a wall between two cell centres.
-// Diagonal slots (walls at 45 deg) are not caught by axis runs; the kernel's rigid fallback
-// remains as the net for those. ponytail: local brute-force distance repair in a cube of
-// radius R around each converted cell, not an exact EDT -- O(n_conv * (2R+1)^3), fine once.
+// and its probe (s+2h from the footpoint) reads interior solution. Three rules, all on
+// axis-aligned runs (so concave corners are NOT rounded):
+//   slab  : 0 < S < h, strict minimum of S along an axis, rises summing to > h -> a closed
+//           surface thinner than a cell with no cell centre inside; made solid
+//   gap   : fluid run bounded by solid, shorter than GAP = 2*tol + 3h -> filled (the two
+//           bands would overlap with no interior for either wall's probe to read)
+//   plate : solid run shorter than 3 cells -> grown by 1 each side (the +-1 normal stencil
+//           must never reach the far side)
+// Pass 1 applies all three; gap-only passes then repeat until nothing changes, because a
+// conversion can bound a run the previous scan saw as open.
+// S is repaired ONLY around converted cells: fluid keeps min(S_exact, dist to new solid), so
+// the exact triangle SDF -- and every flat wall's sub-cell precision -- is untouched
+// elsewhere; converted cells get -(dist to nearest fluid). Interface at the cell FACE (0.5h).
+// Diagonal slots (walls at 45 deg) are not caught by axis runs.
+// Local brute-force distance repair in a cube of radius R around each converted cell, not an
+// exact EDT -- O(n_conv * (2R+1)^3), fine once.
 // Convert the listed fluid cells to solid and repair S in a shell around them. The exact
 // triangle SDF is kept everywhere else; a fluid neighbour gets min(S, dist to new solid) with
 // the interface at the cell FACE (0.5h), the converted cell gets -(dist to nearest fluid).
-// Shared by regularize_sdf (axis-aligned slabs/plates) and retire_unresolvable (BC tests).
+// Used by regularize_sdf for every rule (gap, plate, slab).
 inline static void sdf_convert_and_repair(float* S, std::vector<uint8_t>& solid,
                                           const std::vector<size_t>& conv,
                                           int Nx, int Ny, int Nz, float h, float tol)
@@ -997,7 +993,8 @@ inline static void sdf_convert_and_repair(float* S, std::vector<uint8_t>& solid,
                 }
             }
         }
-        S[q] = -std::max(d_fluid, 0.5f * h);
+        // no fluid within R (interior of a large filled block): "at least R cells deep", not 1e30
+        S[q] = -std::max(std::min(d_fluid, (float)(R + 1) * h), 0.5f * h);
     }
 }
 
@@ -1009,12 +1006,10 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
     auto id = [&](int i, int j, int k) -> size_t {
         return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
     };
-    // Fluid run < GAP cells -> fill. 2*tol (band overlap) was not enough: KDEBUG trace on BRAS
-    // CR4 h=0.150, (201,131,25): a 7h-wide niche, every cell in it a band cell of one wall or
-    // the other, no interior; the normal velocity between the walls grew 1.01/step. The
-    // outermost band cell (s -> tol) probes to tol+2h from its wall and must still see its
-    // OWN wall as nearest (S(D) >= s+h), which needs gap >= 2*tol + 3h: 9 cells at tol=3h
-    // (1.35 m at h=0.15), 7 at tol=2h. Cost on CR4: +42k cells (0.8 % of the grid) over 2*tol.
+    // Fluid run < GAP cells -> fill. The outermost band cell (s -> tol) probes to tol+2h from
+    // its wall and must still see its OWN wall as nearest (S(D) >= s+h), which needs
+    // gap >= 2*tol + 3h: 9 cells at tol=3h (1.35 m at h=0.15), 7 at tol=2h. A 7h niche
+    // (every cell in one band or the other) grew 1.01/step on BRAS CR4.
     const int GAP   = (int)std::ceil(2.0f * tol / h) + 3;
     const int PLATE = 3;                                 // solid run <  PLATE cells -> thicken to >= 3
 
@@ -1027,7 +1022,7 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
     // the ridge cell has |grad S| ~ 0, and the WENO stencils of the S >= h cells reach across
     // the slab while the BC on each side claims a wall. Signature: S > 0 is a strict minimum
     // along an axis AND the two rises add to ~2h cos(theta) (a groove bottom rises by a
-    // fraction of h, a slab through the cell by > h). BRAS CR4 at h=0.150: 10k such cells.
+    // fraction of h, a slab through the cell by > h).
     // Made solid HERE so the plate rule thickens them to 3 in the same scan.
     {
         const size_t st[3] = { 1, (size_t)Nx, (size_t)Nx * (size_t)Ny };
@@ -1068,13 +1063,10 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
     };
 
     // Every conversion creates NEW solid, which can bound a short fluid run the same scan
-    // did not see. KDEBUG trace on BRAS CR4 at h=0.150, cell (185,90,90): a 3-cell slot
-    // `#bBb###` whose -x wall was a slab thickened in that very pass stayed open; the two
-    // BC-only cells on its walls probed each other (mutual pair) and grew 1.036/step. So
-    // pass 1 applies all rules, then GAP-only passes repeat until nothing changes. Gap-only
-    // because gap+plate together never settle (each fill makes a new thin plate, each
-    // thickening a new short gap: ~5k cells/pass on the seating steps, still growing at
-    // pass 8); gap alone converges geometrically (28k, 12k, 2k, ..., 86 at pass 12).
+    // did not see (a 3-cell slot whose side wall was a slab thickened in that very pass).
+    // So pass 1 applies all rules, then GAP-only passes repeat until nothing changes.
+    // Gap-only because gap+plate together never settle (each fill makes a new thin plate,
+    // each thickening a new short gap); gap alone converges geometrically.
     std::vector<size_t> conv;          // all converted cells, all passes
     std::vector<uint8_t> why;          // 1 gap, 2 plate, 3 slab (parallel to conv, for the dump)
     int n_gap = 0, n_plate = 0, n_slab = 0, passes = 0;
@@ -1094,7 +1086,7 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
         }
         ++passes;
         if(conv.size() == first || passes >= 32) break;
-        // apply + repair (shared helper); marks the new cells solid for the next scan
+        // apply + repair; marks the new cells solid for the next scan
         std::vector<size_t> now(conv.begin() + (std::ptrdiff_t)first, conv.end());
         sdf_convert_and_repair(S, solid, now, Nx, Ny, Nz, h, tol);
     }
@@ -1122,177 +1114,6 @@ inline static int regularize_sdf(float* S, int Nx, int Ny, int Nz, float h, floa
         }
     }
     return (int)conv.size();
-}
-
-// ============================================================
-// Mark band cells the immersed BC cannot handle (host, once, after fill_oid_holes)
-// ============================================================
-// kernel_apply_BC_immersed_sdf (ADAPTIVE_PROBE) decides per cell, per substep, whether its
-// planar-wall assumption holds -- from S, grad S and S at the probe target. ALL STATIC. So the
-// same three tests run here once, and every cell that would take the runtime fallback is
-// MARKED: oid = OID_RETIRED (0xFE). The kernel then contracts it to solid (p,u *= 1-chi)
-// without the tricubic read of S, and oid.bin shows exactly which cells were retired.
-//
-// S is deliberately NOT modified. A first version converted these cells to solid and
-// repaired S around them; on the BRAS CR4 field that CASCADED (133k, 168k, 129k, 122k cells
-// per pass, never converging) because the repaired S is cell-centre-quantised -- a staircase
-// whose kinks fail the normal test, whose neighbours then fail, and so on. The kernel fallback
-// never cascaded for one reason: it leaves the exact SDF alone. So does this.
-//
-// The three tests (identical to the kernel -- keep in sync, see test_bc_probe.py):
-//   N  |grad S| < 0.65        normal is fiction (kink, plate edge, medial axis; a 90-degree
-//                             concave corner bisector is 0.707 and legitimately passes)
-//   S1 min(S(D), S_target) < s + h          probe sees another wall as nearest
-//   S2 S_target < 2h && min(...) < s+1.75h  probe short onto a mostly-BC-written cell
-// Interpolation is the kernel's own tricubic (sdf_tricubic, a host port), so the mask IS the
-// kernel's decision; ADAPTIVE_PROBE's runtime re-test should then find nothing (KDEBUG counts).
-static constexpr uint8_t OID_RETIRED = 0xFE;
-
-// Host copy of functions3D.cuh's cubic_interp_1d / tricubic_interp (4-point Lagrange, cell-
-// centred, clamped to [1, N-3]). The mask must make EXACTLY the kernel's decision, and the
-// kernel samples S at the probe with THIS. Keep the two in sync.
-inline static float sdf_cubic_1d(float fm1, float f0, float f1, float f2, float s){
-    const float s2 = s * s;
-    const float w_m1 = -s * (s - 2.0f) * (s - 1.0f) / 6.0f;
-    const float w_0  =  (s - 2.0f) * (s - 1.0f) * (s + 1.0f) / 2.0f;
-    const float w_1  =  s * (-s2 + s + 2.0f) / 2.0f;
-    const float w_2  =  s * (s2 - 1.0f) / 6.0f;
-    return w_m1 * fm1 + w_0 * f0 + w_1 * f1 + w_2 * f2;
-}
-inline static float sdf_tricubic(const float* f, int Nx, int Ny, int Nz, float Dx, float Dy, float Dz, float h){
-    const float gx = Dx / h - 0.5f, gy = Dy / h - 0.5f, gz = Dz / h - 0.5f;
-    int i = (int)std::floor(gx), j = (int)std::floor(gy), k = (int)std::floor(gz);
-    i = std::max(1, std::min(i, Nx - 3)); j = std::max(1, std::min(j, Ny - 3)); k = std::max(1, std::min(k, Nz - 3));
-    const float sx = gx - i, sy = gy - j, sz = gz - k;
-    auto at = [&](int a, int b, int c){ return f[(size_t)a + (size_t)Nx * ((size_t)b + (size_t)Ny * c)]; };
-    float hy[4];
-    for(int zz = 0; zz < 4; ++zz){
-        const int kz = k - 1 + zz; float gxrow[4];
-        for(int yy = 0; yy < 4; ++yy){
-            const int jy = j - 1 + yy;
-            gxrow[yy] = sdf_cubic_1d(at(i-1,jy,kz), at(i,jy,kz), at(i+1,jy,kz), at(i+2,jy,kz), sx);
-        }
-        hy[zz] = sdf_cubic_1d(gxrow[0], gxrow[1], gxrow[2], gxrow[3], sy);
-    }
-    return sdf_cubic_1d(hy[0], hy[1], hy[2], hy[3], sz);
-}
-
-// EXPERIMENT (stands in for mark_unresolvable, which marks nothing meanwhile): a cell with
-// no material whose two OPPOSED neighbours (i+-1, j+-1 or k+-1) both carry a material gets
-// one of theirs (the -side one). Single pass on a snapshot, so it does not chain. Any cell,
-// band or not -- the kernel acts on oid alone.
-inline static int fill_oid_between(uint8_t* oid, int Nx, int Ny, int Nz)
-{
-    if(!oid || Nx < 3 || Ny < 3 || Nz < 3) return 0;
-    const size_t N = (size_t)Nx * (size_t)Ny * (size_t)Nz;
-    std::vector<uint8_t> src(oid, oid + N);
-    auto mat = [&](size_t q){ return src[q] != 0 && src[q] != 0xFF && src[q] != 0xFE; };
-    int n = 0;
-    for(int k = 1; k < Nz - 1; ++k) for(int j = 1; j < Ny - 1; ++j) for(int i = 1; i < Nx - 1; ++i){
-        const size_t q = (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
-        if(mat(q)) continue;
-        const size_t nb[3][2] = { {q - 1, q + 1}, {q - (size_t)Nx, q + (size_t)Nx},
-                                  {q - (size_t)Nx * Ny, q + (size_t)Nx * Ny} };
-        for(int a = 0; a < 3; ++a)
-            if(mat(nb[a][0]) && mat(nb[a][1])){ oid[q] = src[nb[a][0]]; ++n; break; }
-    }
-    std::printf("[SDF3D] fill_oid_between: %d cell(s) between two opposed material cells given a material\n", n);
-    return n;
-}
-
-inline static int mark_unresolvable(const float* S, uint8_t* oid, int Nx, int Ny, int Nz,
-                                    float h, float tol, const char* dump_path)
-{
-    if(!S || !oid || Nx < 8 || Ny < 8 || Nz < 8) return 0;
-    auto id = [&](int i, int j, int k) -> size_t {
-        return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
-    };
-
-    FILE* dump = dump_path ? std::fopen(dump_path, "a") : nullptr;
-    if(dump) std::fprintf(dump, "# cells retired by mark_unresolvable (oid=0xFE)  (i j k reason)  N bad normal, S1 other wall nearer, S2 short onto BC-heavy\n");
-    int nN = 0, nS1 = 0, nS2 = 0, nband = 0;
-    for(int k = 3; k < Nz - 3; ++k) for(int j = 3; j < Ny - 3; ++j) for(int i = 3; i < Nx - 3; ++i){
-        const size_t q = id(i, j, k);
-        const float s = S[q];
-        if(!(s > 0.f && s < tol)) continue;                              // band cells only
-        if(oid[q] == 0 || oid[q] == 0xFF) continue;                      // no material: kernel skips anyway
-        ++nband;
-        const float gx = (S[id(i+1,j,k)] - S[id(i-1,j,k)]) * (0.5f / h);
-        const float gy = (S[id(i,j+1,k)] - S[id(i,j-1,k)]) * (0.5f / h);
-        const float gz = (S[id(i,j,k+1)] - S[id(i,j,k-1)]) * (0.5f / h);
-        const float gn = std::sqrt(gx*gx + gy*gy + gz*gz);
-        const char* r = nullptr;
-        if(gn < 0.65f){ r = "N"; ++nN; }
-        else {
-            const float nx = -gx/gn, ny = -gy/gn, nz = -gz/gn;
-            const float Cx = (i+0.5f)*h, Cy = (j+0.5f)*h, Cz = (k+0.5f)*h;
-            const float l = s + 2.f*h;
-            const float Dx = Cx + s*nx - l*nx, Dy = Cy + s*ny - l*ny, Dz = Cz + s*nz - l*nz;
-            int ti = (int)std::floor(Dx/h), tj = (int)std::floor(Dy/h), tk = (int)std::floor(Dz/h);
-            ti = std::max(0, std::min(ti, Nx-1)); tj = std::max(0, std::min(tj, Ny-1)); tk = std::max(0, std::min(tk, Nz-1));
-            const float sC = S[id(ti,tj,tk)];
-            const float sM = std::min(sdf_tricubic(S, Nx, Ny, Nz, Dx, Dy, Dz, h), sC);
-            if(sM < s + h)                          { r = "S1"; ++nS1; }
-            else if(sC < 2.f*h && sM < s + 1.75f*h) { r = "S2"; ++nS2; }
-        }
-        if(r){
-            oid[q] = OID_RETIRED;
-            if(dump) std::fprintf(dump, "%d %d %d %s\n", i, j, k, r);
-        }
-    }
-    if(dump) std::fclose(dump);
-    const int total = nN + nS1 + nS2;
-    std::printf("[SDF3D] retire: %d of %d band cell(s) marked oid=0xFE -> the BC treats them as solid "
-                "(bad normal %d, other wall nearer %d, short onto BC-heavy %d). S untouched.\n",
-                total, nband, nN, nS1, nS2);
-    return total;
-}
-
-// ============================================================
-// OID hole filling (host, once, after build_oid_dense)
-// ============================================================
-// A band cell (0 < S < tol) with no material is a HOLE: kernel_apply_BC_immersed_sdf returns
-// on oid==0xFF before writing, the band is not overwritten there, and the static solid
-// interior behind it can ring through the gap (a fixed spot at one frequency, growing).
-// regularize_sdf creates exactly these: it repairs S so a cell sees a newly FILLED gap as
-// its wall (S = 0.5h, one face away), but build_oid_dense assigns material by distance to
-// the ORIGINAL triangles, which are farther than tol -> no material. Audit of the BRAS CR4
-// run found 61 such cells, all at the ceiling (k=87..93), S = 0.37h..0.50h.
-// Fix: give every material-less band cell the material of the nearest band cell that has
-// one (expanding cube, radius 1..R). Deterministic, and it cannot invent a material.
-inline static int fill_oid_holes(const float* S, uint8_t* oid, int Nx, int Ny, int Nz, float tol)
-{
-    if(!S || !oid) return 0;
-    auto id = [&](int i, int j, int k) -> size_t {
-        return (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
-    };
-    auto valid = [&](uint8_t o){ return o != 0 && o != 0xFF; };
-    const int R = 4;
-    int filled = 0, left = 0;
-    // collect first, assign after: a hole must not be filled from another hole's fresh value
-    std::vector<std::pair<size_t, uint8_t>> fixes;
-    for(int k = 0; k < Nz; ++k) for(int j = 0; j < Ny; ++j) for(int i = 0; i < Nx; ++i){
-        const size_t q = id(i, j, k);
-        if(!(S[q] > 0.f && S[q] < tol) || valid(oid[q])) continue;
-        uint8_t best = 0xFF; float bestd = 1e30f;
-        for(int r = 1; r <= R && best == 0xFF; ++r){
-            for(int dk = -r; dk <= r; ++dk) for(int dj = -r; dj <= r; ++dj) for(int di = -r; di <= r; ++di){
-                if(std::max({std::abs(di), std::abs(dj), std::abs(dk)}) != r) continue;   // shell only
-                const int a = i + di, b = j + dj, c = k + dk;
-                if(a < 0 || b < 0 || c < 0 || a >= Nx || b >= Ny || c >= Nz) continue;
-                const size_t t = id(a, b, c);
-                if(!(S[t] > 0.f && S[t] < tol) || !valid(oid[t])) continue;
-                const float d = (float)(di*di + dj*dj + dk*dk);
-                if(d < bestd){ bestd = d; best = oid[t]; }
-            }
-        }
-        if(best != 0xFF) fixes.emplace_back(q, best); else ++left;
-    }
-    for(auto& f : fixes){ oid[f.first] = f.second; ++filled; }
-    if(filled || left)
-        std::printf("[SDF3D] oid holes: %d band cell(s) had no material -> filled from nearest band cell; %d left (no material within %d cells)\n",
-                    filled, left, R);
-    return filled;
 }
 
 // ============================================================

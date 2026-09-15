@@ -17,28 +17,6 @@
 #include "raytrace3D.h"
 #include "functions3D.cuh"
 
-// Name the kernel that faults, without needing compute-sanitizer/cuda-memcheck.
-// Kernel launches are async and their errors are STICKY: an illegal access inside a
-// kernel is not reported at the launch, it surfaces later at the next cudaMemcpy as
-// "Xid 31 MMU Fault ... ENGINE HOST" -- which points at the copy, not the culprit.
-// Build with -DKDEBUG to sync + check after every launch and die at the real one.
-// Off by default: zero cost in normal runs (the RK3 loop already syncs once per step).
-//   make clean && make EXTRA="-DKDEBUG -lineinfo"
-#ifdef KDEBUG
-#define KCHECK(name)                                                              \
-    do {                                                                          \
-        cudaError_t _e = cudaDeviceSynchronize();                                 \
-        if (_e == cudaSuccess) _e = cudaGetLastError();                           \
-        if (_e != cudaSuccess) {                                                  \
-            printf("\n[!] kernel %s failed at step n=%d: %s\n\n",                 \
-                   (name), n, cudaGetErrorString(_e));                            \
-            fflush(stdout);                                                       \
-            exit(EXIT_FAILURE);                                                   \
-        }                                                                         \
-    } while (0)
-#else
-#define KCHECK(name) do {} while (0)
-#endif
 
 unsigned long long available_ram_bytes() {
     long pages = sysconf(_SC_AVPHYS_PAGES);
@@ -400,10 +378,6 @@ int main(int argc, char *argv[]){
 				free(S); scene_free(&sc);
 				return -1;
 			}
-			// Post-OID passes tried on the BRAS CR4 ceiling and set aside (all in parsing3D.h):
-			//fill_oid_holes(S, oid, Nx, Ny, Nz, tol);      // band cells without a material <- nearest band material
-			//mark_unresolvable(S, oid, Nx, Ny, Nz, h, tol, out_file("sdf_fixes.txt").c_str());   // oid=0xFE mask
-			//fill_oid_between(oid, Nx, Ny, Nz);           // material for cells between two material cells
 
 			// --estimate is a READ-ONLY query (see above): it must not write the cache. It
 			// used to, so the GUI's pre-flight pass re-created S.bin/oid.bin/scene_cache.txt
@@ -1308,35 +1282,26 @@ int main(int argc, char *argv[]){
 		// (0)
 		
 		kernel_WENO_stage0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
-		KCHECK("WENO_stage0");
 			
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n, src_opt, d_src_freq);
-		KCHECK("inject_src_SSP");
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0, 1.0, 1.0, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
-		KCHECK("apply_BC_immersed_sdf");
 			
 		// (1)
 			
 		kernel_WENO_stage1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
-		KCHECK("WENO_stage1");
 
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2, src_opt, d_src_freq);
-		KCHECK("inject_src_SSP");
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0, 1.0, 4.0, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
-		KCHECK("apply_BC_immersed_sdf");
 			
 		// (2)
 		
 		kernel_WENO_stage2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
-		KCHECK("WENO_stage2");
 			
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1, src_opt, d_src_freq);
-		KCHECK("inject_src_SSP");
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0, 2.0, 3.0, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
-		KCHECK("apply_BC_immersed_sdf");
 
 		// sync
 		cudaDeviceSynchronize();
@@ -1358,57 +1323,6 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
-
-#ifdef KDEBUG
-		// Blow-up tracer: p0 is on the host anyway, so find the cell with the largest |p|
-		// and report it with everything the BC kernel would have known about it. Prints
-		// when |p|max first exceeds the trip level and then every time it grows 10x, so a
-		// run that diverges yields ~5 lines naming the FIRST bad cell -- not a guess.
-		{
-			static float trip = 1e3f;                 // ~ way above any physical pressure here
-			size_t am = 0; float pm = 0.f;
-			for (size_t q = 0; q < N; ++q){ float a = fabsf(p0[q]); if (a > pm){ pm = a; am = q; } }
-			if (pm > trip || (n % 200 == 0 && n > 0)){
-#ifdef ADAPTIVE_PROBE
-				{	// fallback hits accumulated since the last report (3 substeps per step)
-					unsigned int hits = 0;
-					cudaMemcpyFromSymbol(&hits, g_bc_fallback_hits, sizeof hits);
-					const unsigned int zero = 0; cudaMemcpyToSymbol(g_bc_fallback_hits, &zero, sizeof zero);
-					printf("[fallback] %u band-cell fallback hits since last report (%.1f per substep)\n",
-					       hits, hits / (3.0 * 200.0));
-				}
-#endif
-				int ii = (int)(am % Nx), jj = (int)((am / Nx) % Ny), kk = (int)(am / ((size_t)Nx*Ny));
-				auto SS = [&](int a,int b,int c){ return S[(size_t)a + (size_t)Nx*((size_t)b + (size_t)Ny*c)]; };
-				float gx=(SS(ii+1,jj,kk)-SS(ii-1,jj,kk))*(0.5f/h), gy=(SS(ii,jj+1,kk)-SS(ii,jj-1,kk))*(0.5f/h),
-				      gz=(SS(ii,jj,kk+1)-SS(ii,jj,kk-1))*(0.5f/h);
-				float gn = sqrtf(gx*gx+gy*gy+gz*gz);
-				printf("\n[trace] n=%d  |p|max=%.3e at (%d,%d,%d) = (%.3f,%.3f,%.3f) m\n"
-				       "        S=%.3f (%.2f h)  oid=%d  |gradS|=%.3f  band:%s  weno:%s\n"
-				       "        S along x: %.2f %.2f [%.2f] %.2f %.2f   z: %.2f %.2f [%.2f] %.2f %.2f  (in h)\n",
-				       n, pm, ii, jj, kk, (ii+0.5f)*h, (jj+0.5f)*h, (kk+0.5f)*h,
-				       S[am], S[am]/h, (int)oid[am], gn,
-				       (oid[am] != 0 && oid[am] != 0xFF) ? "yes" : "no",
-				       (S[am] < h) ? "SKIPPED" : "evolved",
-				       SS(ii-2,jj,kk)/h, SS(ii-1,jj,kk)/h, SS(ii,jj,kk)/h, SS(ii+1,jj,kk)/h, SS(ii+2,jj,kk)/h,
-				       SS(ii,jj,kk-2)/h, SS(ii,jj,kk-1)/h, SS(ii,jj,kk)/h, SS(ii,jj,kk+1)/h, SS(ii,jj,kk+2)/h);
-				{	// BC decomposition at the cell picked LAST report (values from its latest substep).
-					// Growth in p_pde -> the PDE stencil; in pD/stencil max -> the probe read (tricubic
-					// overshoot if pD > stencil max); in |w_in| >> |w_out| -> the ADE memory.
-					static int dbg_cell = -1; float d[8] = {0};
-					if (dbg_cell >= 0){
-						cudaMemcpyFromSymbol(d, g_dbg, sizeof d);
-						printf("        BC at last cell: p_pde=%.3e chi=%.2f | pD=%.3e un_D=%.3e stencil|p|max=%.3e | w_out=%.3e w_in=%.3e -> p_b=%.3e\n",
-						       d[0], d[1], d[2], d[3], d[7], d[4], d[5], d[6]);
-					}
-					dbg_cell = (int)am; cudaMemcpyToSymbol(g_dbg_cell, &dbg_cell, sizeof dbg_cell);
-				}
-				fflush(stdout);
-				if (pm > trip) trip *= 10.f;
-				if (pm > 1e12f){ printf("[trace] diverged -- stopping.\n"); return -1; }
-			}
-		}
-#endif
 
 		// write animation slices
 		if (n % anim_step == 0){

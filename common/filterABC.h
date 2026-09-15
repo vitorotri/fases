@@ -97,7 +97,7 @@ int build_boundary_map(uint8_t *oid, int N, int *bmap){
     // bmap has size N, as well as oid
     // loop around every cell
     for (int c = 0; c < N; c++) {
-        if (oid[c] != 0xFF && oid[c] != 0 && oid[c] != 0xFE){   // 0xFE: retired by mark_unresolvable, no ADE state
+        if (oid[c] != 0xFF && oid[c] != 0){
             bmap[c] = nB++;
         } else {
             bmap[c] = -1;
