@@ -6643,37 +6643,42 @@ class MainWindow(QMainWindow):
 
     def _render_overlay(self, recs):
         """Overlay IR + frequency response of several receivers from the saved IR_broad_*.npy (no
-        re-run). Per receiver: sum the broadband IR over its sources -> one curve, GUI-themed."""
-        import glob
+        re-run). One column per source (rows: IR, spectrum), one colour per receiver, GUI-themed."""
+        import glob, re
         import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         out = os.path.join(self._proj_root, "output")
         fs = 44100                                     # allIRs saves broadband IRs at this rate
         FG, BG = PAL['text'], PAL['bg']
         names = self._rec_tbl.get_names()              # legend follows the table's receiver names
-        fig, (ax_t, ax_f) = plt.subplots(2, 1, figsize=(9, 7)); drew = False
-        for i, rec in enumerate(recs):
-            files = sorted(glob.glob(os.path.join(out, f"IR_broad_{rec}_*.npy")))
-            if not files:
-                continue
-            arrs = [np.load(f) for f in files]
-            n = max(a.size for a in arrs); ir = np.zeros(n)
-            for a in arrs:
-                ir[:a.size] += a                       # total response at the receiver (all sources)
-            col = _plot_color(i)
-            name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
-            ax_t.plot(np.arange(n) / fs, ir, lw=0.7, color=col, label=name)
-            H = np.abs(np.fft.rfft(ir)); fr = np.fft.rfftfreq(n, 1 / fs)
-            ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] + 1e-12), lw=0.8, color=col, label=name)
-            drew = True
-        if not drew:
-            plt.close(fig); self._results.show_png(None); return
-        ax_t.set_title("Receiver comparison — impulse response")
-        ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude")
-        ax_f.set_title("Receiver comparison — frequency response")
-        ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("Magnitude [dB]"); ax_f.set_xlim(20, fs / 2)
+        irs = {}                                       # (rec, src) -> IR
+        for rec in recs:
+            for f in glob.glob(os.path.join(out, f"IR_broad_{rec}_*.npy")):
+                m = re.search(r"IR_broad_(\d+)_(\d+)\.npy$", f)
+                if m:
+                    irs[(rec, int(m.group(2)))] = np.load(f)
+        if not irs:
+            self._results.show_png(None); return
+        srcs = sorted({src for _, src in irs})
+        fig, axes = plt.subplots(2, len(srcs), figsize=(6 + 3 * len(srcs), 7), squeeze=False)
+        for c, src in enumerate(srcs):
+            ax_t, ax_f = axes[0, c], axes[1, c]
+            for i, rec in enumerate(recs):
+                ir = irs.get((rec, src))
+                if ir is None:
+                    continue
+                col = _plot_color(i)
+                name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
+                ax_t.plot(np.arange(ir.size) / fs, ir, lw=0.7, color=col, label=name)
+                H = np.abs(np.fft.rfft(ir)); fr = np.fft.rfftfreq(ir.size, 1 / fs)
+                ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] + 1e-12), lw=0.8, color=col, label=name)
+            tag = f"source {src} — " if len(srcs) > 1 else "Receiver comparison — "
+            ax_t.set_title(f"{tag}impulse response")
+            ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude")
+            ax_f.set_title(f"{tag}frequency response")
+            ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("Magnitude [dB]"); ax_f.set_xlim(20, fs / 2)
         fig.patch.set_facecolor(BG)
-        for ax in (ax_t, ax_f):                        # GUI dark theme: bg + white axes/text/grid
+        for ax in axes.ravel():                        # GUI dark theme: bg + white axes/text/grid
             ax.set_facecolor(BG)
             for sp in ax.spines.values(): sp.set_color(FG)
             ax.tick_params(colors=FG, which='both')
@@ -6706,53 +6711,62 @@ class MainWindow(QMainWindow):
         names = self._rec_tbl.get_names()
         FG, BG = PAL['text'], PAL['bg']
         units = {"T20": "s", "T30": "s", "EDT": "s", "C50": "dB", "C80": "dB", "D50": ""}
-        fig, ax = plt.subplots(figsize=(8, 5))
-        # grouped BARS (not lines): the values are octave-band only, no 1/3-octave points between,
-        # so a connecting line would imply values we don't have.
-        drawn = [(rec, data.get(str(rec))) for rec in recs
-                 if data.get(str(rec)) and param in data.get(str(rec))]
-        if not drawn:
+        # One panel per source when acouparams split them ("sources": {src: {rec: params}}),
+        # else the summed entry. Lines, not bars: one connected line per receiver (octave centres
+        # are the x ticks), the selected-receiver average dashed.
+        srcs = sorted(data.get("sources", {}), key=int)
+        panels = [(f"source {sv}", data["sources"][sv]) for sv in srcs] if len(srcs) > 1 else [(None, data)]
+        fig, axes = plt.subplots(len(panels), 1, figsize=(8, 4.2 * len(panels)), sharex=True, squeeze=False)
+        export_cols, export_rows, ref_bands, any_drawn = [], None, None, False
+        for ax, (ptitle, pdata) in zip(axes[:, 0], panels):
+            drawn = [(rec, pdata.get(str(rec))) for rec in recs
+                     if pdata.get(str(rec)) and param in pdata.get(str(rec))]
+            ax.set_facecolor(BG)
+            for sp in ax.spines.values(): sp.set_color(FG)
+            ax.tick_params(colors=FG, which='both')
+            ax.yaxis.label.set_color(FG); ax.title.set_color(FG)
+            if not drawn:
+                ax.set_title(f"{ptitle + ' — ' if ptitle else ''}no {param} values for the selected receiver(s)")
+                continue
+            any_drawn = True
+            ref_bands = drawn[0][1]["bands"]
+            x = np.arange(len(ref_bands))
+            mat = np.array([[v if v is not None else np.nan for v in d[param]] for _, d in drawn])
+            for i, (rec, d) in enumerate(drawn):
+                col = _plot_color(recs.index(rec))
+                name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
+                ax.plot(x, mat[i], color=col, lw=2.2, label=name)
+            # spatial average of the SELECTED receivers: ISO energy-mean for the dB params (C50/C80),
+            # plain arithmetic mean for times (T20/T30/EDT) and the D50 ratio. NaN bands are ignored.
+            with np.errstate(invalid='ignore', divide='ignore'):
+                if param in ("C50", "C80"):
+                    avg = 10 * np.log10(np.nanmean(10 ** (mat / 10.0), axis=0))
+                else:
+                    avg = np.nanmean(mat, axis=0)
+            ax.plot(x, avg, color="#d7dde3", lw=2.0, ls="--", label="avg (selected)")
+            ax.set_xticks(x); ax.set_xticklabels([str(bnd) for bnd in ref_bands])
+            ax.set_ylabel(f"{param} [{units[param]}]" if units[param] else param)
+            ax.set_title(f"{ptitle + ' — ' if ptitle else 'Receiver comparison — '}{param} per octave band")
+            ax.grid(True, color=PAL['border'], lw=0.5, alpha=0.6)
+            leg = ax.legend(fontsize=8)
+            leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
+            for t in leg.get_texts(): t.set_color(FG)
+            # table behind the plot for Ctrl+C / RMB export (rows = bands, cols = receivers + avg, per source)
+            def _cell(v): return None if v is None or not np.isfinite(v) else float(v)
+            tag = f" ({ptitle})" if ptitle else ""
+            export_cols += [(names[r] if r < len(names) and names[r] else f"receiver {r}") + tag
+                            for r, _ in drawn] + ["avg (selected)" + tag]
+            cols = [[_cell(d[param][j]) for _, d in drawn] + [_cell(avg[j])] for j in range(len(ref_bands))]
+            export_rows = cols if export_rows is None else [r0 + r1 for r0, r1 in zip(export_rows, cols)]
+        if not any_drawn:
             plt.close(fig)
             self._results._label.setPixmap(QPixmap())
             self._results._label.setText(f"No {param} values for the selected receiver(s)."); return
-        ref_bands = drawn[0][1]["bands"]
-        x = np.arange(len(ref_bands))
-        ng = len(drawn) + 1                             # receiver bars + one average bar
-        w = 0.8 / ng
-        mat = np.array([[v if v is not None else np.nan for v in d[param]] for _, d in drawn])
-        for i, (rec, d) in enumerate(drawn):
-            col = _plot_color(recs.index(rec))
-            name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
-            ax.bar(x + (i - (ng - 1) / 2) * w, mat[i], w, color=col, label=name)
-        # spatial average of the SELECTED receivers: ISO energy-mean for the dB params (C50/C80),
-        # plain arithmetic mean for times (T20/T30/EDT) and the D50 ratio. NaN bands are ignored.
-        with np.errstate(invalid='ignore', divide='ignore'):
-            if param in ("C50", "C80"):
-                avg = 10 * np.log10(np.nanmean(10 ** (mat / 10.0), axis=0))
-            else:
-                avg = np.nanmean(mat, axis=0)
-        ax.bar(x + (len(drawn) - (ng - 1) / 2) * w, avg, w, color="#d7dde3",
-               edgecolor=BG, label="avg (selected)")
-        # stash the table behind the plot for Ctrl+C / RMB export (rows = bands, cols = receivers + avg)
-        def _cell(v): return None if v is None or not np.isfinite(v) else float(v)
-        rec_names = [names[r] if r < len(names) and names[r] else f"receiver {r}" for r, _ in drawn]
         self._results.set_export({
-            "title": param, "rowheader": "band [Hz]",
-            "columns": rec_names + ["avg (selected)"],
-            "rows": [(str(b), [_cell(d[param][j]) for _, d in drawn] + [_cell(avg[j])])
-                     for j, b in enumerate(ref_bands)]})
-        ax.set_xticks(x); ax.set_xticklabels([str(b) for b in ref_bands])
-        ax.set_xlabel("Octave band [Hz]")
-        ax.set_ylabel(f"{param} [{units[param]}]" if units[param] else param)
-        ax.set_title(f"Receiver comparison — {param} per octave band")
-        fig.patch.set_facecolor(BG); ax.set_facecolor(BG)
-        for sp in ax.spines.values(): sp.set_color(FG)
-        ax.tick_params(colors=FG, which='both')
-        ax.xaxis.label.set_color(FG); ax.yaxis.label.set_color(FG); ax.title.set_color(FG)
-        ax.grid(False)                                  # no grid behind the bars
-        leg = ax.legend(fontsize=8)
-        leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
-        for t in leg.get_texts(): t.set_color(FG)
+            "title": param, "rowheader": "band [Hz]", "columns": export_cols,
+            "rows": [(str(bnd), export_rows[j]) for j, bnd in enumerate(ref_bands)]})
+        axes[-1, 0].set_xlabel("Octave band [Hz]"); axes[-1, 0].xaxis.label.set_color(FG)
+        fig.patch.set_facecolor(BG)
         fig.tight_layout()
         p = os.path.join(out, "IR_params.png")
         fig.savefig(p, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
@@ -6825,7 +6839,8 @@ class MainWindow(QMainWindow):
         fig, axes = plt.subplots(2, 3, figsize=(10, 6))
         for ax, p in zip(axes.ravel(), params):
             ys = [v if v is not None else np.nan for v in table[p]]
-            ax.bar(range(len(series)), ys, color=[_plot_color(i) for i in range(len(series))])
+            ax.bar(range(len(series)), ys, width=0.35, color=[_plot_color(i) for i in range(len(series))])
+            ax.set_xlim(-0.7, len(series) - 0.3)       # thin bars, not stretched to fill the panel
             lbl, unit = self._SUMMARY[p][1], self._SUMMARY[p][2]
             ax.set_title(lbl, fontsize=10, color=FG)
             ax.set_ylabel(unit, color=FG)

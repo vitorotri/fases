@@ -18,22 +18,26 @@ OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 
 
 def receiver_irs():
-    """{rec: broadband IR summed over its sources} from IR_broad_<rec>_<src>.npy in cwd.
-    ponytail: summed sources = the combined field, matching the GUI IR overlay; split per (rec,src)
-    later if you need source-separated parameters."""
-    groups = {}
+    """({rec: broadband IR summed over its sources}, {src: {rec: IR}}) from IR_broad_<rec>_<src>.npy
+    in cwd. The summed IR is the combined field (matches the GUI IR overlay, Summary ratings and
+    older params.json); the per-source split is what the GUI plots one subplot per source from."""
+    pairs = {}
     for f in glob.glob("IR_broad_*.npy"):
         m = re.match(r"IR_broad_(\d+)_(\d+)\.npy$", f)
         if m:
-            groups.setdefault(int(m.group(1)), []).append(np.load(f))
-    out = {}
-    for rec, arrs in sorted(groups.items()):
-        n = max(a.size for a in arrs)
-        ir = np.zeros(n, float)
-        for a in arrs:
-            ir[:a.size] += a
-        out[rec] = ir
-    return out
+            pairs[(int(m.group(1)), int(m.group(2)))] = np.load(f)
+    summed, by_src = {}, {}
+    for (rec, src), a in sorted(pairs.items()):
+        by_src.setdefault(src, {})[rec] = a
+        ir = summed.get(rec)
+        if ir is None or ir.size < a.size:
+            new = np.zeros(a.size, float)
+            if ir is not None:
+                new[:ir.size] = ir
+            ir = new
+        ir[:a.size] += a
+        summed[rec] = ir
+    return summed, by_src
 
 
 def _lst(a):
@@ -94,7 +98,7 @@ def params_for(ir):
 
 
 def main():
-    recs = receiver_irs()
+    recs, by_src = receiver_irs()
     if not recs:
         print("[acouparams] no IR_broad_*.npy found in", os.getcwd()); return
     out = {}
@@ -104,9 +108,19 @@ def main():
         except Exception as ex:
             import traceback; traceback.print_exc()
             print(f"[acouparams] rec{rec} FAILED: {ex} -> skipped")
+    if len(by_src) > 1:                                   # one source: the summed entry IS it
+        out["sources"] = {}
+        for src, irs in sorted(by_src.items()):
+            out["sources"][str(src)] = {}
+            for rec, ir in irs.items():
+                try:
+                    out["sources"][str(src)][str(rec)] = params_for(ir)
+                except Exception as ex:
+                    print(f"[acouparams] rec{rec} src{src} FAILED: {ex} -> skipped")
     with open("params.json", "w") as f:
         json.dump(out, f, indent=1)
-    print(f"[acouparams] wrote params.json for {len(out)} receiver(s): {sorted(out)}")
+    print(f"[acouparams] wrote params.json for {len(recs)} receiver(s): {sorted(recs)}"
+          + (f", {len(by_src)} sources split" if len(by_src) > 1 else ""))
 
 
 if __name__ == "__main__":

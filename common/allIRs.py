@@ -271,20 +271,21 @@ def main():
         f = np.fft.rfftfreq(x.size, 1 / fs)
         return f[1:], 20 * np.log10(np.abs(np.fft.rfft(x))[1:] + 1e-12)
 
-    # one figure per receiver: IR (top) + frequency response (bottom), a line per source
+    # one figure per receiver: a column per source, IR (top) + frequency response (bottom)
     for rec, items in sorted(by_rec.items()):
       try:
-        fig, (ax_t, ax_f) = plt.subplots(2, 1, figsize=(9, 7))
-        for src, ir, _, _ in sorted(items):
-            ax_t.plot(np.arange(ir.size) / fs, ir, lw=0.7, label=f"source {src}")
+        items = sorted(items)
+        fig, axes = plt.subplots(2, len(items), figsize=(6 + 3 * len(items), 7), squeeze=False)
+        for c, (src, ir, _, _) in enumerate(items):
+            ax_t, ax_f = axes[0, c], axes[1, c]
+            ax_t.plot(np.arange(ir.size) / fs, ir, lw=0.7)
             f, mag = _fr(ir)
-            ax_f.semilogx(f, mag, lw=0.7, label=f"source {src}")
-        ax_t.set_title(f"Receiver {rec} — Impulse Response")
-        ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude")
-        ax_t.grid(True); ax_t.legend()
-        ax_f.set_title(f"Receiver {rec} — Frequency Response")
-        ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("Magnitude [dB]")
-        ax_f.set_xlim(20, fs / 2); ax_f.grid(True, which="both"); ax_f.legend()
+            ax_f.semilogx(f, mag, lw=0.7)
+            ax_t.set_title(f"Receiver {rec}, source {src} — Impulse Response")
+            ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude"); ax_t.grid(True)
+            ax_f.set_title(f"Receiver {rec}, source {src} — Frequency Response")
+            ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("Magnitude [dB]")
+            ax_f.set_xlim(20, fs / 2); ax_f.grid(True, which="both")
         fig.tight_layout()
         fig.savefig(f"IR_rec{rec}.png", dpi=120)
         plt.close(fig)
