@@ -31,7 +31,7 @@ import subprocess
 
 import numpy as np
 
-from PySide6.QtCore    import (Qt, QThread, Signal, QPoint, QPointF, QEvent,
+from PySide6.QtCore    import (Qt, QThread, Signal, Slot, QPoint, QPointF, QEvent,
                               QSettings, QTimer, QSize, QVariantAnimation, QUrl)
 from PySide6.QtGui     import (QFont, QColor, QPalette, QSurfaceFormat,
                               QPainter, QCursor, QKeySequence, QPolygon,
@@ -5715,6 +5715,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("F.A.S.E.S - Faithful Acoustic Solver for Extended Spaces")
         self.resize(1440, 860)
+        self._install_suspend_hook()
         self._proj_root  = None
         self._obj_path   = None
         self._groups     = []
@@ -7895,10 +7896,42 @@ class MainWindow(QMainWindow):
         self._mat_panel.set_project(root)   # redirect .mat writes to the new project (keeps the table)
         self._save_project()                # config, src, rec, mat, manifest -> new root (clears dirty)
 
+    # ── suspend hook ────────────────────────────────────────────────────────────────
+    # A CUDA context does not survive suspend on this driver (470): a solver left running
+    # comes back as CUDA error 999 + an unkillable D-state process until reboot. So hold a
+    # logind "delay" inhibitor and, on PrepareForSleep(true), save, stop every child and
+    # exit -- exiting closes the inhibitor fd, which is what lets systemd proceed (it waits
+    # at most InhibitDelayMaxSec, 5 s by default; stop() escalates to SIGKILL within that).
+    def _install_suspend_hook(self):
+        try:
+            from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusReply
+        except ImportError:
+            return                                     # non-Linux / QtDBus not built
+        bus = QDBusConnection.systemBus()
+        if not bus.isConnected():
+            return
+        svc, path, iface = "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager"
+        mgr = QDBusInterface(svc, path, iface, bus)
+        reply = QDBusReply(mgr.call("Inhibit", "sleep", "FASES GUI",
+                                    "stop the CUDA solver before suspend", "delay"))
+        if not reply.isValid():
+            return
+        self._sleep_inhibit_fd = reply.value()        # QDBusUnixFileDescriptor; keep it alive
+        bus.connect(svc, path, iface, "PrepareForSleep", self._on_prepare_for_sleep)
+
+    @Slot(bool)
+    def _on_prepare_for_sleep(self, going_down):
+        if not going_down:
+            return
+        self._suspending = True                        # closeEvent: save without asking
+        self.close()
+
     def closeEvent(self, e):
         # Offer to save before quitting only if there are unsaved edits (_dirty). A save clears it,
-        # so clicking Save then closing won't nag.
-        if self._proj_root and getattr(self, "_dirty", False):
+        # so clicking Save then closing won't nag. On suspend there is nobody to ask: just save.
+        if self._proj_root and getattr(self, "_dirty", False) and getattr(self, "_suspending", False):
+            self._save_project()
+        elif self._proj_root and getattr(self, "_dirty", False):
             B = QMessageBox.StandardButton
             ans = QMessageBox.question(self, "Save project?",
                     "Save the project before closing?", B.Save | B.Discard | B.Cancel, B.Save)
