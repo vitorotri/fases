@@ -5403,9 +5403,19 @@ class SolverThread(QThread):
     progress = Signal(int)          # parsed NN% from the solver's progress bar
     done     = Signal(int)          # NOT 'finished' (that shadows QThread's own)
 
-    def __init__(self, cmd, cwd):
+    def __init__(self, cmd, cwd, stdin=False):
         super().__init__(); self._cmd = cmd; self._cwd = cwd
         self._proc = None
+        self._stdin = stdin                 # pipe stdin: the live auralization reads pose lines from it
+
+    def send(self, line):
+        """Write one line to the child's stdin (no-op unless started with stdin=True and alive)."""
+        p = self._proc
+        if self._stdin and p is not None and p.poll() is None and p.stdin:
+            try:
+                p.stdin.write(line.rstrip("\n") + "\n"); p.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
 
     def run(self):
         import re, shutil
@@ -5418,6 +5428,7 @@ class SolverThread(QThread):
             cmd = ["stdbuf", "-oL", "-eL"] + list(cmd)
         try:
             self._proc = subprocess.Popen(cmd, cwd=self._cwd,
+                stdin=subprocess.PIPE if self._stdin else None,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace", bufsize=1,
                 # own process group, so stop() can signal the solver AND anything it spawns
@@ -7235,6 +7246,11 @@ class MainWindow(QMainWindow):
         self._aur_sofa = QLineEdit(QSettings("phases", "gui").value("last_sofa", "") or "")
         bs = QPushButton("SOFA…"); bs.setFixedHeight(24); bs.clicked.connect(self._pick_sofa)
         sr.addWidget(self._aur_sofa, 1); sr.addWidget(bs); v.addLayout(sr)
+        # Alternative renderer: first-order ambisonics, no HRTF. Head pose is applied LIVE (dials or
+        # FPV mouselook stream to ambisonic.py --live); nothing is re-rendered or written per pose.
+        self._aur_foa = QCheckBox("Ambisonic live (no HRTF): head pose applied while playing")
+        self._aur_foa.setChecked(bool(QSettings("phases", "gui").value("aur_foa", False, type=bool)))
+        self._aur_foa.toggled.connect(self._on_foa_toggled); v.addWidget(self._aur_foa)
 
         ar = QHBoxLayout(); ar.addWidget(QLabel("Audio"))
         self._aur_dry = QLineEdit(QSettings("phases", "gui").value("last_dry", "") or "")
@@ -7325,6 +7341,7 @@ class MainWindow(QMainWindow):
             self._rec_tbl.set_pose(row, pose); self._mark_dirty()
         if self._gl._fpv is not None:
             self._gl.set_fpv_pose(*pose)
+        self._foa_send_pose()
 
     def _on_fpv_pose(self, az, el, roll):
         """FPV mouselook changed the head aim -> reflect it in the dials + store on the receiver."""
@@ -7333,6 +7350,7 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self._rec_tbl.set_pose(row, [self._aur_dials[k].value() for k in ("az", "el", "roll")])
             self._mark_dirty()
+        self._foa_send_pose()
 
     def _restore_rendered_pose(self):
         """Snap dials (and the FPV camera) back to the pose the current wav was rendered with."""
@@ -7395,6 +7413,56 @@ class MainWindow(QMainWindow):
         if f:
             line_edit.setText(f)
 
+    def _on_foa_toggled(self, on):
+        QSettings("phases", "gui").setValue("aur_foa", bool(on))
+        self._aur_sofa.setEnabled(not on)
+        self._aur_conv.setText("◉	Live" if on else "∗	Convolve")
+        if not on:
+            self._stop_foa_live()
+
+    def _foa_alive(self):
+        t = getattr(self, "_foa_thread", None)
+        return t is not None and t.isRunning()
+
+    def _stop_foa_live(self):
+        if self._foa_alive():
+            self._foa_thread.send("q"); self._foa_thread.wait(1500)
+            if self._foa_thread.isRunning():
+                self._foa_thread.stop()
+        self._aur_conv.setText("◉	Live" if self._aur_foa.isChecked() else "∗	Convolve")
+
+    def _foa_send_pose(self):
+        """Dials/FPV moved: stream the pose to the live renderer (cheap: one short line)."""
+        if self._foa_alive():
+            self._foa_thread.send(" ".join(str(self._aur_dials[k].value()) for k in ("az", "el", "roll")))
+
+    def _run_foa_live(self, rec, dry, out):
+        """Toggle: start ambisonic.py --live for `rec` (plays until stopped), or stop it."""
+        if self._foa_alive():
+            self._stop_foa_live(); self._sb.showMessage("Live auralization stopped."); return
+        script = self._find_common_script("ambisonic.py")
+        if script is None:
+            self._sb.showMessage("ambisonic.py not found next to gui.py."); return
+        pose = [str(self._aur_dials[k].value()) for k in ("az", "el", "roll")]
+        cmd = [sys.executable, script, "--rec", str(rec), "--dry", dry, "--live", "--pose", *pose]
+        dm = {str(i): p for i, p in getattr(self, "_src_dry", {}).items() if p and os.path.isfile(p)}
+        if dm:
+            import json
+            mp = os.path.join(out, "drymap.json")
+            with open(mp, "w") as f:
+                json.dump(dm, f)
+            cmd += ["--drymap", mp]
+        if self._player is not None:
+            self._player.stop()
+        self._foa_thread = SolverThread(cmd, out, stdin=True)
+        self._foa_thread.output.connect(self._log.append)
+        self._foa_thread.done.connect(lambda rc: (self._aur_conv.setText("◉	Live"),
+                                                  self._sb.showMessage("Live auralization ended."
+                                                                       if rc == 0 else f"ambisonic.py failed (rc={rc}) — see log.")))
+        self._foa_thread.start()
+        self._aur_conv.setText("■	Stop")
+        self._sb.showMessage(f"Live auralization of receiver {rec} — move the dials or look around inside it.")
+
     def _run_convolve(self):
         """Render the selected receiver to a binaural wav via binauralize.py (in output/)."""
         if not self._proj_root:
@@ -7403,10 +7471,12 @@ class MainWindow(QMainWindow):
         if rec < 0:
             self._sb.showMessage("Select a receiver row first."); return
         sofa, dry = self._aur_sofa.text().strip(), self._aur_dry.text().strip()
-        if not (sofa and os.path.isfile(sofa)):
-            self._sb.showMessage("Pick a valid .sofa file."); return
         if not (dry and os.path.isfile(dry)):
             self._sb.showMessage("Pick an anechoic audio file."); return
+        if self._aur_foa.isChecked():
+            self._run_foa_live(rec, dry, os.path.join(self._proj_root, "output")); return
+        if not (sofa and os.path.isfile(sofa)):
+            self._sb.showMessage("Pick a valid .sofa file."); return
         script = self._find_common_script("binauralize.py")
         if script is None:
             self._sb.showMessage("binauralize.py not found next to gui.py."); return
@@ -7965,7 +8035,7 @@ class MainWindow(QMainWindow):
             self._player.stop(); self._player.setSource(QUrl()); self._player.setAudioOutput(None)
             QApplication.processEvents()
         for tn in ("_solver_thread", "_estimate_thread", "_rays_thread", "_allirs_thread",
-                   "_acou_thread", "_aur_thread"):
+                   "_acou_thread", "_aur_thread", "_foa_thread"):
             th = getattr(self, tn, None)               # stop background QThreads so Qt doesn't
             if th is not None and th.isRunning():      # abort with "Destroyed while running"
                 th.stop() if hasattr(th, "stop") else None

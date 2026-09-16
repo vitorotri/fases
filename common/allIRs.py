@@ -103,6 +103,37 @@ def _init():
         sigma_s = lag = None
     _ready = True
 
+def low_deconv(raw):
+    """FVM-rate receiver trace -> bare room response at fs: resample, then deconvolve the source pulse.
+    Same operator for pressure (IR) and the velocity channels (VEL), so they stay phase-aligned."""
+    r = Fraction(fs / fs_fv).limit_denominator(2000)
+    x = resample_poly(np.asarray(raw, float), r.numerator, r.denominator)   # anti-aliased
+    if pulse_fs is not None:
+        n = x.size
+        Q = np.fft.rfft(pulse_fs, n=n)
+        eps = deconv_reg * np.max(np.abs(Q) ** 2)              # Tikhonov: caps gain where pulse is weak
+        return np.fft.irfft(np.fft.rfft(x) * np.conj(Q) / (np.abs(Q) ** 2 + eps), n=n)
+    return np.roll(x * (fs_fv / fs), -lag)                     # older run without p_ref.bin
+
+
+# ONE power-complementary filterbank: FVM is the band below f_cutoff, each GA octave a band
+# above it. Every input is filtered EXACTLY ONCE (the lowest GA band high-passes at f_cutoff and
+# fuses with the FVM low-pass), so the GA is never double-filtered at the crossover. sqrt() of the
+# amplitude-complementary cosine -> sum(w^2)=1 at every edge, so incoherent bands add flat in power.
+_T = 2 ** (1 / 6)                                           # cosine transition half-width
+def _shoulder(f, e, hi):                                    # hi=True -> high-pass shoulder at edge e
+    x = np.clip((f - e / _T) / (e * _T - e / _T), 0, 1)
+    return 0.5 * (1 - np.cos(np.pi * x)) if hi else 0.5 * (1 + np.cos(np.pi * x))
+
+
+def _filt(ir, hp_e, lp_e):
+    f = np.fft.rfftfreq(ir.size, 1 / fs)
+    w = np.ones_like(f)
+    if hp_e: w *= _shoulder(f, hp_e, True)
+    if lp_e: w *= _shoulder(f, lp_e, False)
+    return np.fft.irfft(np.fft.rfft(ir) * np.sqrt(w), n=ir.size)
+
+
 def broadband_ir(rec, src):
     """Broadband IR for one (rec, src) pair from the IR/HIR bins in cwd. Returns (broadband, low, high)
     arrays at fs, or None only if BOTH the low IR and the GA bands are missing. Solver names them
@@ -134,36 +165,7 @@ def broadband_ir(rec, src):
     elif low_files and fs_fv is None:      # GA-only run with a stray old low IR + no header
         print(f"[allIRs] rec{rec} src{src}: IR (low) present but no header.txt (dt unknown) -> "
               "low band skipped, building from GA bands only.")
-    if have_low:
-        # low band: resample FVM rate -> fs, then deconvolve the source pulse -> bare room IR
-        LIR = np.fromfile(low_files[0], np.float32)
-        r = Fraction(fs / fs_fv).limit_denominator(2000)
-        LIR = resample_poly(LIR, r.numerator, r.denominator)   # anti-aliased
-        if pulse_fs is not None:
-            n = LIR.size
-            Q = np.fft.rfft(pulse_fs, n=n)
-            eps = deconv_reg * np.max(np.abs(Q) ** 2)          # Tikhonov: caps gain where pulse is weak
-            LIR = np.fft.irfft(np.fft.rfft(LIR) * np.conj(Q) / (np.abs(Q) ** 2 + eps), n=n)
-        else:                                                  # older run without p_ref.bin
-            LIR = np.roll(LIR * (fs_fv / fs), -lag)
-    else:
-        LIR = np.zeros(0)
-
-    # ONE power-complementary filterbank: FVM is the band below f_cutoff, each GA octave a band
-    # above it. Every input is filtered EXACTLY ONCE (the lowest GA band high-passes at f_cutoff and
-    # fuses with the FVM low-pass), so the GA is never double-filtered at the crossover. sqrt() of the
-    # amplitude-complementary cosine -> sum(w^2)=1 at every edge, so incoherent bands add flat in power.
-    T = 2 ** (1 / 6)                                        # cosine transition half-width
-    def _shoulder(f, e, hi):                                # hi=True -> high-pass shoulder at edge e
-        x = np.clip((f - e / T) / (e * T - e / T), 0, 1)
-        return 0.5 * (1 - np.cos(np.pi * x)) if hi else 0.5 * (1 + np.cos(np.pi * x))
-
-    def _filt(ir, hp_e, lp_e):
-        f = np.fft.rfftfreq(ir.size, 1 / fs)
-        w = np.ones_like(f)
-        if hp_e: w *= _shoulder(f, hp_e, True)
-        if lp_e: w *= _shoulder(f, lp_e, False)
-        return np.fft.irfft(np.fft.rfft(ir) * np.sqrt(w), n=ir.size)
+    LIR = low_deconv(np.fromfile(low_files[0], np.float32)) if have_low else np.zeros(0)
 
     present_fcs = [int(hf.split("_")[-1].split(".")[0]) for hf in high_files]
     lowest_fc = min(present_fcs) if present_fcs else None
