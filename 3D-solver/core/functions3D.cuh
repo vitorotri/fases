@@ -149,6 +149,27 @@ float cubic_interp_1d(float fm1, float f0, float f1, float f2, float s){
     return w_m1 * fm1 + w_0 * f0 + w_1 * f1 + w_2 * f2;
 }
 
+// Trilinear sample at a physical point (same cell-centred grid convention as tricubic_interp).
+// A convex combination of the 8 surrounding cells: it can never exceed what it reads. The
+// tricubic's negative lobes (-1/16) can, and on an OBLIQUE wall -- where the probe point falls
+// between cells and its stencil covers the wall's own blended band cells -- that is a loop
+// interior -> WENO -> band -> probe -> interior with gain > 1 that 1 % absorption does not damp
+// (CR4 trace (32,42,74): clean plane, 10 parallel readers, x10 per 170 steps). On axis-aligned
+// walls the probe lands on cell centres and both interpolants are the exact copy.
+__device__ __forceinline__
+float trilinear_interp(const float *__restrict__ f, int Nx, int Ny, int Nz, float Dx, float Dy, float Dz, float h){
+    float gx = Dx / h - 0.5f, gy = Dy / h - 0.5f, gz = Dz / h - 0.5f;
+    int i = (int)floorf(gx), j = (int)floorf(gy), k = (int)floorf(gz);
+    i = max(0, min(i, Nx - 2)); j = max(0, min(j, Ny - 2)); k = max(0, min(k, Nz - 2));
+    const float sx = gx - (float)i, sy = gy - (float)j, sz = gz - (float)k;
+    const float c00 = f[flat3(i,j,k,Nx,Ny)]*(1-sx) + f[flat3(i+1,j,k,Nx,Ny)]*sx;
+    const float c10 = f[flat3(i,j+1,k,Nx,Ny)]*(1-sx) + f[flat3(i+1,j+1,k,Nx,Ny)]*sx;
+    const float c01 = f[flat3(i,j,k+1,Nx,Ny)]*(1-sx) + f[flat3(i+1,j,k+1,Nx,Ny)]*sx;
+    const float c11 = f[flat3(i,j+1,k+1,Nx,Ny)]*(1-sx) + f[flat3(i+1,j+1,k+1,Nx,Ny)]*sx;
+    const float c0 = c00*(1-sy) + c10*sy, c1 = c01*(1-sy) + c11*sy;
+    return c0*(1-sz) + c1*sz;
+}
+
 __device__ __forceinline__
 float tricubic_interp(const float *__restrict__ f, int Nx, int Ny, int Nz, float Dx, float Dy, float Dz, float h){
     // Convert physical position to grid coordinates
@@ -437,8 +458,82 @@ __device__ float ADE_solver(int b_ID, uint8_t m_ID, float w_in, float dt, float 
     return R_inf[m_ID]*w_in + sum_A + sum_BC;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Per-cell BC mode, decided ONCE on the static SDF (main3D launches this after d_S is uploaded):
+//   0 = probe : the scheme below (footpoint, probe at probe_len from the wall, trilinear read)
+//   1 = local : the boundary state is built from the cell's OWN characteristic (velocity-centred
+//               form, Oxnard ch. 4 eq. 4.55): nothing reaches across to other cells. Such cells
+//               are also evolved by the WENO stages even when S < h (PDE nodes, Oxnard's K<6).
+//               Every S < h cell is local (see (d) below); the probe serves the blended layer.
+//   2 = solid : |grad S| < 0.65 -- the medial axis of a slot narrower than 2*tol, where the normal
+//               is noise and even the local form (which still splits u along n) blows up (CR4,
+//               R=1 run: 4h slot, 45 readers, cos -1..1, x10 per 130 steps). No direction can be
+//               trusted there, so the cell becomes solid: p,u *= (1-chi), never evolved when S<h.
+//               That is "fill the slot" done in the kernel, without editing S (no staircase).
+// The probe assumes S is locally ONE plane and that its probe point reads that plane's fluid.
+// A cell is "local" when either fails:
+//   (a) non-planar: L1 sum of the axis second differences of S > 0.2h. Flat/oblique plane 0;
+//       convex edge (1/r) >= 0.3h in the band; voxel-staircase notch 0.66h; concave 90-degree
+//       bisector 1h; a column of radius >= 5h stays probe.
+//   (b) probe invalid: S(D) < probe_len - 0.5h -- another surface is nearer to the probe point
+//       than this cell's own wall (oblique gaps, acute wedges, slots), the mutual-pair loop.
+//       S is sampled with the kernel's tricubic; D is the BC kernel's own probe point.
+// Evidence: L-room re-entrant edge 20 readers cos 0..0.98 (a); CR4 7h niche (b); CR4 gap-fill
+// staircases (a); with R=1 and no ADE the probe still diverged, the local/ghost forms held.
+// Always on. -DPROBE_ONLY makes every cell mode 0 (the original kernel) for A/B runs; it diverges on CR4.
+// Probe distance from the WALL (footpoint), used by the BC kernel and by kernel_bc_mode's validity
+// test -- one definition so the two cannot drift. l = s + 1.5h: the probe is always 1.5h BEYOND
+// the cell, never at it and never toward the wall. History, both on record:
+//   s + 2h  : BRAS CR4 grew 1.005/step on planar chi=1 cells -- copies of copies through the band
+//             (those cells are local now, rule (d), so that chain is gone whatever l is);
+//   1.5h    : fixed from the wall, CR4 held, but the cells AT 1.5h read themselves and at a concave
+//             room corner one such cell is the 1.5h layer of three walls -- 35 readers, self-loop,
+//             L-room diverged at (6,129,6).
+__device__ __forceinline__ float probe_len(float s, float h, float tol){ (void)tol; return s + 1.5f * h; }
+
+#define BCMODE_D2S 0.2f
+#define BCMODE_GN_MIN 0.65f    // |grad S| below this: no direction. A 90-degree concave bisector is 0.707 and stays a (local) BC cell.
+__global__ void kernel_bc_mode(const float *__restrict__ S, const uint8_t *__restrict__ oid,
+                               uint8_t *__restrict__ mode, int Nx, int Ny, int Nz, float h, float tol){
+	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
+	int k = blockIdx.z*blockDim.z + threadIdx.z + 3;
+	if (!((i < Nx-3) && (j < Ny-3) && (k < Nz-3))) return;
+	const int Cijk = flat3(i,j,k,Nx,Ny);
+	mode[Cijk] = 0;
+#ifndef PROBE_ONLY               // make EXTRA=-DPROBE_ONLY: every cell mode 0 (the original kernel), for A/B runs only
+	const float s = S[Cijk];
+	const uint8_t o = oid[Cijk];
+	if (!(s > 0.0f && s < tol) || o == 0 || o == 0xFF) return;
+	// (d) the BC-only layer (S < h, chi = 1, never evolved) is a pure copy of the probe layer, and
+	//     the probe layer reads it back through its stencil -- the one path in the BC that carries
+	//     no reflection coefficient at all (CR4: the same growth at alpha = 0 and 0.1, 1.005/step,
+	//     at planar chi = 1 cells with a clean 4h probe). These cells are wall NODES: own state,
+	//     evolved. The probe keeps the blended layer h <= S < tol, where the PDE acts on the cell too.
+	if (s < h){ mode[Cijk] = 1; return; }
+	const float sxp = S[flat3(i+1,j,k,Nx,Ny)], sxm = S[flat3(i-1,j,k,Nx,Ny)];
+	const float syp = S[flat3(i,j+1,k,Nx,Ny)], sym = S[flat3(i,j-1,k,Nx,Ny)];
+	const float szp = S[flat3(i,j,k+1,Nx,Ny)], szm = S[flat3(i,j,k-1,Nx,Ny)];
+	float gx = (sxp - sxm) * (0.5f / h), gy = (syp - sym) * (0.5f / h), gz = (szp - szm) * (0.5f / h);
+	float gn = fmaxf(sqrtf(gx*gx + gy*gy + gz*gz), 1e-12f);
+	// (c) no trustworthy direction: medial axis of a narrow slot / enclosed cell -> solid
+	if (gn < BCMODE_GN_MIN){ mode[Cijk] = 2; return; }
+	// (a) planarity
+	const float d2 = fabsf(sxp + sxm - 2.0f*s) + fabsf(syp + sym - 2.0f*s) + fabsf(szp + szm - 2.0f*s);
+	if (d2 > BCMODE_D2S * h){ mode[Cijk] = 1; return; }
+	// (b) probe validity -- same geometry as kernel_apply_BC_immersed_sdf
+	float nx = -gx/gn, ny = -gy/gn, nz = -gz/gn;
+	float Cx = (i + 0.5f) * h, Cy = (j + 0.5f) * h, Cz = (k + 0.5f) * h;
+	const float l = probe_len(s, h, tol);              // same probe distance as the BC kernel
+	float Dx = Cx + s*nx - l*nx, Dy = Cy + s*ny - l*ny, Dz = Cz + s*nz - l*nz;
+	const float sD = tricubic_interp(S, Nx, Ny, Nz, Dx, Dy, Dz, h);
+	// on this cell's own plane S(D) == l; anything nearer to D than that is another surface
+	if (sD < l - 0.5f * h) mode[Cijk] = 1;
+#endif
+}
+
 // clean version
-__global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, float *__restrict__ p, int Nx, int Ny, int Nz, float h, float *S, uint8_t *__restrict__ oid, float rho, float c, int n, float dt, float *__restrict__ u_old, float *__restrict__ v_old, float *__restrict__ w_old, float *__restrict__ p_old, float tol, float *__restrict__ Rinf, float *__restrict__ Ak, float *__restrict__ zeta, float *__restrict__ Bl, float *__restrict__ Cl, float *__restrict__ alpha, float *__restrict__ beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *__restrict__ phi_left, float *__restrict__ phi_middle, float *__restrict__ phi_right, float *__restrict__ psi_1_left, float *__restrict__ psi_1_middle, float *__restrict__ psi_1_right, float *__restrict__ psi_2_left, float *__restrict__ psi_2_middle, float *__restrict__ psi_2_right){
+__global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__restrict__ v, float *__restrict__ w, float *__restrict__ p, int Nx, int Ny, int Nz, float h, float *S, uint8_t *__restrict__ oid, const uint8_t *__restrict__ bcmode, float rho, float c, int n, float dt, float *__restrict__ u_old, float *__restrict__ v_old, float *__restrict__ w_old, float *__restrict__ p_old, float tol, float *__restrict__ Rinf, float *__restrict__ Ak, float *__restrict__ zeta, float *__restrict__ Bl, float *__restrict__ Cl, float *__restrict__ alpha, float *__restrict__ beta, int K_m, int L_m, int *bmap, float a_SSP, float b_SSP, float c_SSP, float *__restrict__ phi_left, float *__restrict__ phi_middle, float *__restrict__ phi_right, float *__restrict__ psi_1_left, float *__restrict__ psi_1_middle, float *__restrict__ psi_1_right, float *__restrict__ psi_2_left, float *__restrict__ psi_2_middle, float *__restrict__ psi_2_right){
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -456,6 +551,14 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
 		int b_ID = bmap[Cijk]; // boundary map for phi and psi (ADE)
 
 		if (o_ID == 0 || o_ID == 0xFF || b_ID < 0) return;
+		if (bcmode[Cijk] == 2){                       // no direction here: the cell is solid (see kernel_bc_mode)
+			const float chi_r = chi_layered(s, h, tol);
+			u[Cijk] *= (1.0f - chi_r);
+			v[Cijk] *= (1.0f - chi_r);
+			w[Cijk] *= (1.0f - chi_r);
+			p[Cijk] *= (1.0f - chi_r);
+			return;
+		}
 		
 		//if (s >= h) return; // no blending test
 		
@@ -480,16 +583,33 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     	float Wy = Cy + s * ny;
     	float Wz = Cz + s * nz;
 
-    	// interpolation point slightly inside the fluid along n
-    	float l = s + 2.0f * h;
+    	// interpolation point in the fluid along n, at probe_len from the wall (see its comment)
+    	const float l = probe_len(s, h, tol);
     	float Dx = Wx - l * nx;
     	float Dy = Wy - l * ny;
     	float Dz = Wz - l * nz;
 
-    	float pD = tricubic_interp(p_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
-    	float uD = tricubic_interp(u_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
-    	float vD = tricubic_interp(v_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
-    	float wD = tricubic_interp(w_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    	float pD, uD, vD, wD;
+    	// mode 1 (kernel_bc_mode): velocity-centred form -- the boundary state is built from the
+    	// cell's OWN characteristic, never from a probe into other cells. Normal, ADE and the chi
+    	// blend below are unchanged; the WENO stages evolve these cells even when S < h.
+    	if (bcmode[Cijk] == 1){
+    		pD = p_old[Cijk]; uD = u_old[Cijk]; vD = v_old[Cijk]; wD = w_old[Cijk];
+    	} else {
+#ifdef TRICUBIC_PROBE
+    		// make EXTRA=-DTRICUBIC_PROBE: the original 4-point sampling (negative lobes, see trilinear_interp)
+    		pD = tricubic_interp(p_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    		uD = tricubic_interp(u_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    		vD = tricubic_interp(v_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    		wD = tricubic_interp(w_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+#else
+    		// default: convex sampling of the probe (no lobes, gain <= 1)
+    		pD = trilinear_interp(p_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    		uD = trilinear_interp(u_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    		vD = trilinear_interp(v_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+    		wD = trilinear_interp(w_old, Nx, Ny, Nz, Dx, Dy, Dz, h);
+#endif
+    	}
 
         const float un =  uD*nx + vD*ny + wD*nz;
         // tangential vector (free-slip)
@@ -504,6 +624,10 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
         
         int m_ID = o_ID - 1; // material ID
         
+#ifdef RIGID_TEST
+        // Diagnostic (make EXTRA=-DRIGID_TEST): every wall perfectly rigid, R = 1, no ADE.
+        const float w_in_local = w_out_local;
+#else
         const float w_in_local = ADE_solver(
     		b_ID, m_ID, w_out_local, dt,
     		Ak, zeta,
@@ -515,7 +639,8 @@ __global__ void kernel_apply_BC_immersed_sdf(float *__restrict__ u, float *__res
     		psi_1_left, psi_1_middle, psi_1_right,
     		psi_2_left, psi_2_middle, psi_2_right
 		);
-		
+#endif
+				
 		
         // ------------------ boundary state on THIS side (same as before when T_obj = 0) -------------
         const float p_b  = 0.5f * (w_in_local + w_out_local);
@@ -1028,7 +1153,7 @@ __global__ void kernel_inject_src_SSP(float *p, float *u_s, int *sidx, float *sv
 }
 
 // WENO5 SSP-RK3 step 0
-__global__ void kernel_WENO_stage0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
+__global__ void kernel_WENO_stage0(const uint8_t *__restrict__ bcmode, int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1038,8 +1163,8 @@ __global__ void kernel_WENO_stage0(int Nx, int Ny, int Nz, float *__restrict__ p
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
-		// restrict
-		if (S[Cijk] < h) return;
+		// restrict (mode-1 BC cells stay PDE nodes, see kernel_bc_mode)
+		if (S[Cijk] < h && bcmode[Cijk] != 1) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -1109,7 +1234,7 @@ __global__ void kernel_WENO_stage0(int Nx, int Ny, int Nz, float *__restrict__ p
 }
 
 // WENO5 SSP-RK3 step 1
-__global__ void kernel_WENO_stage1(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
+__global__ void kernel_WENO_stage1(const uint8_t *__restrict__ bcmode, int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1119,8 +1244,8 @@ __global__ void kernel_WENO_stage1(int Nx, int Ny, int Nz, float *__restrict__ p
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
-		// restrict
-		if (S[Cijk] < h) return;
+		// restrict (mode-1 BC cells stay PDE nodes, see kernel_bc_mode)
+		if (S[Cijk] < h && bcmode[Cijk] != 1) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
@@ -1189,7 +1314,7 @@ __global__ void kernel_WENO_stage1(int Nx, int Ny, int Nz, float *__restrict__ p
 }
 
 // WENO5 SSP-RK3 step 2
-__global__ void kernel_WENO_stage2(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
+__global__ void kernel_WENO_stage2(const uint8_t *__restrict__ bcmode, int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float *__restrict__ p2, float *__restrict__ u2, float *__restrict__ v2, float *__restrict__ w2, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
 	int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
 	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
@@ -1199,8 +1324,8 @@ __global__ void kernel_WENO_stage2(int Nx, int Ny, int Nz, float *__restrict__ p
     	// central index
 		int Cijk = flat3(i,j,k,Nx,Ny);
 		
-		// restrict
-		if (S[Cijk] < h) return;
+		// restrict (mode-1 BC cells stay PDE nodes, see kernel_bc_mode)
+		if (S[Cijk] < h && bcmode[Cijk] != 1) return;
     	
     	// flux values
 		float F_pP, F_pM, F_uP, F_uM;
