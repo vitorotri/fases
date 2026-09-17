@@ -303,8 +303,11 @@ def hornikx_cotte_constrained_fit(
     # 20 Hz. Overshoot lives below that and between grid points, so check on a
     # denser grid from 1 Hz up to the fit band edge. |R|<=1 <=> Re(Z)>=0 for a
     # locally-reacting surface, so penalising |R|>1-margin removes the non-passivity.
-    f_hi_chk = float(np.max(w)) / (2*np.pi)
-    w_chk = 2*np.pi*np.logspace(np.log10(1.0), np.log10(max(f_hi_chk, 2.0)), 512)
+    # ... up to NYQUIST, not the fit band edge: the poles may sit at beta = omega_cutoff, so a
+    # resonance peaks just ABOVE f_cutoff, and the grid carries content up to 1/(2 dt). A |R|
+    # of 1.01 there is a slow, late blow-up on one material (CR4 whitePanels, 1.005/step).
+    f_hi_chk = 0.5 / dt
+    w_chk = 2*np.pi*np.logspace(np.log10(1.0), np.log10(max(f_hi_chk, 2.0)), 1024)
 
     def total_sse(x):
         Rinf, A, B, C, zeta, alpha, beta, *_ = _unpack_params(
@@ -342,6 +345,42 @@ def _rk3_amp(z):
     The ADE states are advanced with exactly this scheme in functions3D.cuh
     (ADE_solver: phi += dt*(w_in - zeta*phi), likewise psi_1/psi_2)."""
     return abs(1.0 + z + z * z / 2.0 + z ** 3 / 6.0)
+
+
+def discrete_gain(Rinf, A, zeta, B, C, alpha, beta, dt, freqs):
+    """|R_d(f)| for each f: the ADE as functions3D.cuh ADE_solver integrates it -- SSP-RK3 stages
+    (0,1,1), (3,1,4), (1,2,3) with the input sampled at the stage times t, t+dt, t+dt/2 -- driven by a
+    unit sinusoid, steady-state amplitude by projection over two whole periods. This is the filter the
+    kernel APPLIES; R(jw) is what the fit sees. Near f_cutoff the discrete gain runs up to ~0.1 above
+    the continuous one, so a continuously passive fit can pump in the kernel. Vectorised over freqs."""
+    A = np.asarray(A, float); zeta = np.asarray(zeta, float)
+    B = np.asarray(B, float); C = np.asarray(C, float); alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
+    w = 2 * np.pi * np.asarray(freqs, float)
+    nf = w.size
+    rates = np.concatenate([zeta, alpha]); slow = float(rates[rates > 0].min()) if np.any(rates > 0) else 1.0
+    P = np.maximum(8, np.round(2 * np.pi / (w * dt))).astype(int)
+    nwin = 2 * P
+    nsteps = int(min(60000, 8.0 / slow / dt + nwin.max()))
+    phi = np.zeros((nf, A.size)); p1 = np.zeros((nf, B.size)); p2 = np.zeros((nf, B.size))
+    out = np.zeros((nsteps, nf))
+    def stage(a, b, c, win, phi_m, p1_m, p2_m, phi_r, p1_r, p2_r):
+        nphi = (a * phi_m + b * (phi_r + dt * (win[:, None] - zeta * phi_r))) / c
+        np1 = (a * p1_m + b * (p1_r + dt * (win[:, None] - alpha * p1_r - beta * p2_r))) / c
+        np2 = (a * p2_m + b * (p2_r + dt * (beta * p1_r - alpha * p2_r))) / c
+        y = Rinf * win + nphi @ A + np1 @ B + np2 @ C
+        return nphi, np1, np2, y
+    for n in range(nsteps):
+        t = n * dt
+        w0, w1, w2 = np.cos(w * t), np.cos(w * (t + dt)), np.cos(w * (t + 0.5 * dt))
+        f1, a1, b1, _ = stage(0.0, 1.0, 1.0, w0, phi, p1, p2, phi, p1, p2)
+        f2, a2, b2, _ = stage(3.0, 1.0, 4.0, w1, phi, p1, p2, f1, a1, b1)
+        phi, p1, p2, y = stage(1.0, 2.0, 3.0, w2, phi, p1, p2, f2, a2, b2)
+        out[n] = y
+    g = np.zeros(nf)
+    for i in range(nf):
+        m = min(int(nwin[i]), nsteps); seg = out[-m:, i]; tt = (nsteps - m + np.arange(m)) * dt
+        g[i] = 2.0 * np.hypot(np.dot(seg, np.cos(w[i] * tt)), np.dot(seg, np.sin(w[i] * tt))) / m
+    return g
 
 
 def stabilize_poles(zeta, alpha, beta, dt, margin=0.999):
@@ -420,6 +459,23 @@ def _alpha_key(mat_path, soft):
 
 def is_near_one(arr, atol=0.02):
     return np.all(np.isclose(arr, 1.0, atol=atol))
+
+def in_band_octaves(f_cutoff, octs=(63, 125, 250, 500, 1000, 2000, 4000, 8000)):
+    """Mask of the octave bands the fit is asked to reproduce: lower edge below f_cutoff (the fit
+    range is f_min..f_cutoff; higher octaves only enter through the GA side, from the raw alpha)."""
+    o = np.asarray(octs, float)
+    m = (o / np.sqrt(2.0)) < float(f_cutoff)
+    if not m.any():
+        m[0] = True
+    return m
+
+def is_flat_in_band(R_oct, f_cutoff, atol=0.02):
+    """|R| varies by less than atol across the in-band octaves: a constant R fits it better than any
+    pole set, and a constant is unconditionally passive. Vector fitting 8 poles to a flat target on a
+    short band (coarse grid, low f_cutoff) pushes poles out of the RK3 box; the write-time clamp
+    then leaves a fit with RMS ~0.3 and |R|>1 in band (CR4 parquet at dt=8.2e-4 s)."""
+    r = np.abs(np.asarray(R_oct, float))[in_band_octaves(f_cutoff)]
+    return float(r.max() - r.min()) < atol
 
 def R_constant_from_octaves(freq, R_oct, mag_ceil=1-1e-12):
     # choose a conservative constant close to the minimum band value
@@ -675,8 +731,8 @@ def _target_R(alpha_oct, soft):
     """Recompute the fit TARGET (min-phase only, no VF) so cached materials still plot.
     Same branches as fit_material()."""
     Rmag_oct = R_from_alpha(alpha_oct)
-    if is_near_one(Rmag_oct):
-        R_tgt, _ = R_constant_from_octaves(freq, Rmag_oct)
+    if is_flat_in_band(Rmag_oct, f_cutoff, atol=1e-3):                  # same branch as fit_material()
+        R_tgt, _ = R_constant_from_octaves(freq, Rmag_oct[in_band_octaves(f_cutoff)])
     else:
         R_tgt, _, _ = min_phase_octave_cepstrum(freq, Rmag_oct, ext_oct=2, n_w=4096)
     return -R_tgt if soft else R_tgt
@@ -699,8 +755,13 @@ def fit_material(read_file, coefs_path, soft=False):
     alpha_oct = np.atleast_1d(np.loadtxt(read_file)).ravel()[:8]
     Rmag_oct = R_from_alpha(alpha_oct)
 
-    if is_near_one(Rmag_oct):
-        R_tgt, Rinf = R_constant_from_octaves(freq, Rmag_oct)
+    # A constant is FORCED only when the in-band target really is one number (spread < 1e-3).
+    # Everything else -- including "near rigid" or "almost flat" -- goes through the vector fit:
+    # the post-clamp net below keeps the pole fit only if it is passive AND beats a constant on the
+    # same points, so a constant can never win by fiat, only by being the better model.
+    flat = is_flat_in_band(Rmag_oct, f_cutoff, atol=1e-3)
+    if flat:
+        R_tgt, Rinf = R_constant_from_octaves(freq, Rmag_oct[in_band_octaves(f_cutoff)])
         if soft:
             # global pi phase shift: R = -|R| (also flips the saved constant)
             R_tgt = -R_tgt; Rinf = -Rinf
@@ -711,7 +772,7 @@ def fit_material(read_file, coefs_path, soft=False):
         Bcoef = np.array([], float); Ccoef = np.array([], float)
         alpha = np.array([], float); beta = np.array([], float)
         rmserr = 0.0
-        print(f"\n[{name}] Near rigid material\n")
+        print(f"\n[{name}] constant target in the fit band: constant R = {Rinf:.4f}, no poles\n")
     else:
         R_tgt, Rmag_interp, phi = min_phase_octave_cepstrum(freq, Rmag_oct, ext_oct=2, n_w=4096)
         #R_tgt, Rmag_interp, phi = min_phase_octave_hilbert(freq, Rmag_oct, ext_oct=2, n_w=8192)
@@ -723,7 +784,7 @@ def fit_material(read_file, coefs_path, soft=False):
             print(f"[{name}] soft material: R sign inverted")
 
         w = 2.0 * np.pi * freq
-        w_chk = 2*np.pi*np.logspace(0.0, np.log10(max(f_cutoff, 2.0)), 512)
+        w_chk = 2*np.pi*np.logspace(0.0, np.log10(max(0.5 / dt, 2.0)), 1024)   # to Nyquist
 
         def _vf_refine(n_poles):
             """One VF (scikit-rf) + Option-A refinement at a given real starting-pole
@@ -790,10 +851,10 @@ def fit_material(read_file, coefs_path, soft=False):
 
     # passivity check: |R_model| must stay <= 1 for all omega (Re Z >= 0), else the
     # boundary can add energy on reflection -> slow growth / blow-up.
-    w_chk = 2*np.pi*np.logspace(0.0, np.log10(max(f_cutoff, 2.0)), 1024)
+    w_chk = 2*np.pi*np.logspace(0.0, np.log10(max(0.5 / dt, 2.0)), 2048)      # to Nyquist
     Rmax = float(np.max(np.abs(R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w_chk))))
     if Rmax > 1.0 + 1e-6:
-        print(f"\n[!] [{name}] max|R_model| = {Rmax:.5f} > 1 : non-passive, may cause instability\n")
+        print(f"\n[!] [{name}] max|R_model| = {Rmax:.5f} > 1 (checked to Nyquist {0.5/dt:.0f} Hz): non-passive, may cause instability\n")
 
     # ------------------------------------------------------------
     # SAVE IN C++ FORMAT
@@ -804,6 +865,49 @@ def fit_material(read_file, coefs_path, soft=False):
     if _nfix:
         print(f"[{name}] {_nfix} pole(s) were outside the SSP-RK3 stability region for "
               f"dt={dt:.4g} s -- pulled inside (the boundary would otherwise blow up)")
+
+    # Last net, after the clamp: the model that goes to disk must beat a plain constant on the
+    # fit band and be passive. A clamped pole set can be far off (CR4 parquet at dt=8e-4 s: RMS
+    # 0.23 on a |R|~0.97 target, |R|>1 in band); a constant R has no poles, is exactly passive,
+    # and for a nearly flat target is also the better fit. Compared on the same points/metric.
+    if len(zeta) + len(alpha):
+        w_fit = 2 * np.pi * freq
+        w_pas = 2*np.pi*np.logspace(0.0, np.log10(max(0.5 / dt, 2.0)), 1024)   # to Nyquist
+        R_fit = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w_fit)
+        rms_fit = float(np.sqrt(np.mean(np.abs(R_fit - R_tgt)**2)))
+        passive = float(np.max(np.abs(R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w_pas)))) <= 1.0 + 1e-6
+        _, Rc = R_constant_from_octaves(freq, Rmag_oct[in_band_octaves(f_cutoff)])
+        if soft:
+            Rc = -Rc
+        rms_const = float(np.sqrt(np.mean(np.abs(Rc - R_tgt)**2)))
+        if (not passive) or rms_const < rms_fit:
+            print(f"[{name}] pole fit {'NON-PASSIVE' if not passive else 'worse than a constant'} "
+                  f"(rms {rms_fit:.3e} vs constant {rms_const:.3e}) -> constant R = {Rc:.4f}, no poles")
+            Rinf = Rc
+            Acoef = np.array([], float); zeta = np.array([], float)
+            Bcoef = np.array([], float); Ccoef = np.array([], float)
+            alpha = np.array([], float); beta = np.array([], float)
+
+    # Last check, on the filter the KERNEL runs (see discrete_gain): if its gain exceeds 1 anywhere
+    # in 5 Hz .. 0.8*Nyquist, shrink every pole residue uniformly until it does not (R_inf kept).
+    # The frequency shape is kept, the dips get shallower; passivity is then a property of what
+    # main3D applies, not of the continuous model.
+    if len(zeta) + len(alpha):
+        f_d = np.logspace(np.log10(5.0), np.log10(0.8 * 0.5 / dt), 40)
+        for _it in range(6):
+            gd = discrete_gain(Rinf, Acoef, zeta, Bcoef, Ccoef, alpha, beta, dt, f_d)
+            gmax = float(gd.max())
+            if gmax <= 1.0 + 1e-3:
+                break
+            sc = max(0.0, (0.995 - abs(Rinf)) / max(gmax - abs(Rinf), 1e-9))   # shrink the pole part only
+            print(f"[{name}] discrete (SSP-RK3) gain {gmax:.4f} > 1 at {f_d[int(gd.argmax())]:.0f} Hz "
+                  f"-> pole residues scaled by {sc:.3f}")
+            Acoef = Acoef * sc; Bcoef = Bcoef * sc; Ccoef = Ccoef * sc
+        else:
+            print(f"\n[!] [{name}] discrete gain still {gmax:.4f} > 1 after scaling -- constant R instead\n")
+            Acoef = np.array([], float); zeta = np.array([], float)
+            Bcoef = np.array([], float); Ccoef = np.array([], float)
+            alpha = np.array([], float); beta = np.array([], float)
 
     K = len(zeta)
     L = len(alpha)
@@ -834,7 +938,7 @@ def fit_material(read_file, coefs_path, soft=False):
     # exactly in the bands the ISM uses. Two rows: Re[8] then Im[8].
     octs = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], float)
     Rmag_oct = np.clip(R_from_alpha(alpha_oct), 1e-6, 1 - 1e-6)   # clip: keeps zeta finite (rigid)
-    if is_near_one(Rmag_oct):
+    if float(Rmag_oct.max() - Rmag_oct.min()) < 1e-3:
         R_oct = Rmag_oct.astype(complex)
     else:
         R_oct, _, _ = min_phase_octave_cepstrum(octs, Rmag_oct)
