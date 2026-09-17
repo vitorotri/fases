@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <chrono>
 #include <ctime>
 #include <cstring>
 #include <new>
@@ -15,7 +16,29 @@
 #include "ism3D.h"
 #include "raytrace3D.h"
 #include "functions3D.cuh"
-#include "trace3D.h"                    // -DKDEBUG blow-up tracer; empty macro otherwise
+
+// Name the kernel that faults, without needing compute-sanitizer/cuda-memcheck.
+// Kernel launches are async and their errors are STICKY: an illegal access inside a
+// kernel is not reported at the launch, it surfaces later at the next cudaMemcpy as
+// "Xid 31 MMU Fault ... ENGINE HOST" -- which points at the copy, not the culprit.
+// Build with -DKDEBUG to sync + check after every launch and die at the real one.
+// Off by default: zero cost in normal runs (the RK3 loop already syncs once per step).
+//   make clean && make EXTRA="-DKDEBUG -lineinfo"
+#ifdef KDEBUG
+#define KCHECK(name)                                                              \
+    do {                                                                          \
+        cudaError_t _e = cudaDeviceSynchronize();                                 \
+        if (_e == cudaSuccess) _e = cudaGetLastError();                           \
+        if (_e != cudaSuccess) {                                                  \
+            printf("\n[!] kernel %s failed at step n=%d: %s\n\n",                 \
+                   (name), n, cudaGetErrorString(_e));                            \
+            fflush(stdout);                                                       \
+            exit(EXIT_FAILURE);                                                   \
+        }                                                                         \
+    } while (0)
+#else
+#define KCHECK(name) do {} while (0)
+#endif
 
 unsigned long long available_ram_bytes() {
     long pages = sysconf(_SC_AVPHYS_PAGES);
@@ -199,7 +222,6 @@ int main(int argc, char *argv[]){
     int nObj = 0; // number of objects in the scene (initialization)
     float *S = NULL; // signed distance function array or voxels, size Nx*Ny, flattened
     float *d_S = NULL;
-    uint8_t *d_bcmode = NULL;   // per-cell BC mode (0 probe / 1 local), decided once on the static SDF
     float tol = 3.0f*h; // tolerance
     uint8_t *oid = NULL; // for surface attribution
     uint8_t* d_oid = NULL;
@@ -310,66 +332,82 @@ int main(int argc, char *argv[]){
 		A = mesh_group_areas(sc, &A_tot); // A[i] is aligned with Z[i].alpha[b], for band b (layered Z, no BoundingBox)
 		// created in the ISM section
 
-		// S.bin/oid.bin double as a cache, keyed by scene mtime + h + tol + parser version
-		// (PARSE3D_VERSION in parsing3D.h: a parser change rebuilds instead of reusing old bins)
+		// S.bin/oid.bin double as a cache, keyed by scene mtime + h + tol
 		std::error_code fec;
 		std::ostringstream key_s;
 		key_s << scene_str << " "
 		      << std::filesystem::last_write_time(scene_path, fec).time_since_epoch().count()
-		      << " " << h << " " << tol << " v" << PARSE3D_VERSION
-#ifdef NO_REGULARIZE
-		      << " noreg"                       // raw-SDF bins must not be mistaken for regularized ones
-#endif
-		      ;
+		      << " " << h << " " << tol;
 		std::string cache_key = key_s.str(), old_key;
 
 		std::ifstream ck(out_file("scene_cache.txt"));
 		bool cached = std::getline(ck, old_key) && old_key == cache_key
 		           && (ck >> Nx >> Ny >> Nz >> Lx >> Ly >> Lz);
 		ck.close();
+		// Say WHY the cache is or is not used. "reusing cached" with S.bin deleted is
+		// impossible below, so a reason line settles which binary/dir actually ran.
+		const char* why = cached ? "key matches" : "no/old scene_cache.txt (scene, mtime, h or tol changed)";
 		if (cached){
 			size_t Ncells = (size_t)Nx*Ny*Nz;
 			S   = (float*)malloc(Ncells*sizeof(float));
 			oid = (uint8_t*)malloc(Ncells);
 			FILE *fS = fopen(out_file("S.bin").c_str(), "rb");
 			FILE *fO = fopen(out_file("oid.bin").c_str(), "rb");
+			if (!fS)      why = "S.bin missing";
+			else if (!fO) why = "oid.bin missing";
 			cached = S && oid && fS && fO
 			      && fread(S, sizeof(float), Ncells, fS) == Ncells
 			      && fread(oid, 1, Ncells, fO) == Ncells;
+			if (fS && fO && !cached) why = "S.bin/oid.bin short read (wrong size for this grid)";
 			if (fS) fclose(fS);
 			if (fO) fclose(fO);
 			if (!cached){ free(S); S = NULL; free(oid); oid = NULL; }
 		}
+		printf("\n[cache] %s -> %s   (%s)\n", cached ? "REUSING S.bin/oid.bin" : "REBUILDING SDF + OID",
+		       out_file("").c_str(), why);
+		if (cached){
+			// Say which geometry a cached S carries, so a stale pre-regularize cache is visible.
+			long nfix = 0; char ln[512];
+			if (FILE* fx = fopen(out_file("sdf_fixes.txt").c_str(), "r")){
+				while (fgets(ln, sizeof ln, fx)) if (ln[0] != '#') ++nfix;
+				fclose(fx);
+				printf("[cache] cached S was regularized: %ld cell(s) below resolution converted to solid "
+				       "(see output/sdf_fixes.txt)\n", nfix);
+			} else {
+				printf("[cache] cached S predates regularize_sdf (no sdf_fixes.txt) -- delete "
+				       "scene_cache.txt to rebuild with it\n");
+			}
+		}
 
 		if (cached){
-			printf("\n[cache] REUSING S.bin/oid.bin (key matches)\n");
+			printf("\n[OK] scene unchanged, reusing cached S.bin / oid.bin\n");
 		}
 		else {
-			printf("\n[cache] REBUILDING SDF + OID (no/old scene_cache.txt, S.bin/oid.bin missing, or parser version changed)\n");
 			if(!build_sdf(&sc, h, &Nx, &Ny, &Nz, &Lx, &Ly, &Lz, &S)){
 			// grid_dims_checked already printed the reason + suggested h
 			scene_free(&sc);
 			return -1;
 			}
-			// Remove geometry the grid cannot resolve (fluid gaps < 2*tol+3h, solids < 3 cells,
-			// slabs with no interior cell) BEFORE the OID map is built and before S.bin is cached,
-			// so the solver, the OID and the cache all see the same scene. Dump lists every
-			// converted cell. See parsing3D.h regularize_sdf.
-#ifndef NO_REGULARIZE          // make EXTRA=-DNO_REGULARIZE: raw SDF, to isolate a kernel-side change
-			regularize_sdf(S, Nx, Ny, Nz, h, tol, out_file("sdf_fixes.txt").c_str());
-#else
-			printf("\n[SDF3D] regularize: OFF (built with -DNO_REGULARIZE)\n");
-#endif
+
+			// Retire geometry the grid cannot resolve (fluid slots thinner than the band
+			// overlap, plates thinner than 3 cells) BEFORE the OID map is built and before
+			// S.bin is cached, so the solver, the OID and the cache all see the same scene.
+			// Dump lists every converted cell for inspection. See parsing3D.h regularize_sdf.
+			//regularize_sdf(S, Nx, Ny, Nz, h, tol, out_file("sdf_fixes.txt").c_str());
 
 			if(!build_oid_dense(sc, S, Nx, Ny, Nz, h, tol, &oid)){   // GPU, CPU fallback
 				fprintf(stderr,"Failed to build OID map\n");
 				free(S); scene_free(&sc);
 				return -1;
 			}
+			// Band cells left without a material (S repaired by regularize_sdf, OID keyed to the
+			// original triangles) are holes in the band -> resonators. Fill from neighbours.
+			//fill_oid_holes(S, oid, Nx, Ny, Nz, tol);
 
-			// --estimate is a READ-ONLY query: it must not write the cache. The GUI runs it seconds
-			// before every real run, so a cache written here made the real run say "reusing cached"
-			// after every delete, with the actual build hidden in the pre-flight's log.
+			// --estimate is a READ-ONLY query (see above): it must not write the cache. It
+			// used to, so the GUI's pre-flight pass re-created S.bin/oid.bin/scene_cache.txt
+			// seconds before every real run -- deleting them looked like it did nothing, and
+			// the real run's log never showed the SDF being built. Only the real run caches.
 			if (!estimate_only){
 				FILE *file_S = fopen(out_file("S.bin").c_str(), "wb");
 				if (file_S) {
@@ -398,28 +436,6 @@ int main(int argc, char *argv[]){
 		
 		cudaMalloc(&d_S, (size_t)Nx*Ny*Nz*sizeof(float));
 		cudaMemcpy(d_S, S, (size_t)Nx*Ny*Nz*sizeof(float), cudaMemcpyHostToDevice);
-
-		// BC mode per cell (see kernel_bc_mode): probe where S is locally planar and the probe
-		// reads this wall's own fluid, the cell's own characteristic elsewhere. Static, so once.
-		{
-			const size_t Ncell = (size_t)Nx*Ny*Nz;
-			cudaMalloc(&d_bcmode, Ncell*sizeof(uint8_t));
-			cudaMemset(d_bcmode, 0, Ncell*sizeof(uint8_t));
-			dim3 TPm(32,4,4), BPm((Nx + 31)/32, (Ny + 3)/4, (Nz + 3)/4);
-			kernel_bc_mode<<<BPm, TPm>>>(d_S, d_oid, d_bcmode, Nx, Ny, Nz, h, tol);
-			std::vector<uint8_t> hm(Ncell);
-			cudaMemcpy(hm.data(), d_bcmode, Ncell*sizeof(uint8_t), cudaMemcpyDeviceToHost);
-			size_t nband = 0, nloc = 0, nloc_skip = 0, nsol = 0;
-			for (size_t q = 0; q < Ncell; ++q){
-				if (S[q] > 0.f && S[q] < tol && oid[q] != 0 && oid[q] != 0xFF){
-					++nband;
-					if (hm[q] == 1){ ++nloc; if (S[q] < h) ++nloc_skip; }
-					else if (hm[q] == 2) ++nsol;
-				}
-			}
-			printf("\n[BC] band cells %zu: probe %zu, local (own-state) %zu (%.1f %%, %zu of them S<h and evolved), solid (no direction) %zu (%.1f %%)\n",
-			       nband, nband - nloc - nsol, nloc, nband ? 100.0*nloc/nband : 0.0, nloc_skip, nsol, nband ? 100.0*nsol/nband : 0.0);
-		}
 		
     }
     // process DXF test (not implemented yet)
@@ -1134,9 +1150,25 @@ int main(int argc, char *argv[]){
 	
 	// -------------------------------- Memory assessment for animations --------------------------------------
 	
+	// FATAL, not a warning. Every cudaMalloc above (48 of them, lines 371-1062) discards its
+	// return code, so this sticky error is the only thing standing between a failed allocation
+	// and a null/garbage device pointer. It used to only printf and fall through -- the run then
+	// reached the timestep loop and handed that pointer to cudaMemcpy(...DeviceToHost), so the
+	// COPY ENGINE read unmapped memory: "Xid 31 MMU Fault: ENGINE HOST6 HUBCLIENT_HOST ...
+	// ACCESS_TYPE_READ". That poisons the context (every later call returns 999) and the process
+	// then wedges in uvm_va_space_destroy -- D state, unkillable, reboot required.
+	// Dying here instead keeps the context clean and names the real problem: not enough VRAM.
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
-		printf("[!] CUDA error: %s\n", cudaGetErrorString(err));
+		size_t freeB = 0, totB = 0;
+		cudaMemGetInfo(&freeB, &totB);
+		printf("\n[!] CUDA error before the time loop: %s\n"
+		       "    GPU memory: %.2f GB free of %.2f GB.\n"
+		       "    A device allocation failed. Lower the cutoff frequency (coarser grid),\n"
+		       "    shorten the simulation, or free the GPU, then re-run.\n\n",
+		       cudaGetErrorString(err), freeB / 1e9, totB / 1e9);
+		fflush(stdout);
+		return -1;
 	}
 	
 	// ---- animation frame sampling ----
@@ -1274,27 +1306,36 @@ int main(int argc, char *argv[]){
 				
 		// (0)
 		
-		kernel_WENO_stage0<<<BP, TP>>>(d_bcmode, Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		kernel_WENO_stage0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		KCHECK("WENO_stage0");
 			
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n, src_opt, d_src_freq);
+		KCHECK("inject_src_SSP");
 			
-		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, d_bcmode, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0, 1.0, 1.0, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0, 1.0, 1.0, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
+		KCHECK("apply_BC_immersed_sdf");
 			
 		// (1)
 			
-		kernel_WENO_stage1<<<BP, TP>>>(d_bcmode, Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		kernel_WENO_stage1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		KCHECK("WENO_stage1");
 
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2, src_opt, d_src_freq);
+		KCHECK("inject_src_SSP");
 		
-		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, d_bcmode, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0, 1.0, 4.0, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
+		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0, 1.0, 4.0, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
+		KCHECK("apply_BC_immersed_sdf");
 			
 		// (2)
 		
-		kernel_WENO_stage2<<<BP, TP>>>(d_bcmode, Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		kernel_WENO_stage2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
+		KCHECK("WENO_stage2");
 			
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1, src_opt, d_src_freq);
+		KCHECK("inject_src_SSP");
 			
-		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, d_bcmode, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0, 2.0, 3.0, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0, 2.0, 3.0, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
+		KCHECK("apply_BC_immersed_sdf");
 
 		// sync
 		cudaDeviceSynchronize();
@@ -1316,7 +1357,37 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		TRACE3D(n, p0, S, oid, Nx, Ny, Nz, h);       // KDEBUG only: |p|max cell + its BC geometry
+
+#ifdef KDEBUG
+		// Blow-up tracer: p0 is on the host anyway, so find the cell with the largest |p|
+		// and report it with everything the BC kernel would have known about it. Prints
+		// when |p|max first exceeds the trip level and then every time it grows 10x, so a
+		// run that diverges yields ~5 lines naming the FIRST bad cell -- not a guess.
+		{
+			static float trip = 1e3f;                 // ~ way above any physical pressure here
+			size_t am = 0; float pm = 0.f;
+			for (size_t q = 0; q < N; ++q){ float a = fabsf(p0[q]); if (a > pm){ pm = a; am = q; } }
+			if (pm > trip || (n % 200 == 0 && n > 0)){
+				int ii = (int)(am % Nx), jj = (int)((am / Nx) % Ny), kk = (int)(am / ((size_t)Nx*Ny));
+				auto SS = [&](int a,int b,int c){ return S[(size_t)a + (size_t)Nx*((size_t)b + (size_t)Ny*c)]; };
+				float gx=(SS(ii+1,jj,kk)-SS(ii-1,jj,kk))*(0.5f/h), gy=(SS(ii,jj+1,kk)-SS(ii,jj-1,kk))*(0.5f/h),
+				      gz=(SS(ii,jj,kk+1)-SS(ii,jj,kk-1))*(0.5f/h);
+				float gn = sqrtf(gx*gx+gy*gy+gz*gz);
+				printf("\n[trace] n=%d  |p|max=%.3e at (%d,%d,%d) = (%.3f,%.3f,%.3f) m\n"
+				       "        S=%.3f (%.2f h)  oid=%d  |gradS|=%.3f  band:%s  weno:%s\n"
+				       "        S along x: %.2f %.2f [%.2f] %.2f %.2f   z: %.2f %.2f [%.2f] %.2f %.2f  (in h)\n",
+				       n, pm, ii, jj, kk, (ii+0.5f)*h, (jj+0.5f)*h, (kk+0.5f)*h,
+				       S[am], S[am]/h, (int)oid[am], gn,
+				       (oid[am] != 0 && oid[am] != 0xFF) ? "yes" : "no",
+				       (S[am] < h) ? "SKIPPED" : "evolved",
+				       SS(ii-2,jj,kk)/h, SS(ii-1,jj,kk)/h, SS(ii,jj,kk)/h, SS(ii+1,jj,kk)/h, SS(ii+2,jj,kk)/h,
+				       SS(ii,jj,kk-2)/h, SS(ii,jj,kk-1)/h, SS(ii,jj,kk)/h, SS(ii,jj,kk+1)/h, SS(ii,jj,kk+2)/h);
+				fflush(stdout);
+				if (pm > trip) trip *= 10.f;
+				if (pm > 1e12f){ printf("[trace] diverged -- stopping.\n"); return -1; }
+			}
+		}
+#endif
 
 		// write animation slices
 		if (n % anim_step == 0){
@@ -1446,7 +1517,6 @@ int main(int argc, char *argv[]){
     free(h_bmap);
     
     cudaFree(d_S);
-    cudaFree(d_bcmode);
     cudaFree(d_oid);
     
     cudaFree(d_src_freq);
@@ -1634,7 +1704,7 @@ int main(int argc, char *argv[]){
         				// no fractional delay (amplitude validation)
             			//e_ism[t_0] += (float)gS_0 * gS_0;
             			// no fractional delay
-            			//p_hf[flat(t_0, r, Nt)] += gS_0; // --> keeps direct ray's amplitude
+            			//p_hf[flat(t_0, r, Nt)] += gS_0; // --> keeps direct ray's amplitude (for test)
             			// fractional delay
             			deposit(tau_0, gS_0, r, d_0); // direct ray (coherent)
         			}
