@@ -866,48 +866,17 @@ def fit_material(read_file, coefs_path, soft=False):
         print(f"[{name}] {_nfix} pole(s) were outside the SSP-RK3 stability region for "
               f"dt={dt:.4g} s -- pulled inside (the boundary would otherwise blow up)")
 
-    # Last net, after the clamp: the model that goes to disk must beat a plain constant on the
-    # fit band and be passive. A clamped pole set can be far off (CR4 parquet at dt=8e-4 s: RMS
-    # 0.23 on a |R|~0.97 target, |R|>1 in band); a constant R has no poles, is exactly passive,
-    # and for a nearly flat target is also the better fit. Compared on the same points/metric.
+    # Report only (never replaces the fit): rms after the clamp, and the gain of the filter the
+    # KERNEL runs (see discrete_gain) in 5 Hz .. 0.8*Nyquist.
     if len(zeta) + len(alpha):
         w_fit = 2 * np.pi * freq
-        w_pas = 2*np.pi*np.logspace(0.0, np.log10(max(0.5 / dt, 2.0)), 1024)   # to Nyquist
         R_fit = R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w_fit)
         rms_fit = float(np.sqrt(np.mean(np.abs(R_fit - R_tgt)**2)))
-        passive = float(np.max(np.abs(R_expected(Rinf, Acoef, Bcoef, Ccoef, alpha, beta, zeta, w_pas)))) <= 1.0 + 1e-6
-        _, Rc = R_constant_from_octaves(freq, Rmag_oct[in_band_octaves(f_cutoff)])
-        if soft:
-            Rc = -Rc
-        rms_const = float(np.sqrt(np.mean(np.abs(Rc - R_tgt)**2)))
-        if (not passive) or rms_const < rms_fit:
-            print(f"[{name}] pole fit {'NON-PASSIVE' if not passive else 'worse than a constant'} "
-                  f"(rms {rms_fit:.3e} vs constant {rms_const:.3e}) -> constant R = {Rc:.4f}, no poles")
-            Rinf = Rc
-            Acoef = np.array([], float); zeta = np.array([], float)
-            Bcoef = np.array([], float); Ccoef = np.array([], float)
-            alpha = np.array([], float); beta = np.array([], float)
-
-    # Last check, on the filter the KERNEL runs (see discrete_gain): if its gain exceeds 1 anywhere
-    # in 5 Hz .. 0.8*Nyquist, shrink every pole residue uniformly until it does not (R_inf kept).
-    # The frequency shape is kept, the dips get shallower; passivity is then a property of what
-    # main3D applies, not of the continuous model.
-    if len(zeta) + len(alpha):
         f_d = np.logspace(np.log10(5.0), np.log10(0.8 * 0.5 / dt), 40)
-        for _it in range(6):
-            gd = discrete_gain(Rinf, Acoef, zeta, Bcoef, Ccoef, alpha, beta, dt, f_d)
-            gmax = float(gd.max())
-            if gmax <= 1.0 + 1e-3:
-                break
-            sc = max(0.0, (0.995 - abs(Rinf)) / max(gmax - abs(Rinf), 1e-9))   # shrink the pole part only
-            print(f"[{name}] discrete (SSP-RK3) gain {gmax:.4f} > 1 at {f_d[int(gd.argmax())]:.0f} Hz "
-                  f"-> pole residues scaled by {sc:.3f}")
-            Acoef = Acoef * sc; Bcoef = Bcoef * sc; Ccoef = Ccoef * sc
-        else:
-            print(f"\n[!] [{name}] discrete gain still {gmax:.4f} > 1 after scaling -- constant R instead\n")
-            Acoef = np.array([], float); zeta = np.array([], float)
-            Bcoef = np.array([], float); Ccoef = np.array([], float)
-            alpha = np.array([], float); beta = np.array([], float)
+        gd = discrete_gain(Rinf, Acoef, zeta, Bcoef, Ccoef, alpha, beta, dt, f_d)
+        gmax = float(gd.max())
+        print(f"[{name}] rms after clamp {rms_fit:.3e}; discrete (SSP-RK3) max gain {gmax:.4f} at {f_d[int(gd.argmax())]:.0f} Hz"
+              + ("  [!] > 1: may pump in the kernel" if gmax > 1.0 + 1e-3 else ""))
 
     K = len(zeta)
     L = len(alpha)
