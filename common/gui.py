@@ -5937,7 +5937,7 @@ class MainWindow(QMainWindow):
         root_lay.addWidget(gl_wrap, stretch=1)         # fills; panel overlays its left
 
 		# append "\uFE0E" in front of symbol to stay monochrome
-        self._tabs.addTab(self._build_scene_tab(),   "🞛\uFE0E  Scene")
+        self._tabs.addTab(self._build_scene_tab(),   "🞕\uFE0E  Scene")
         self._tabs.addTab(self._build_src_tab(),     "🔊\uFE0E  Sources")
         self._tabs.addTab(self._build_rec_tab(),     "🎙\uFE0E  Receivers")
         self._tabs.addTab(self._build_config_tab(),  "⚙\uFE0E  Setup")
@@ -8071,19 +8071,26 @@ class MainWindow(QMainWindow):
             # geometry and the frame never changes. Derived names are suffixed on the stem,
             # and they CHAIN (foo_positive_merged.obj), so test the stem for any of them.
             _stem = os.path.splitext(os.path.basename(path))[0]
-            if not any(_stem.endswith(sfx) or (sfx + "_") in _stem
-                       for sfx in ("_positive", "_merged", "_grouped")):
+            _derived = any(_stem.endswith(sfx) or (sfx + "_") in _stem
+                           for sfx in ("_positive", "_merged", "_grouped"))
+            if not _derived:
                 self._obj_orig_path = path
             base, ext = os.path.splitext(path)
             shifted = base + "_positive" + ext
+            prev = tuple(getattr(self, "_obj_shift", (0.0, 0.0, 0.0)))
             if getattr(self._gl, "_shift_enabled", True):
                 shift = shift_to_positive(path, shifted)   # writes `shifted` only if a shift is needed
+                # A derived copy (project reopen: manifest scene = foo_positive_merged.obj) is
+                # ALREADY shifted, so shift_to_positive says 0 -- but relative to the user's
+                # original it still carries the recorded shift. Reporting 0 here made the
+                # delta below -prev and dragged every src/rec back to the original frame.
+                if _derived and shift == (0.0, 0.0, 0.0):
+                    shift = prev
             else:
                 shift = (0.0, 0.0, 0.0)                    # load as-is; solver offset covers it
             # Remember it: the scene menu can re-display src/rec coordinates in the
             # ORIGINAL frame (BRAS publishes centred-origin positions), while the tables
             # keep handing the solver shifted ones.
-            prev = tuple(getattr(self, "_obj_shift", (0.0, 0.0, 0.0)))
             self._obj_shift = tuple(float(v) for v in shift)
             self._gl._obj_shift = self._obj_shift
             # src.txt/rec.txt are canonically in the SHIFTED frame, so they already carry
@@ -8094,11 +8101,16 @@ class MainWindow(QMainWindow):
                   f"  translated={moved} point(s)"
                   + ("  (delta is zero -> points left alone)" if not any(d) else ""))
             self._apply_orig_frame(getattr(self._gl, "_orig_frame", False))
-            self._set_solver_offset_from(path)
             if shift != (0.0, 0.0, 0.0):
                 print(f"[OBJ] off the positive octant; loading shifted copy "
                       f"(by {shift}): {os.path.basename(shifted)}")
                 path = shifted
+            # The solver offset (-bmin of the mesh main3D will read) must come from the file
+            # that is actually LOADED: the positive copy when shifting is on (bmin = 0 on the
+            # shifted axes), the original when it is off. Taken from the original in both
+            # frames it double-shifted src.txt in the positive frame and the project re-read
+            # then pulled every point back by the shift -- geometry moved, points stayed.
+            self._set_solver_offset_from(path)
             verts, groups, split_mtl = parse_obj(path, return_split=True)
             raw_n = len(groups)
             # A file WE wrote is already canonical: its groups are exactly the layers the GUI
