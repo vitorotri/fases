@@ -6682,12 +6682,12 @@ class MainWindow(QMainWindow):
                 name = names[rec] if rec < len(names) and names[rec] else f"receiver {rec}"
                 ax_t.plot(np.arange(ir.size) / fs, ir, lw=0.7, color=col, label=name)
                 H = np.abs(np.fft.rfft(ir)); fr = np.fft.rfftfreq(ir.size, 1 / fs)
-                ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] + 1e-12), lw=0.8, color=col, label=name)
+                ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] / 2e-5 + 1e-12), lw=0.8, color=col, label=name)   # dB re 20 uPa: direct sound at 1 m reads Lp,1m
             tag = f"source {src} — " if len(srcs) > 1 else "Receiver comparison — "
             ax_t.set_title(f"{tag}impulse response")
             ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude")
             ax_f.set_title(f"{tag}frequency response")
-            ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("Magnitude [dB]"); ax_f.set_xlim(20, fs / 2)
+            ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("SPL [dB re 20 µPa]"); ax_f.set_xlim(20, fs / 2)
         fig.patch.set_facecolor(BG)
         for ax in axes.ravel():                        # GUI dark theme: bg + white axes/text/grid
             ax.set_facecolor(BG)

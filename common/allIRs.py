@@ -271,7 +271,7 @@ def main():
 
     def _fr(x):                                            # (freq>0, magnitude dB)
         f = np.fft.rfftfreq(x.size, 1 / fs)
-        return f[1:], 20 * np.log10(np.abs(np.fft.rfft(x))[1:] + 1e-12)
+        return f[1:], 20 * np.log10(np.abs(np.fft.rfft(x))[1:] / 2e-5 + 1e-12)   # dB re 20 uPa (IR in Pa per unit impulse)
 
     # one figure per receiver: a column per source, IR (top) + frequency response (bottom)
     for rec, items in sorted(by_rec.items()):
@@ -286,7 +286,7 @@ def main():
             ax_t.set_title(f"Receiver {rec}, source {src} — Impulse Response")
             ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude"); ax_t.grid(True)
             ax_f.set_title(f"Receiver {rec}, source {src} — Frequency Response")
-            ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("Magnitude [dB]")
+            ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("SPL [dB re 20 µPa]")
             ax_f.set_xlim(20, fs / 2); ax_f.grid(True, which="both")
         fig.tight_layout()
         fig.savefig(f"IR_rec{rec}.png", dpi=120)
@@ -301,7 +301,7 @@ def main():
             axc.semilogx(f, magH, lw=0.8, ls="--", label=f"src {src} GA (high)")
         axc.axvline(f_cutoff, color=FG, lw=1, ls=":", label=f"f_cutoff {f_cutoff:.0f} Hz")
         axc.set_title(f"Receiver {rec} — crossover check (FVM vs GA level at f_cutoff)")
-        axc.set_xlabel("Frequency [Hz]"); axc.set_ylabel("Magnitude [dB]")
+        axc.set_xlabel("Frequency [Hz]"); axc.set_ylabel("SPL [dB re 20 µPa]")
         axc.set_xlim(20, fs / 2); axc.grid(True, which="both"); axc.legend(fontsize=8)
         figc.tight_layout()
         figc.savefig(f"IR_rec{rec}_crossover.png", dpi=120)
