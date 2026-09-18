@@ -833,7 +833,7 @@ __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta,
 	return dd[(int)abs(rr)]/(aux*aux);
 }
 */
-/*
+
 // WENO-Z weights: Borges, Carmona, Costa & Don (2008), eqs. (25) and (28)
 // tau5 = |beta_0 - beta_2| is symmetric, so the SS mirroring does not affect it
 __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta, float eps, int r, int SS){
@@ -842,14 +842,14 @@ __device__ float compute_alpha(float *__restrict__ dd, float *__restrict__ beta,
 	int rr = SS*3 - SS*1 - r;
 	return dd[(int)abs(rr)] * (1.0f + ratio); // q = 1 (less dissipative)
 }
-*/
 
-// UP5 (5th linear Upwind scheme)
+/*
+// UP5 (5th linear Upwind scheme - highly dissipative)
 __device__ float compute_alpha(float *__restrict__ dd, int r, int SS){
 	int rr = SS*3 - SS*1 - r;
 	return dd[(int)abs(rr)];
 }
-
+*/
 
 // compute omega[r] - w here is distinct from velocity in z!
 __device__ float compute_w(float *alpha, int r){
@@ -869,21 +869,21 @@ __device__ float WENO_x(float *__restrict__ V, float *__restrict__ dd, float *__
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
-	/*
+	
 	// 3) Compute smoothness indicators beta[r] (comment for UP5)
 	//WENO-5/Z
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_x(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
-	*/
+	
 	// 4) Define omega[r]
 	float alpha[3], w[3];
 	for (int r = 0; r < 3; r++){
 		//WENO-5/Z
-		//alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
 		// UP5
-		alpha[r] = compute_alpha(dd, r, abs(idx-1));
+		//alpha[r] = compute_alpha(dd, r, abs(idx-1));
 	}
 	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
@@ -909,20 +909,20 @@ __device__ float WENO_y(float *__restrict__ V, float *__restrict__ dd, float *__
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
-	/*
+	
 	// 3) Compute smoothness indicators beta[r] (comment for UP5)
 	//WENO-5/Z
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_y(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
-	*/
+	
 	// 4) Define omega[r]
 	float alpha[3], w[3];
 	for (int r = 0; r < 3; r++){
-		//alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
 		// UP5
-		alpha[r] = compute_alpha(dd, r, abs(idx-1));
+		//alpha[r] = compute_alpha(dd, r, abs(idx-1));
 	}
 	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
@@ -948,20 +948,20 @@ __device__ float WENO_z(float *__restrict__ V, float *__restrict__ dd, float *__
 	}
 	
 	// 2) Compute coefficients d_r: computed on array dd
-	/*
+	
 	// 3) Compute smoothness indicators beta[r] (comment for UP5)
 	//WENO-5/Z
 	float beta[3];
 	for (int r = 0; r < 3; r++){
 		beta[r] = compute_beta_z(V, r, i, j, k, Nx, Ny, beta_rl);
 	}
-	*/
+	
 	// 4) Define omega[r]
 	float alpha[3], w[3]; // != velocity in z!
 	for (int r = 0; r < 3; r++){
-		//alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
+		alpha[r] = compute_alpha(dd, beta, eps, r, abs(idx-1));
 		// UP5
-		alpha[r] = compute_alpha(dd, r, abs(idx-1));
+		//alpha[r] = compute_alpha(dd, r, abs(idx-1));
 	}
 	for (int r = 0; r < 3; r++){
 		w[r] = compute_w(alpha, r);
