@@ -93,32 +93,35 @@ inline static vec3 rt_lambert_dir(const vec3& N, float u1, float u2){
     return (dl>1e-8f)? mul3(dir,1.f/dl) : N;
 }
 
-// Expand a single global scattering coefficient g in [0,1] into 8 octave-band values
-// (63..8000 Hz) by linear interpolation of an ODEON-style reference table. Every column
-// is monotonic in g and every row rises with frequency, so the interpolation reproduces
-// the reference exactly at the anchors and stays monotonic between them. g is a roughness
-// index (a selector), not "s at some frequency".
-inline static void rt_scatter_bands(float g, float s_out[RT_NBANDS]){
-    static const int NA = 10;
-    static const float ga[NA] = {0.01f,0.02f,0.05f,0.10f,0.20f,0.30f,0.50f,0.80f,0.90f,1.00f};
-    static const float tab[NA][RT_NBANDS] = {
-        {0.010f,0.010f,0.010f,0.015f,0.020f,0.035f,0.040f,0.040f},
-        {0.010f,0.010f,0.010f,0.015f,0.035f,0.080f,0.090f,0.100f},
-        {0.010f,0.010f,0.010f,0.025f,0.080f,0.200f,0.250f,0.300f},
-        {0.010f,0.010f,0.020f,0.050f,0.150f,0.260f,0.310f,0.350f},
-        {0.010f,0.010f,0.030f,0.110f,0.290f,0.370f,0.420f,0.460f},
-        {0.010f,0.020f,0.040f,0.190f,0.420f,0.490f,0.530f,0.570f},
-        {0.010f,0.030f,0.100f,0.380f,0.620f,0.740f,0.770f,0.800f},
-        {0.020f,0.050f,0.240f,0.710f,0.860f,0.880f,0.890f,0.900f},
-        {0.040f,0.110f,0.680f,0.860f,0.920f,0.930f,0.940f,0.950f},
-        {0.100f,0.370f,0.900f,1.000f,1.000f,1.000f,1.000f,1.000f},
-    };
-    if(g <= ga[0]){    for(int b=0;b<RT_NBANDS;++b) s_out[b]=tab[0][b];    return; }
-    if(g >= ga[NA-1]){ for(int b=0;b<RT_NBANDS;++b) s_out[b]=tab[NA-1][b]; return; }
-    int i=0; while(i<NA-1 && g>ga[i+1]) ++i;              // ga[i] <= g <= ga[i+1]
-    const float t = (g-ga[i])/(ga[i+1]-ga[i]);
-    for(int b=0;b<RT_NBANDS;++b) s_out[b] = tab[i][b] + t*(tab[i+1][b]-tab[i][b]);
-}
+// OPTION, off (see main3D.cu): the RT scatters with ONE value per surface (on-off, one
+// trajectory per ray), so a per-band table can only feed the ISM, and then the early
+// energy per band no longer sums to 1. Kept for reference.
+//  Expand a single global scattering coefficient g in [0,1] into 8 octave-band values
+//  (63..8000 Hz) by linear interpolation of an ODEON-style reference table. Every column
+//  is monotonic in g and every row rises with frequency, so the interpolation reproduces
+//  the reference exactly at the anchors and stays monotonic between them. g is a roughness
+//  index (a selector), not "s at some frequency".
+//inline static void rt_scatter_bands(float g, float s_out[RT_NBANDS]){
+//    static const int NA = 10;
+//    static const float ga[NA] = {0.01f,0.02f,0.05f,0.10f,0.20f,0.30f,0.50f,0.80f,0.90f,1.00f};
+//    static const float tab[NA][RT_NBANDS] = {
+//        {0.010f,0.010f,0.010f,0.015f,0.020f,0.035f,0.040f,0.040f},
+//        {0.010f,0.010f,0.010f,0.015f,0.035f,0.080f,0.090f,0.100f},
+//        {0.010f,0.010f,0.010f,0.025f,0.080f,0.200f,0.250f,0.300f},
+//        {0.010f,0.010f,0.020f,0.050f,0.150f,0.260f,0.310f,0.350f},
+//        {0.010f,0.010f,0.030f,0.110f,0.290f,0.370f,0.420f,0.460f},
+//        {0.010f,0.020f,0.040f,0.190f,0.420f,0.490f,0.530f,0.570f},
+//        {0.010f,0.030f,0.100f,0.380f,0.620f,0.740f,0.770f,0.800f},
+//        {0.020f,0.050f,0.240f,0.710f,0.860f,0.880f,0.890f,0.900f},
+//        {0.040f,0.110f,0.680f,0.860f,0.920f,0.930f,0.940f,0.950f},
+//        {0.100f,0.370f,0.900f,1.000f,1.000f,1.000f,1.000f,1.000f},
+//    };
+//    if(g <= ga[0]){    for(int b=0;b<RT_NBANDS;++b) s_out[b]=tab[0][b];    return; }
+//    if(g >= ga[NA-1]){ for(int b=0;b<RT_NBANDS;++b) s_out[b]=tab[NA-1][b]; return; }
+//    int i=0; while(i<NA-1 && g>ga[i+1]) ++i;              // ga[i] <= g <= ga[i+1]
+//    const float t = (g-ga[i])/(ga[i+1]-ga[i]);
+//    for(int b=0;b<RT_NBANDS;++b) s_out[b] = tab[i][b] + t*(tab[i+1][b]-tab[i][b]);
+//}
 
 // ISM -> RT crossover sample index t_cross = HYBRID of two limits, whichever comes FIRST:
 //   (1) MIXING TIME (Polack): the field turns perceptually diffuse. Image sources lie on a sphere
@@ -336,7 +339,7 @@ inline static float rt_point_seg_dist2(const vec3& q, const vec3& p0, const vec3
 // [(b*Nr + r)*Nt + sample]:  e_spec = specular (image-source) energy, e_diff = diffuse
 // (scattered) energy. main combines and roots them to pressure, gating the specular at
 // the ISM crossover:  t<=t_cross -> p += sign*sqrt(e_diff);  t>t_cross -> p +=
-// sign*sqrt(e_spec + e_diff).  alpha_gb / sctr_gb are per group per band (gid*8+b), null
+// sign*sqrt(e_spec + e_diff).  alpha_gb is per group per band (gid*8+b), sctr_g per group, null
 // => rigid / no scattering. Source/receiver positions are RAW (world), transformed like
 // the walls so times line up with the ISM.
 // ============================================================
@@ -346,7 +349,6 @@ inline static void rt_trace_late(const RTScene& S,
                                  const std::vector<float>& rec_arr,
                                  const float* alpha_gb,   // [ngroups*8] absorption per group per band, or nullptr
                                  const float* m_air,      // [8] PRESSURE air-attenuation coeff (Np/m, halved); nullptr => none
-                                 const float* sctr_gb,    // [ngroups*8] scattering per group per band, or nullptr => none
                                  const float* sctr_g,     // [ngroups] GLOBAL scattering per group (the draw), or nullptr => none
                                  float c, float fs, int Nt,
                                  int Nrays, int max_order, float recv_radius,
@@ -459,14 +461,13 @@ inline static void rt_trace_late(const RTScene& S,
                 const vec3 d = v3(r.dx,r.dy,r.dz);
                 const vec3 p1 = add3(o, mul3(d, seg));
 
-                // ---- SPECULAR detection on segment [o,p1] -> e_spec (distance-independent
-                // energy per detection-sphere crossing). ONLY while the ray is still a pure
-                // specular (image-source) path: once it has taken a diffuse bounce its energy
-                // reaches the receiver via the next-event estimation below, so detecting it here too
-                // would double-count. The specular (1-s)^k attenuation is NOT applied to the
-                // energy -- it emerges from the fraction of rays that survive as specular,
-                // since each diffuse draw (prob s) removes a ray from this population.
-                for(int rr = 0; !scattered && rr < Nr; rr++){
+                // ---- DETECTION on segment [o,p1]: ONE detector (the sphere), every ray, full energy
+                // (distance-independent energy per crossing). The ray's STATE picks the buffer:
+                // still a pure specular path -> e_spec (main gates it after t_cross, the ISM owns
+                // the early specular); scattered at least once -> e_diff (enters at all times: the
+                // early diffusion). Pure on-off scattering: no next-event / diffuse-rain estimator.
+                std::vector<float>& e_buf = scattered ? e_diff : e_spec;
+                for(int rr = 0; rr < Nr; rr++){
                     float s_ca;
                     if(rt_point_seg_dist2(rec[(size_t)rr], o, p1, s_ca) <= R2){
                         const float d_run = d_travel + s_ca; // total path to the receiver
@@ -480,7 +481,7 @@ inline static void rt_trace_late(const RTScene& S,
                                     // crossings to the ISM image energy (ps Rp air/(4 pi d))^2; d cancels, R-independent
                                     const float e = Kspec * Rp[b]*Rp[b] * air2;
                                     //const float e = Kspec * Rp[b]*Rp[b]; // amplitude validation
-                                    float* cell = &e_spec[((size_t)b*Nr + rr)*Nt + n0];
+                                    float* cell = &e_buf[((size_t)b*Nr + rr)*Nt + n0];
                                     #ifdef _OPENMP
                                     #pragma omp atomic
                                     #endif
@@ -508,53 +509,6 @@ inline static void rt_trace_late(const RTScene& S,
                     //Rrefl[b] = Rp[b] * std::fabs(R_oblique(al, 1.0)); // amplitude validation
                 }
 
-                // ---- DIFFUSE ESTIMATION -> e_diff: deterministically connect the bounce
-                // point B=p1 to each visible receiver and deposit the scattered contribution
-                // s[b] of the reflected power as a Lambert secondary source (point-receiver
-                // intensity). This is the low-variance diffuse DETECTOR; the ray's own energy
-                // is untouched and keeps propagating via the stochastic draw below.
-                if(sctr_gb && gid>=0 && gid<S.ngroups){
-                    const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;  // face the incoming side
-                    for(int rr = 0; rr < Nr; rr++){
-                        const vec3 br = sub3(rec[(size_t)rr], p1);
-                        const float d2 = norm2_3(br);                      // d_rec^2 = (B -> receiver)^2, the REAL distance
-                        if(d2 < 1e-6f) continue;
-                        const float drec = std::sqrt(d2);                  // d_rec
-                        const vec3 u = mul3(br, 1.f/drec);                 // unit B -> receiver
-                        const float cosr = dot3(No, u);                    // cos(theta) off the surface normal (Lambert weight)
-                        if(cosr <= 0.f) continue;                          // receiver behind the surface
-                        ray3 sr; sr.ox=p1.x+No.x*1e-4f; sr.oy=p1.y+No.y*1e-4f; sr.oz=p1.z+No.z*1e-4f;
-                        sr.dx=u.x; sr.dy=u.y; sr.dz=u.z;
-                        float sh_t; int sh_tri;
-                        if(rt_closest_hit(S, sr, 1e-4f, sh_t, sh_tri) && sh_t < drec-1e-3f) continue; // occluded
-                        const float d_run = d_travel + drec;               // source -> B -> receiver
-                        if(d_run/c >= t_end) continue;
-                        const int n0 = (int)((d_run/c)*fs);
-                        if(n0 < 0 || n0 >= Nt) continue;
-                        // Lambert point-receiver INTENSITY factor (see the derivation block above):
-                        //   geo = cos(theta) / (pi * d_rec^2)
-                        //   * cos(theta)/pi  = Lambert radiant intensity per unit source power,
-                        //   * 1/d_rec^2      = inverse-square spreading to the receiver POINT (real distance).
-                        // Note d_rec (physical B->receiver distance) -- NOT R (the detection-sphere radius).
-                        // The detector radius R must not appear here or the diffuse level would scale with a
-                        // solver knob; d_rec MUST appear because a farther receiver physically gets less.
-                        const float geo = cosr * RT_INVPI / d2; // cos(theta)/(pi d_rec^2) (Kuttruff eq 4.22)
-                        for(int b = 0;b < RT_NBANDS; b++){
-                            const float sb = std::max(0.f, std::min(1.f, sctr_gb[(size_t)gid*RT_NBANDS+b]));
-                            if(sb <= 0.f) continue;
-                            const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f;
-                            // e_diff = w_ray * s[b] * Rrefl^2 * air^2 * geo   (Kdiff == w_ray)
-                            const float e = Kdiff * sb * Rrefl[b]*Rrefl[b] * air2 * geo;
-                            //const float e = Kdiff * sb * Rrefl[b]*Rrefl[b] * geo; // amplitude validation
-                            float* cell = &e_diff[((size_t)b*Nr + rr)*Nt + n0];
-                            #ifdef _OPENMP
-                            #pragma omp atomic
-                            #endif
-                            *cell += e;
-                        }
-                    }
-                }
-
                 // ---- ENERGY CONSERVATION: the ray carries the FULL reflected power (1-alpha)
                 // forward. Scattering changes only the DIRECTION, not the energy, so scattered
                 // energy keeps bouncing (multiple scattering) and the tail decays at the
@@ -578,14 +532,17 @@ inline static void rt_trace_late(const RTScene& S,
                 
                 // The concept below can be found in Hanna Autio's thesis and in Brandão et al (2019, Aachen)
                 // called on-off scattering (Autio, Vardaxis, Hagberg) (2021)
-                if(sg > 0.f && rt_u01(seed) < sg){
+                const bool diffuse = (sg > 0.f && rt_u01(seed) < sg);
+                if(diffuse){
                     const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;   // outward-facing normal
                     ref = rt_lambert_dir(No, rt_u01(seed^0x9e3779b9u), rt_u01(seed^0x85ebca6bu));
-                    scattered = true;                                        // no more specular sphere deposits
+                    scattered = true;                                        // deposits go to e_diff from now on
                 } else {
                     rt_compute_reflected(ref, d, N);
                 }
-                
+                // No per-band reweighting here (tried s_b/sg, (1-s_b)/(1-sg) per bounce: the weights
+                // compound over 30-60 bounces and a few rays end up carrying the tail -> spikes).
+                // One trajectory, one value: the ISM removes the same sg from its images.
                 //rt_compute_reflected(ref, d, N); // amplitude validation (comment block above)
                 // change ray's direction
                 r.ox=p1.x + ref.x*1e-4f; r.oy=p1.y + ref.y*1e-4f; r.oz=p1.z + ref.z*1e-4f;

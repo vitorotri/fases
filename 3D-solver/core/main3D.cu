@@ -1579,13 +1579,20 @@ int main(int argc, char *argv[]){
 	// ray count: user value from config.txt line 15 (conf_arr[14]) if present, else
 	// a safe default. The GUI seeds that field from Vol.bin (Vorlander <k>).
 	int   rt_nrays       = (conf_arr.size() > 14) ? std::max(0, (int)conf_arr[14]) : 10000;
-	int   rt_max_order   = 200;	// energy floor kills most rays far sooner
+	int   rt_max_order   = 100000;	// not a limit: rays stop at t_end (IR length) or at the energy floor. A cap of
+	                                	// 200 truncated a hard small room's tail at 200*mfp/c ~ 1.5 s, at -28 dB, all rays at once.
 	float rt_recv_radius = 0.12f; // [m] receiver radius (keep it around 0.10 m to match ray-tracer)
-	// per-group scattering: read the single value from input/sctr/<name>.sctr and expand
-	// to 8 octave bands (rt_scatter_bands). names[g+1] is material g (names[0]=BoundingBox).
+	// per-group scattering: ONE value from input/sctr/<name>.sctr = the on-off draw probability in the
+	// RT and the specular removal in the ISM (one trajectory per ray, so one value per band too).
+	// names[g+1] is material g (names[0]=BoundingBox).
 	std::filesystem::path sctr_dir = project_root / "input" / "sctr";
-	std::vector<float> sctr_gb((size_t)rtS.ngroups * 8, 0.0f);
 	std::vector<float> sctr_g((size_t)rtS.ngroups, 0.01f);   // GLOBAL s per group (the stochastic draw)
+// OPTION, off: per-band expansion of the single value (Odeon-style table, rt_scatter_bands).
+	//  Refines the ISM's early images per band, but the RT can only scatter with the single value, so
+	//  the early energy per band becomes (1 - s_b) + sg != 1 -- worst at the lowest GA band for
+	//  high-scattering surfaces (seating at 250 Hz: +1.9 dB -> EDT dip there). Needs the ISM lines
+	//  below switched to sctr_gb[gk*8+b] as well.
+	//std::vector<float> sctr_gb((size_t)rtS.ngroups * 8, 0.0f);
 	for (int g = 0; g < rtS.ngroups; g++){
 		std::string mname = (g + 1 < (int)names.size()) ? names[g + 1] : std::string();
 		float gval = 0.01f;   // default scattering if no .sctr file
@@ -1602,20 +1609,18 @@ int main(int argc, char *argv[]){
 			}
 		}
 		sctr_g[(size_t)g] = gval;
-		// rt_scatter_bands floors every band at ~0.01 (its first row), so gval<=0 would still
-		// inject ~1% diffuse through the next-event deposit while the stochastic draw (sctr_g)
-		// is off. Force a TRUE zero here so "no scattering" is actually none (validation).
-		if (gval <= 0.f){
-			for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = 0.f;
-		} else {
-			float s8[8]; rt_scatter_bands(gval, s8);
-			for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = s8[b];
-		}
+// per-band table option (see above); gval <= 0 must stay a TRUE zero in every band
+	//	if (gval <= 0.f){
+	//		for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = 0.f;
+	//	} else {
+	//		float s8[8]; rt_scatter_bands(gval, s8);
+	//		for (int b = 0; b < 8; ++b) sctr_gb[(size_t)g*8 + b] = s8[b];
+	//	}
 	}
 
 	// RT late field: two ENERGY buffers (specular / diffuse), rooted per bin at deposit.
 	std::vector<float> e_spec, e_diff;
-	rt_trace_late(rtS, src_arr, src_pressure_Pa, rec_arr, alpha_gb.data(), m_air.data(), sctr_gb.data(),
+	rt_trace_late(rtS, src_arr, src_pressure_Pa, rec_arr, alpha_gb.data(), m_air.data(),
 			  sctr_g.data(), c, fs, (int)Nt, rt_nrays, rt_max_order, rt_recv_radius, e_spec, e_diff);
 	
 	//int t_cross = (int)Nt; // ISM amplitude validation
@@ -1719,10 +1724,16 @@ int main(int argc, char *argv[]){
 						//float theta = 0.0; // amplitude validation (normal incidence)
 						float R = R_oblique(iS.alpha[k][b], std::cos(theta));
 						// scattered fraction leaves the specular path: keep sqrt(1-s) of the
-						// pressure (energy x (1-s)), matching the RT (1-s) split.
+						// pressure (energy x (1-s)). The RT scatters with the SINGLE on-off value sg
+						// (one trajectory per ray, no per-band split), so the ISM must remove the
+						// same sg: early energy per band = (1-sg) + sg = 1. The per-band table
+						// (sctr_gb, Odeon-style expansion) is kept as an option: it refines the early
+						// images but the tail then contradicts it by (sg - s_b) per band -- worst at
+						// the lowest GA band for high-scattering surfaces (seating at 250 Hz, +1.9 dB).
 						int gk = iS.group[k];
 						if (gk >= 0 && gk < rtS.ngroups)
-							R *= std::sqrt(std::max(0.0f, 1.0f - sctr_gb[(size_t)gk*8 + b]));
+							R *= std::sqrt(std::max(0.0f, 1.0f - sctr_g[(size_t)gk]));
+							//R *= std::sqrt(std::max(0.0f, 1.0f - sctr_gb[(size_t)gk*8 + b])); // per-band table option
 						P *= R;
 					}
 					// iS.amp in [0,1] handles curved surfaces (parser heuristic)
@@ -1814,7 +1825,8 @@ int main(int argc, char *argv[]){
 					for (size_t k=0;k<iS.angle_rad.size();k++){
 						float R = R_oblique(iS.alpha[k][b], std::cos(iS.angle_rad[k]));
 						int gk = iS.group[k];
-						if (gk >= 0 && gk < rtS.ngroups) R *= std::sqrt(std::max(0.0f, 1.0f - sctr_gb[(size_t)gk*8 + b]));
+						if (gk >= 0 && gk < rtS.ngroups) R *= std::sqrt(std::max(0.0f, 1.0f - sctr_g[(size_t)gk]));   // single on-off value, as the ISM above
+						//if (gk >= 0 && gk < rtS.ngroups) R *= std::sqrt(std::max(0.0f, 1.0f - sctr_gb[(size_t)gk*8 + b])); // per-band table option
 						P *= R;
 					}
 					g[b] = Q.src_pressure[s] * iS.amp * P / d * std::exp(-m_air[b]*d);

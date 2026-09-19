@@ -112,14 +112,21 @@ def low_deconv(raw):
         n = x.size
         Q = np.fft.rfft(pulse_fs, n=n)
         eps = deconv_reg * np.max(np.abs(Q) ** 2)              # Tikhonov: caps gain where pulse is weak
-        return np.fft.irfft(np.fft.rfft(x) * np.conj(Q) / (np.abs(Q) ** 2 + eps), n=n)
+        # Deconvolving by the pulse IN PA (p_ref.bin is the free-field pulse at 1 m, peak = the
+        # source's Lp,1m pressure) removes its amplitude too -> 1 at 1 m, dimensionless. Put the
+        # amplitude back so the IR is in Pa like the GA bands: direct sound at 1 m = p_1m.
+        p_1m = float(np.max(np.abs(pulse_fs)))
+        return p_1m * np.fft.irfft(np.fft.rfft(x) * np.conj(Q) / (np.abs(Q) ** 2 + eps), n=n)
     return np.roll(x * (fs_fv / fs), -lag)                     # older run without p_ref.bin
 
 
-# ONE power-complementary filterbank: FVM is the band below f_cutoff, each GA octave a band
+# ONE amplitude-complementary filterbank: FVM is the band below f_cutoff, each GA octave a band
 # above it. Every input is filtered EXACTLY ONCE (the lowest GA band high-passes at f_cutoff and
-# fuses with the FVM low-pass), so the GA is never double-filtered at the crossover. sqrt() of the
-# amplitude-complementary cosine -> sum(w^2)=1 at every edge, so incoherent bands add flat in power.
+# fuses with the FVM low-pass), so the GA is never double-filtered at the crossover. The bands are
+# COHERENT (same ISM arrivals and ray paths in every octave, same direct sound in FVM and GA), so
+# the weights must sum to 1 in AMPLITUDE: cos shoulders as they are. The earlier sqrt(w) (power-
+# complementary, right only for incoherent signals) gave 2*0.707 = +3 dB bumps at every edge
+# (177 and 354 Hz at f_cutoff=500) -> the 250 octave read as a valley and skewed EDT/T20 there.
 _T = 2 ** (1 / 6)                                           # cosine transition half-width
 def _shoulder(f, e, hi):                                    # hi=True -> high-pass shoulder at edge e
     x = np.clip((f - e / _T) / (e * _T - e / _T), 0, 1)
@@ -131,7 +138,7 @@ def _filt(ir, hp_e, lp_e):
     w = np.ones_like(f)
     if hp_e: w *= _shoulder(f, hp_e, True)
     if lp_e: w *= _shoulder(f, lp_e, False)
-    return np.fft.irfft(np.fft.rfft(ir) * np.sqrt(w), n=ir.size)
+    return np.fft.irfft(np.fft.rfft(ir) * w, n=ir.size)
 
 
 def broadband_ir(rec, src):
@@ -157,6 +164,10 @@ def broadband_ir(rec, src):
     # missing here the FVM run is incomplete -> warn LOUD so a broken run isn't silently downgraded to
     # GA-only. Below 63 Hz there IS no FVM band by design, so GA-only is expected and quiet.
     wave_expected = f_cutoff_sim >= octave_bands[0]
+    # Below 63 Hz the FVM band lies under every GA octave: GA-only by design even if the solver ran
+    # and left an IR<rec>_<src>.bin (it did at f_cutoff=50: a 44 Hz crossover, an empty match window,
+    # median([]) = nan, and the GA got scaled by nan).
+    have_low = have_low and wave_expected
     if wave_expected and not have_low:
         why = "header.txt missing (FVM run not finished)" if low_files else "no IR<rec>_<src>.bin (low)"
         print(f"[allIRs] !! rec{rec} src{src}: f_cutoff={f_cutoff_sim:.0f} Hz expects a WAVE-based low "
@@ -219,9 +230,10 @@ def broadband_ir(rec, src):
               f"  raw FVM in window={np.median(_raw[_lo_raw]) if _lo_raw.any() else float('nan'):.3e}"
               + (f"  |Q| max={_Q.max():.3e} median in window={np.median(_Q[lo]):.3e}" if _Q is not None else "  (no pulse)")
               + f"  max|LIR|={np.abs(LIRp).max():.3e}  max|HIR|={np.abs(HIRp).max():.3e}")
-        if H > 0:
+        if H > 0 and np.isfinite(L) and np.isfinite(H) and L > 0:   # empty window -> nan: leave GA unscaled
             HIRp = HIRp * (L / H)
-            print(f"[allIRs] rec{rec} src{src}: GA->FVM spectral match {20*np.log10(L/H):+.1f} dB")
+            print(f"[allIRs] rec{rec} src{src}: GA->FVM spectral match {20*np.log10(L/H):+.1f} dB"
+                  "  (both in Pa: this is a calibration check, expect |.| < ~2 dB)")
     return LIRp + HIRp, LIRp, HIRp             # broadband, low-only, high-only (all length N)
 
 
@@ -271,7 +283,7 @@ def main():
 
     def _fr(x):                                            # (freq>0, magnitude dB)
         f = np.fft.rfftfreq(x.size, 1 / fs)
-        return f[1:], 20 * np.log10(np.abs(np.fft.rfft(x))[1:] / 2e-5 + 1e-12)   # dB re 20 uPa (IR in Pa per unit impulse)
+        return f[1:], 20 * np.log10(np.abs(np.fft.rfft(x))[1:] / 2e-5 + 1e-12)   # IR in Pa (FVM deconvolved then re-scaled to p_1m, GA in Pa): direct at 1 m reads Lp,1m
 
     # one figure per receiver: a column per source, IR (top) + frequency response (bottom)
     for rec, items in sorted(by_rec.items()):
