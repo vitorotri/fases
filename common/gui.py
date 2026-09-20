@@ -8078,14 +8078,15 @@ class MainWindow(QMainWindow):
             base, ext = os.path.splitext(path)
             shifted = base + "_positive" + ext
             prev = tuple(getattr(self, "_obj_shift", (0.0, 0.0, 0.0)))
+            wrote = (0.0, 0.0, 0.0)                        # what shift_to_positive really applied to THIS file
             if getattr(self._gl, "_shift_enabled", True):
-                shift = shift_to_positive(path, shifted)   # writes `shifted` only if a shift is needed
+                wrote = shift_to_positive(path, shifted)   # writes `shifted` only if a shift is needed
                 # A derived copy (project reopen: manifest scene = foo_positive_merged.obj) is
                 # ALREADY shifted, so shift_to_positive says 0 -- but relative to the user's
                 # original it still carries the recorded shift. Reporting 0 here made the
                 # delta below -prev and dragged every src/rec back to the original frame.
-                if _derived and shift == (0.0, 0.0, 0.0):
-                    shift = prev
+                # `wrote` stays 0 in that case: no _positive copy exists to switch to.
+                shift = prev if (_derived and wrote == (0.0, 0.0, 0.0)) else wrote
             else:
                 shift = (0.0, 0.0, 0.0)                    # load as-is; solver offset covers it
             # Remember it: the scene menu can re-display src/rec coordinates in the
@@ -8101,9 +8102,9 @@ class MainWindow(QMainWindow):
                   f"  translated={moved} point(s)"
                   + ("  (delta is zero -> points left alone)" if not any(d) else ""))
             self._apply_orig_frame(getattr(self._gl, "_orig_frame", False))
-            if shift != (0.0, 0.0, 0.0):
+            if wrote != (0.0, 0.0, 0.0):                   # only when a copy was actually written
                 print(f"[OBJ] off the positive octant; loading shifted copy "
-                      f"(by {shift}): {os.path.basename(shifted)}")
+                      f"(by {wrote}): {os.path.basename(shifted)}")
                 path = shifted
             # The solver offset (-bmin of the mesh main3D will read) must come from the file
             # that is actually LOADED: the positive copy when shifting is on (bmin = 0 on the
