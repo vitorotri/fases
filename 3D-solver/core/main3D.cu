@@ -152,7 +152,12 @@ int main(int argc, char *argv[]){
     // domain variables
     h = conf_arr[0]; // uniform grid spacing [m]
     t_max = conf_arr[1]; // maximum simulation time [s]
-    f_cutoff = conf_arr[2]; // [Hz] (cutoff frequency)
+    // With PCS, the FVM is only excited/valid up to ~0.5*f_cutoff (source peak ~0.45*f_cutoff), so the FVM<->GA
+	// crossover sits at f_x = 0.5*f_cutoff, NOT at f_cutoff (which stays the grid/mesh ceiling). Emit
+	// GA octave bands down to the one containing f_x so the GA reaches the crossover. allIRs filters
+	// at the same f_x. So a circumvention is to already read f_cutoff doubled like below so the srouce is
+	// strong enough uo to the desired f_cutoff.
+    f_cutoff = 2.0f * conf_arr[2]; // [Hz] (cutoff frequency)
     
     const float f_x = 0.5f * f_cutoff; // FVM<->GA crossover frequency
     if (f_x < 63.0) ga_only = true; // simulate only GA
@@ -869,7 +874,7 @@ int main(int argc, char *argv[]){
     	std::istringstream iss(line);
     	
     	if (iss >> val_x >> val_y >> val_z >> val_s){
-    		if (!(iss >> val_f0)) val_f0 = 0.45f * f_cutoff;   // old 4-col src.txt: default f0
+    		if (!(iss >> val_f0)) val_f0 = 0.5f * f_cutoff; // old 4-col src.txt: default f0
         	i_src = (int)(val_x / h) + 3;
         	j_src = (int)(val_y / h) + 3;
         	k_src = (int)(val_z / h) + 3;
@@ -965,7 +970,7 @@ int main(int argc, char *argv[]){
 	float *d_src_freq;
 	
 	int src_opt = (conf_arr.size() > 15) ? (int)conf_arr[15] : 0; // 0=PCS,1=Ricker,2=Sinusoid (config line 16); PCS if absent
-	float glob_f = (conf_arr.size() > 16) ? (float)conf_arr[16] : (src_opt == 0 ? 25.0f : 0.45f*f_cutoff);
+	float glob_f = (conf_arr.size() > 16) ? (float)conf_arr[16] : (src_opt == 0 ? 25.0f : 0.5f*f_cutoff);
 	
 	if (src_opt == 0){
 		// ------------ Pre-compute PCS (Physically Constrained Source) sphere's surface velocity -------------
@@ -1067,7 +1072,7 @@ int main(int argc, char *argv[]){
 	// -------------------------------- Compute dqhat and scale sources ---------------------------------------
 	
 	// compute dq_hat to retrieve analytical peak and scale sources to Lp,1m
-	if (src_opt == 2){
+	if (src_opt == 2){ // sinusoid
 		// Sinusoid: u_s is empty (the sine is computed in-kernel per source), so the
 		// shared-u_s peak below would be 0 -> divide-by-zero. The radiated peak is
 		// closed-form: dqhat_peak = A_s*2*pi*f_s -> p_peak_s = rho*A_s*f_s/2.
@@ -1543,11 +1548,6 @@ int main(int argc, char *argv[]){
 
 	scene_free(&sc); // free scene here: ism_solve and rt_build are its last users
 
-	
-	// With PCS, the FVM is only excited/valid up to ~0.5*f_cutoff (source peak ~0.45*f_cutoff), so the FVM<->GA
-	// crossover sits at f_x = 0.5*f_cutoff, NOT at f_cutoff (which stays the grid/mesh ceiling). Emit
-	// GA octave bands down to the one containing f_x so the GA reaches the crossover. allIRs filters
-	// at the same f_x.
 	// Determine number of valid bands for ISM / Ray-Tracing (easier array allocation later on)
 	int N_bands = 8; // number of bands for ISM / Ray-Tracing, start with total
 	for (int i = 0; i < 8; i++){
@@ -1572,6 +1572,13 @@ int main(int argc, char *argv[]){
 		for (int b = 0; b < 8; ++b){
 			alpha_gb[(size_t)g*8 + b] = Z[g].alpha[b];
 		}
+	}
+	// What the GA actually applies, per group and octave (compare with the .mat / CSV table).
+	printf("\n[GA] absorption per group (63 125 250 500 1k 2k 4k 8k):\n");
+	for (int g = 0; g < rtS.ngroups && g < (int)Z.size(); g++){
+		printf("     %-16s", (g + 1 < (int)names.size()) ? names[g + 1].c_str() : "?");
+		for (int b = 0; b < 8; ++b) printf(" %.3f", alpha_gb[(size_t)g*8 + b]);
+		printf("\n");
 	}
 
 	// recv_radius sets the detection-sphere size; too small starves the tail, too big
@@ -1677,8 +1684,13 @@ int main(int argc, char *argv[]){
 			// exactly 50/50 (+-1) -> kills the low-order positive lean, without an ordering/comb
 			// pattern (base is random per pair). Coincident arrivals land in different pairs, so
 			// they stay incoherent. Balances the COUNT only; energy |gS| is untouched.
+			// Independent random sign per non-zero bin: white, zero-mean in expectation. The earlier
+			// antithetic pairing (k>>1 shared the draw, k&1 flipped it) made the DENSE tail a
+			// +s,-s,+s',-s' sequence = a first difference, power 4 sin^2(pi f/fs): -32 dB at 250 Hz,
+			// -20 dB at 1 kHz, -8 dB at 4 kHz relative to white, while the sparse early part was
+			// untouched -> EDT/T20 short in every GA band, worst at the lowest (the 250 Hz valley).
 			auto asign = [&](unsigned k){
-				return rt_sign((k>>1)*2654435761u + (unsigned)r*40503u + (unsigned)b*97u) * ((k & 1u) ? -1.f : 1.f);
+				return rt_sign(k*2654435761u + (unsigned)r*40503u + (unsigned)b*97u);
 			};
 			// for each source
 			for (int s = 0; s < Q.Ns; s++){
