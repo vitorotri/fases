@@ -1645,8 +1645,9 @@ int main(int argc, char *argv[]){
 	
 	// for each band
 	for (int b = 0; b < 8; b++){
-		if (octave_bands[b] * 1.41421356f <= f_x) continue; // skip octaves ENTIRELY below the seam; the one
-		                                                   // straddling f_x is written and allIRs high-passes it at f_x
+		// skip octaves ENTIRELY below the seam; the one straddling
+		// f_x is written and allIRs high-passes it at f_x
+		if (octave_bands[b] * 1.41421356f <= f_x) continue;
 		
 		// allocate memory for high frequency IRs: for each rec, first index sample is time, second is
 		// receiver's index (flattened)
