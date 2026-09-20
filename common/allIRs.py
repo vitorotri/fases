@@ -65,9 +65,10 @@ def _init():
     else:
         dt = dt_half = fs_fv = None
         print("[allIRs] no ../output/header.txt (FVM did not run) -> GA-only: building from GA bands.")
-    # FVM<->GA crossover f_x. Fallback = 0.5*f_cutoff (PCS Gaussian roll-off); overridden below from the
-    # actual source-pulse spectrum so it's also right for Ricker (bandpass) and any custom glob_f.
-    f_cutoff = 0.5 * f_cutoff_sim                 # Hz (grid ceiling is f_cutoff_sim)
+    # FVM<->GA crossover f_x = the config value itself. main3D reads that line as the WAVE band's top:
+    # it doubles it for the grid/pulse (f_cutoff = 2*f_x, PCS strong up to f_x) and emits every GA
+    # octave whose upper edge is above f_x. Same number, same file, on both sides -> no hole possible.
+    f_cutoff = f_cutoff_sim                       # Hz: the seam (grid ceiling is 2*f_cutoff_sim)
     # main3D writes the radiated pulse to ../config/p_ref.bin; deconvolving it recovers the bare room
     # IR so the FVM and GA bands share density and meet at f_cutoff. float64 at dt/2 -> resample to fs.
     pulse_fs = _load_pulse() if dt is not None else None
@@ -90,14 +91,14 @@ def _init():
         # how well the FVM is excited up to it.
         pulse_xover_hint = _fx
         print(f"[allIRs] pulse peak {_f[_pk]:.1f} Hz, {XOVER_DROP_DB:.0f} dB down by {_fx:.1f} Hz "
-              f"(nominal crossover 0.5*f_cutoff = {f_cutoff:.1f} Hz)")
+              f"(crossover f_x = {f_cutoff:.1f} Hz, the config value)")
     # Fallback only (no p_ref.bin from an older run): source-pulse lag instead of deconv. Needs dt,
     # so skip it for a GA-only run (no low band to lag-align anyway).
     if dt is not None:
         if src_opt == 1:                              # Ricker wavelet
-            sigma_s = 1.0 / (np.sqrt(2) * np.pi * 0.3 * f_cutoff_sim)
+            sigma_s = 1.0 / (np.sqrt(2) * np.pi * 0.3 * (2 * f_cutoff_sim))   # main3D's f_cutoff = 2*config
         else:                                         # PCS (0) — Sinusoid (2) has no pulse lag
-            sigma_s = 0.425 / f_cutoff_sim
+            sigma_s = 0.425 / (2 * f_cutoff_sim)
         lag = int(round(np.ceil(8.5 * sigma_s / dt_half) * dt_half * fs))
     else:
         sigma_s = lag = None
@@ -180,17 +181,21 @@ def broadband_ir(rec, src):
 
     present_fcs = [int(hf.split("_")[-1].split(".")[0]) for hf in high_files]
     lowest_fc = min(present_fcs) if present_fcs else None
-    # THE crossover: where the lowest GA band main3D actually wrote begins (its lower edge). The
-    # FVM owns everything below it -- including, at f_cutoff=512, the whole 250 Hz octave up to
-    # 353 Hz, by design. Derived from the files, so FVM and GA meet exactly and no hole can open
-    # whatever the pulse spectrum did. The pulse hint says how well the FVM is excited there.
-    fx = (lowest_fc / 2 ** 0.5) if (have_low and lowest_fc) else f_cutoff
-    globals()["f_cutoff"] = fx                             # the receiver plots mark the crossover from it
+    # THE crossover: the config value (see _init). The FVM is low-passed there; the GA octave that
+    # straddles it is high-passed there (main3D wrote it: its upper edge is above f_x); octaves
+    # entirely below f_x are dropped. The lowest band present is only checked for consistency.
+    fx = f_cutoff
+    if have_low and lowest_fc and lowest_fc * 2 ** 0.5 <= fx:
+        print(f"[allIRs] !! rec{rec} src{src}: GA band {lowest_fc} lies entirely below the crossover {fx:.0f} Hz "
+              "-- main3D and this config disagree (stale output?)")
+    if have_low and lowest_fc and lowest_fc / 2 ** 0.5 > fx * 1.001:
+        print(f"[allIRs] !! rec{rec} src{src}: lowest GA band {lowest_fc} starts at {lowest_fc / 2 ** 0.5:.0f} Hz, "
+              f"above the crossover {fx:.0f} Hz -> HOLE {fx:.0f}-{lowest_fc / 2 ** 0.5:.0f} Hz (stale output?)")
     if have_low and lowest_fc:
         hint = pulse_xover_hint
         note = (f"; pulse is {XOVER_DROP_DB:.0f} dB down by {hint:.0f} Hz -> FVM weakly excited "
                 f"in {hint:.0f}-{fx:.0f} Hz" if (hint is not None and hint < fx) else "")
-        print(f"[allIRs] rec{rec} src{src}: crossover f_x = {fx:.1f} Hz (lower edge of GA band {lowest_fc}){note}")
+        print(f"[allIRs] rec{rec} src{src}: crossover f_x = {fx:.1f} Hz (config); lowest GA band {lowest_fc}{note}")
     if have_low:
         LIR = _filt(LIR, None, fx)                         # FVM: single low-pass at the crossover
     H_IRs = []

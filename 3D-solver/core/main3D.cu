@@ -1551,7 +1551,7 @@ int main(int argc, char *argv[]){
 	// Determine number of valid bands for ISM / Ray-Tracing (easier array allocation later on)
 	int N_bands = 8; // number of bands for ISM / Ray-Tracing, start with total
 	for (int i = 0; i < 8; i++){
-		if (f_x <= octave_bands[i]){
+		if (octave_bands[i] * 1.41421356f > f_x){   // first octave whose UPPER edge is above the seam
 			N_bands -= i;
 			break;
 		}
@@ -1645,7 +1645,8 @@ int main(int argc, char *argv[]){
 	
 	// for each band
 	for (int b = 0; b < 8; b++){
-		if (f_x > octave_bands[b]) continue; // skip bands below the crossover (f_x = 0.5*f_cutoff)
+		if (octave_bands[b] * 1.41421356f <= f_x) continue; // skip octaves ENTIRELY below the seam; the one
+		                                                   // straddling f_x is written and allIRs high-passes it at f_x
 		
 		// allocate memory for high frequency IRs: for each rec, first index sample is time, second is
 		// receiver's index (flattened)
