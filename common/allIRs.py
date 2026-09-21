@@ -52,7 +52,13 @@ def _init():
         return
     # speed of sound + cutoff from config; dt from the solver's output/header.txt
     cfg = np.loadtxt("../config/config.txt")
-    f_cutoff_sim = cfg[2]
+    f_cutoff_sim = cfg[2]                         # config line 3: highest WAVE-based frequency the user asked for
+    # SAME rule as main3D: the seam is the upper edge of the octave containing that value.
+    f_in = float(f_cutoff_sim)
+    f_seam = f_in
+    for _c in octave_bands:
+        if f_in <= _c * 2 ** 0.5:
+            f_seam = _c * 2 ** 0.5; break
     src_opt = int(cfg[15]) if len(cfg) > 15 else 0   # config line 16: 0=PCS, 1=Ricker, 2=Sinusoid
     # header.txt (dt) is written only when the FVM solver finishes. A GA-only run (f_cutoff_sim below
     # the FVM band, e.g. < 63 Hz) never runs FVM -> no header, no low IR. dt/fs_fv feed only the (absent)
@@ -68,7 +74,7 @@ def _init():
     # FVM<->GA crossover f_x = the config value itself. main3D reads that line as the WAVE band's top:
     # it doubles it for the grid/pulse (f_cutoff = 2*f_x, PCS strong up to f_x) and emits every GA
     # octave whose upper edge is above f_x. Same number, same file, on both sides -> no hole possible.
-    f_cutoff = f_cutoff_sim                       # Hz: the seam (grid ceiling is 2*f_cutoff_sim)
+    f_cutoff = f_seam                             # Hz: the seam (main3D's grid ceiling is 2*f_seam)
     # main3D writes the radiated pulse to ../config/p_ref.bin; deconvolving it recovers the bare room
     # IR so the FVM and GA bands share density and meet at f_cutoff. float64 at dt/2 -> resample to fs.
     pulse_fs = _load_pulse() if dt is not None else None
@@ -91,14 +97,14 @@ def _init():
         # how well the FVM is excited up to it.
         pulse_xover_hint = _fx
         print(f"[allIRs] pulse peak {_f[_pk]:.1f} Hz, {XOVER_DROP_DB:.0f} dB down by {_fx:.1f} Hz "
-              f"(crossover f_x = {f_cutoff:.1f} Hz, the config value)")
+              f"(seam f_x = {f_cutoff:.1f} Hz = upper edge of the octave holding the config value {f_in:.0f} Hz)")
     # Fallback only (no p_ref.bin from an older run): source-pulse lag instead of deconv. Needs dt,
     # so skip it for a GA-only run (no low band to lag-align anyway).
     if dt is not None:
         if src_opt == 1:                              # Ricker wavelet
-            sigma_s = 1.0 / (np.sqrt(2) * np.pi * 0.3 * (2 * f_cutoff_sim))   # main3D's f_cutoff = 2*config
+            sigma_s = 1.0 / (np.sqrt(2) * np.pi * 0.3 * (2 * f_seam))   # main3D's f_cutoff = 2*f_seam
         else:                                         # PCS (0) — Sinusoid (2) has no pulse lag
-            sigma_s = 0.425 / (2 * f_cutoff_sim)
+            sigma_s = 0.425 / (2 * f_seam)
         lag = int(round(np.ceil(8.5 * sigma_s / dt_half) * dt_half * fs))
     else:
         sigma_s = lag = None
@@ -110,14 +116,16 @@ def low_deconv(raw):
     r = Fraction(fs / fs_fv).limit_denominator(2000)
     x = resample_poly(np.asarray(raw, float), r.numerator, r.denominator)   # anti-aliased
     if pulse_fs is not None:
-        n = x.size
+        n = 2 * x.size                      # zero-padded: the deconvolution filter is two-sided (advances by the
+                                            # pulse delay, regularised pre-ringing); without padding that
+                                            # negative-time part wraps circularly to the END of the IR (a bump)
         Q = np.fft.rfft(pulse_fs, n=n)
         eps = deconv_reg * np.max(np.abs(Q) ** 2)              # Tikhonov: caps gain where pulse is weak
         # Deconvolving by the pulse IN PA (p_ref.bin is the free-field pulse at 1 m, peak = the
         # source's Lp,1m pressure) removes its amplitude too -> 1 at 1 m, dimensionless. Put the
         # amplitude back so the IR is in Pa like the GA bands: direct sound at 1 m = p_1m.
         p_1m = float(np.max(np.abs(pulse_fs)))
-        return p_1m * np.fft.irfft(np.fft.rfft(x) * np.conj(Q) / (np.abs(Q) ** 2 + eps), n=n)
+        return p_1m * np.fft.irfft(np.fft.rfft(x, n=n) * np.conj(Q) / (np.abs(Q) ** 2 + eps), n=n)[:x.size]
     return np.roll(x * (fs_fv / fs), -lag)                     # older run without p_ref.bin
 
 
@@ -135,11 +143,14 @@ def _shoulder(f, e, hi):                                    # hi=True -> high-pa
 
 
 def _filt(ir, hp_e, lp_e):
-    f = np.fft.rfftfreq(ir.size, 1 / fs)
+    # zero-padded to 2N: FFT filtering is circular, and a zero-phase filter's negative-time tail of
+    # the direct sound (the strongest event, near t=0) would otherwise wrap to the END of the IR
+    n = 2 * ir.size
+    f = np.fft.rfftfreq(n, 1 / fs)
     w = np.ones_like(f)
     if hp_e: w *= _shoulder(f, hp_e, True)
     if lp_e: w *= _shoulder(f, lp_e, False)
-    return np.fft.irfft(np.fft.rfft(ir) * w, n=ir.size)
+    return np.fft.irfft(np.fft.rfft(ir, n=n) * w, n=n)[:ir.size]
 
 
 def broadband_ir(rec, src):
@@ -164,7 +175,7 @@ def broadband_ir(rec, src):
     # f_cutoff_sim >= 63 Hz means the user asked for a WAVE-based (FVM) low band. If it's genuinely
     # missing here the FVM run is incomplete -> warn LOUD so a broken run isn't silently downgraded to
     # GA-only. Below 63 Hz there IS no FVM band by design, so GA-only is expected and quiet.
-    wave_expected = f_cutoff_sim >= octave_bands[0]
+    wave_expected = f_cutoff_sim >= octave_bands[0] / 2 ** 0.5   # same threshold as main3D's ga_only
     # Below 63 Hz the FVM band lies under every GA octave: GA-only by design even if the solver ran
     # and left an IR<rec>_<src>.bin (it did at f_cutoff=50: a 44 Hz crossover, an empty match window,
     # median([]) = nan, and the GA got scaled by nan).
