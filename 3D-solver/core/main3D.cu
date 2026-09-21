@@ -464,7 +464,7 @@ int main(int argc, char *argv[]){
 	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
 	// c = sqrt(K/rho) in case of liquids
     
-     printf("\n[OK] Speed of sound c = %.2f m/s\n",c);
+     printf("\n[OK] Speed of sound c = %.2f m/s\n\n",c);
     
      // attenuation coefficients for sound pressure according to ISO 9613-1
 	std::vector<float> m_air(8);
@@ -747,7 +747,7 @@ int main(int argc, char *argv[]){
 	
 	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
 	// ppw
-	float lambda = c/f_cutoff;
+	float lambda = 2.0 * c/f_cutoff; // since f_cutoff = 2.0 f_input on GUI side
 	if (lambda / h < 10.0f){
 		printf("[!] Resolution too low...\n\n");
 		//return -1;
