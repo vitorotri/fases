@@ -6683,7 +6683,9 @@ class MainWindow(QMainWindow):
                 ax_t.plot(np.arange(ir.size) / fs, ir, lw=0.7, color=col, label=name)
                 H = np.abs(np.fft.rfft(ir)); fr = np.fft.rfftfreq(ir.size, 1 / fs)
                 ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] / 2e-5 + 1e-12), lw=0.8, color=col, label=name)   # IR in Pa: direct sound at 1 m reads Lp,1m
-            tag = f"source {src} — " if len(srcs) > 1 else "Receiver comparison — "
+            snames = self._src_tbl.get_names()
+            sname = snames[src] if 0 <= src < len(snames) and snames[src] else f"source {src}"
+            tag = f"{sname} - " if len(srcs) > 1 else "Receiver comparison - "
             ax_t.set_title(f"{tag}impulse response")
             ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude")
             ax_f.set_title(f"{tag}frequency response")
@@ -6726,7 +6728,9 @@ class MainWindow(QMainWindow):
         # else the summed entry. Lines, not bars: one connected line per receiver (octave centres
         # are the x ticks), the selected-receiver average dashed.
         srcs = sorted(data.get("sources", {}), key=int)
-        panels = [(f"source {sv}", data["sources"][sv]) for sv in srcs] if len(srcs) > 1 else [(None, data)]
+        snames = self._src_tbl.get_names()             # user's source names (table order == source index)
+        sname = lambda i: snames[i] if 0 <= i < len(snames) and snames[i] else f"source {i}"
+        panels = [(sname(int(sv)), data["sources"][sv]) for sv in srcs] if len(srcs) > 1 else [(None, data)]
         fig, axes = plt.subplots(len(panels), 1, figsize=(8, 4.2 * len(panels)), sharex=True, squeeze=False)
         export_cols, export_rows, ref_bands, any_drawn = [], None, None, False
         for ax, (ptitle, pdata) in zip(axes[:, 0], panels):
@@ -6737,7 +6741,7 @@ class MainWindow(QMainWindow):
             ax.tick_params(colors=FG, which='both')
             ax.yaxis.label.set_color(FG); ax.title.set_color(FG)
             if not drawn:
-                ax.set_title(f"{ptitle + ' — ' if ptitle else ''}no {param} values for the selected receiver(s)")
+                ax.set_title(f"{ptitle + ' - ' if ptitle else ''}no {param} values for the selected receiver(s)")
                 continue
             any_drawn = True
             ref_bands = drawn[0][1]["bands"]
@@ -6757,7 +6761,7 @@ class MainWindow(QMainWindow):
             ax.plot(x, avg, color="#d7dde3", lw=2.0, ls="--", label="avg (selected)")
             ax.set_xticks(x); ax.set_xticklabels([str(bnd) for bnd in ref_bands])
             ax.set_ylabel(f"{param} [{units[param]}]" if units[param] else param)
-            ax.set_title(f"{ptitle + ' — ' if ptitle else 'Receiver comparison — '}{param} per octave band")
+            ax.set_title(f"{ptitle + ' - ' if ptitle else 'Receiver comparison - '}{param} per octave band")
             ax.grid(True, color=PAL['border'], lw=0.5, alpha=0.6)
             leg = ax.legend(fontsize=8)
             leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
@@ -6863,7 +6867,7 @@ class MainWindow(QMainWindow):
         leg = fig.legend(handles=handles, loc='lower center', ncol=min(4, len(series)), fontsize=8)
         leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
         for t in leg.get_texts(): t.set_color(FG)
-        fig.suptitle("Single-number ratings — simulation comparison", color=FG)
+        fig.suptitle("Single-number ratings - simulation comparison", color=FG)
         fig.tight_layout(rect=[0, 0.06, 1, 0.96])
         p = os.path.join(out, "IR_summary.png")
         fig.savefig(p, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)

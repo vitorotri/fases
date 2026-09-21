@@ -44,6 +44,18 @@ def _load_pulse():
     rr = Fraction(fs * dt / 2).limit_denominator(2000)     # 2*fs_fv -> fs
     return resample_poly(q, rr.numerator, rr.denominator)
 
+def _names(kind):
+    """User-given names from ../input/<kind>/<kind>.txt.names (the GUI's sidecar, one per row);
+    falls back to '<kind> N'. kind = 'src' or 'rec'."""
+    path = os.path.join("..", "input", kind, f"{kind}.txt.names")
+    out = []
+    try:
+        out = [ln.rstrip("\n") for ln in open(path)]
+    except OSError:
+        pass
+    return lambda i: (out[i] if i < len(out) and out[i].strip() else f"{'source' if kind == 'src' else 'receiver'} {i}")
+
+
 def _init():
     """Read config/header/pulse once (cwd must be the project's output/). Populates module globals.
     Called at the top of broadband_ir()/main() so importing the module touches no files."""
@@ -226,30 +238,23 @@ def broadband_ir(rec, src):
     N = max(LIR.size, HIR.size)
     LIRp = np.pad(LIR, (0, N - LIR.size))
     HIRp = np.pad(HIR, (0, N - HIR.size))
-    # Match GA to FVM by SPECTRAL DENSITY across the crossover (peak-matching a delta to a
-    # band-limited pulse leaves a ~bandwidth-ratio offset, ~40 dB here). Compare FVM just below
-    # f_cutoff to GA just above; median over a wide octave is robust (no narrow-band blow-up).
-    if have_low and LIRp.any() and HIRp.any():             # nothing to match against in a GA-only run
+    # REPORT ONLY -- nothing is scaled. Both streams are in Pa (FVM deconvolved then rescaled to
+    # p_1m, GA from src_pressure_Pa); validated: anechoic PCS run is flat at Lp,1m - 20 log d across
+    # the seam. The old GA *= L/H "spectral match" belonged to the normalised FVM; with absolute
+    # levels it equalised two DIFFERENT octaves of the room's transfer function (-8.7 dB on a small
+    # room's modal region, x1e15 on CR4 when the GA window was empty). A large value here now means
+    # FVM and GA disagree on absolute level, or a hole at the seam -- look at the run, not the plot.
+    if have_low and LIRp.any() and HIRp.any():
         f = np.fft.rfftfreq(N, 1 / fs)
         lo = (f >= fx / 2) & (f < fx)                      # FVM strong here
         hi = (f > fx) & (f <= fx * 2)                      # GA strong here
-        L = np.median(np.abs(np.fft.rfft(LIRp))[lo])
-        H = np.median(np.abs(np.fft.rfft(HIRp))[hi])
-        # Where does the match factor come from? Print every term so a +300 dB match can be
-        # attributed to the raw FVM level, the deconvolution gain, or a dead GA window.
-        _Q = np.abs(np.fft.rfft(pulse_fs, n=N)) if pulse_fs is not None else None
-        _rawt = np.fromfile(low_files[0], np.float32)
-        _raw = np.abs(np.fft.rfft(_rawt))
-        _fr = np.fft.rfftfreq(_rawt.size, 1 / fs_fv); _lo_raw = (_fr >= fx / 2) & (_fr < fx)
-        print(f"[allIRs] rec{rec} src{src}: match terms  L(FVM deconv, {fx/2:.0f}-{fx:.0f} Hz)={L:.3e}"
-              f"  H(GA, {fx:.0f}-{2*fx:.0f} Hz)={H:.3e}"
-              f"  raw FVM in window={np.median(_raw[_lo_raw]) if _lo_raw.any() else float('nan'):.3e}"
-              + (f"  |Q| max={_Q.max():.3e} median in window={np.median(_Q[lo]):.3e}" if _Q is not None else "  (no pulse)")
-              + f"  max|LIR|={np.abs(LIRp).max():.3e}  max|HIR|={np.abs(HIRp).max():.3e}")
-        if H > 0 and np.isfinite(L) and np.isfinite(H) and L > 0:   # empty window -> nan: leave GA unscaled
-            HIRp = HIRp * (L / H)
-            print(f"[allIRs] rec{rec} src{src}: GA->FVM spectral match {20*np.log10(L/H):+.1f} dB"
-                  "  (both in Pa: this is a calibration check, expect |.| < ~2 dB)")
+        L = float(np.median(np.abs(np.fft.rfft(LIRp))[lo])) if lo.any() else float("nan")
+        H = float(np.median(np.abs(np.fft.rfft(HIRp))[hi])) if hi.any() else float("nan")
+        ratio = 20 * np.log10(L / H) if (np.isfinite(L) and np.isfinite(H) and H > 0 and L > 0) else float("nan")
+        print(f"[allIRs] rec{rec} src{src}: level check (no scaling)  FVM {fx/2:.0f}-{fx:.0f} Hz median {L:.3e} Pa"
+              f"  GA {fx:.0f}-{2*fx:.0f} Hz median {H:.3e} Pa  FVM/GA {ratio:+.1f} dB"
+              f"  max|LIR|={np.abs(LIRp).max():.3e}  max|HIR|={np.abs(HIRp).max():.3e}"
+              + ("  [!] > 6 dB: absolute-level disagreement or a hole at the seam" if (np.isfinite(ratio) and abs(ratio) > 6) else ""))
     return LIRp + HIRp, LIRp, HIRp             # broadband, low-only, high-only (all length N)
 
 
@@ -301,6 +306,7 @@ def main():
         f = np.fft.rfftfreq(x.size, 1 / fs)
         return f[1:], 20 * np.log10(np.abs(np.fft.rfft(x))[1:] / 2e-5 + 1e-12)   # IR in Pa (FVM deconvolved then re-scaled to p_1m, GA in Pa): direct at 1 m reads Lp,1m
 
+    sname, rname = _names("src"), _names("rec")            # user's names for titles/legends
     # one figure per receiver: a column per source, IR (top) + frequency response (bottom)
     for rec, items in sorted(by_rec.items()):
       try:
@@ -311,9 +317,9 @@ def main():
             ax_t.plot(np.arange(ir.size) / fs, ir, lw=0.7)
             f, mag = _fr(ir)
             ax_f.semilogx(f, mag, lw=0.7)
-            ax_t.set_title(f"Receiver {rec}, source {src} — Impulse Response")
+            ax_t.set_title(f"{rname(rec)} ← {sname(src)} - Impulse Response")
             ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude"); ax_t.grid(True)
-            ax_f.set_title(f"Receiver {rec}, source {src} — Frequency Response")
+            ax_f.set_title(f"{rname(rec)} ← {sname(src)} - Frequency Response")
             ax_f.set_xlabel("Frequency [Hz]"); ax_f.set_ylabel("SPL [dB re 20 µPa]")
             ax_f.set_xlim(20, fs / 2); ax_f.grid(True, which="both")
         fig.tight_layout()
@@ -325,10 +331,10 @@ def main():
         figc, axc = plt.subplots(figsize=(9, 4))
         for src, _, LIRp, HIRp in sorted(items):
             f, magL = _fr(LIRp); _, magH = _fr(HIRp)
-            axc.semilogx(f, magL, lw=0.8, label=f"src {src} FVM (low)")
-            axc.semilogx(f, magH, lw=0.8, ls="--", label=f"src {src} GA (high)")
+            axc.semilogx(f, magL, lw=0.8, label=f"{sname(src)} FVM (low)")
+            axc.semilogx(f, magH, lw=0.8, ls="--", label=f"{sname(src)} GA (high)")
         axc.axvline(f_cutoff, color=FG, lw=1, ls=":", label=f"f_cutoff {f_cutoff:.0f} Hz")
-        axc.set_title(f"Receiver {rec} — crossover check (FVM vs GA level at f_cutoff)")
+        axc.set_title(f"{rname(rec)} - crossover check (FVM vs GA level at the seam)")
         axc.set_xlabel("Frequency [Hz]"); axc.set_ylabel("SPL [dB re 20 µPa]")
         axc.set_xlim(20, fs / 2); axc.grid(True, which="both"); axc.legend(fontsize=8)
         figc.tight_layout()
