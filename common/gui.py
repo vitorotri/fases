@@ -5500,6 +5500,12 @@ class ResultsView(QWidget):
         self._metric.addItems(["IR + Spectrum", "T20", "T30", "EDT", "C50", "C80", "D50", "Summary (avg)"])
         self._metric.currentIndexChanged.connect(self._on_metric_changed)
         top.addWidget(self._metric, 1)
+        self._frac = QComboBox()                       # band resolution of the parameter plots
+        self._frac.addItems(["1/1 octave", "1/3 octave"])
+        self._frac.setToolTip("Band resolution for T20/T30/EDT/C50/C80/D50. Same IRs, finer analysis "
+                              "(the simulation itself is octave-based); low thirds are noisier.")
+        self._frac.currentIndexChanged.connect(self._on_metric_changed)
+        top.addWidget(self._frac)
         self._add_sim_btn = QPushButton("➕ Add simulation…"); self._add_sim_btn.clicked.connect(self._add_sim)
         self._clear_sim_btn = QPushButton("Clear compared"); self._clear_sim_btn.clicked.connect(self.clearSimRequested.emit)
         self._add_sim_btn.hide(); self._clear_sim_btn.hide()     # only shown in Summary view
@@ -5517,6 +5523,10 @@ class ResultsView(QWidget):
 
     def current_metric(self):
         return self._metric.currentText()
+
+    def bands_fraction(self):
+        """1 (octaves, params.json) or 3 (third octaves, params3.json)."""
+        return 3 if self._frac.currentIndex() == 1 else 1
 
     def set_export(self, data):
         """Tabular data behind the current param plot (or None for IR/Spectrum -> export disabled)."""
@@ -5559,6 +5569,7 @@ class ResultsView(QWidget):
     def _on_metric_changed(self, *_):
         summary = self.current_metric() == "Summary (avg)"
         self._add_sim_btn.setVisible(summary); self._clear_sim_btn.setVisible(summary)
+        self._frac.setVisible(self.current_metric() not in ("IR + Spectrum", "Summary (avg)"))
         self.metricChanged.emit()
 
     def _add_sim(self):
@@ -6298,6 +6309,10 @@ class MainWindow(QMainWindow):
     def _on_allirs_done(self, rc):
         self._sb.showMessage("Broadband IRs ready." if rc == 0 else f"allIRs.py failed (rc={rc}).")
         if rc == 0:
+            try:                                           # 1/3-octave set is built on demand; drop the stale one
+                os.remove(os.path.join(self._proj_root, "output", "params3.json"))
+            except OSError:
+                pass
             self._run_acouparams()                         # rebuild params.json from the fresh IRs
         if getattr(self, "_view_mode", None) == "results":
             if self._results_sel:                          # honour the current multi-selection
@@ -6305,15 +6320,16 @@ class MainWindow(QMainWindow):
             else:
                 self._results.show_receiver(self._current_receiver_row())
 
-    def _run_acouparams(self):
-        """Compute the ISO-3382 params (acouparams.py -> params.json) in output/, after allIRs."""
+    def _run_acouparams(self, fractions=1):
+        """Compute the ISO-3382 params (acouparams.py -> params.json, or params3.json for 1/3 octave)
+        in output/, after allIRs."""
         t = getattr(self, "_acou_thread", None)
         if t is not None and t.isRunning():
             return
         script = self._find_common_script("acouparams.py")
         if script is None:
             return
-        self._acou_thread = SolverThread([sys.executable, script],
+        self._acou_thread = SolverThread([sys.executable, script, "--fractions", str(int(fractions))],
                                          os.path.join(self._proj_root, "output"))
         self._acou_thread.output.connect(self._log.append)
         self._acou_thread.done.connect(self._on_acouparams_done)
@@ -6714,11 +6730,12 @@ class MainWindow(QMainWindow):
         import matplotlib.pyplot as plt
         from PySide6.QtGui import QPixmap
         out = os.path.join(self._proj_root, "output")
-        pj = os.path.join(out, "params.json")
+        frac = self._results.bands_fraction()
+        pj = os.path.join(out, "params3.json" if frac == 3 else "params.json")
         if not os.path.isfile(pj):
             self._results._label.setPixmap(QPixmap())
-            self._results._label.setText("Computing parameters… (acouparams.py)")
-            self._run_acouparams(); return
+            self._results._label.setText(f"Computing 1/{frac}-octave parameters… (acouparams.py)")
+            self._run_acouparams(frac); return
         with open(pj) as f:
             data = json.load(f)
         names = self._rec_tbl.get_names()
@@ -6759,7 +6776,8 @@ class MainWindow(QMainWindow):
                 else:
                     avg = np.nanmean(mat, axis=0)
             ax.plot(x, avg, color="#d7dde3", lw=2.0, ls="--", label="avg (selected)")
-            ax.set_xticks(x); ax.set_xticklabels([str(bnd) for bnd in ref_bands])
+            ax.set_xticks(x); ax.set_xticklabels([str(bnd) for bnd in ref_bands],
+                                                  rotation=45 if len(ref_bands) > 10 else 0)   # 1/3: 22 labels
             ax.set_ylabel(f"{param} [{units[param]}]" if units[param] else param)
             ax.set_title(f"{ptitle + ' - ' if ptitle else 'Receiver comparison - '}{param} per octave band")
             ax.grid(True, color=PAL['border'], lw=0.5, alpha=0.6)

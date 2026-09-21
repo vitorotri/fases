@@ -640,7 +640,17 @@ v = np.loadtxt(config_path)
 
 h = float(v[0])
 C_CFL = float(v[4])
-f_cutoff = v[2] #balance with N_poles for stability and better distribution of poles
+# Config line 3 = highest WAVE-based frequency the user asked for. main3D/allIRs put the FVM<->GA
+# seam at the UPPER EDGE of the octave containing it (251 -> 354 Hz), so the FVM applies these
+# fits up to that edge: fit to the same seam, or the top of that octave rides on pole
+# extrapolation (a sagging R there shortened EDT/T20 in the 250 band only).
+_f_in = float(v[2])
+f_cutoff = _f_in
+for _c in (63, 125, 250, 500, 1000, 2000, 4000, 8000):
+    if _f_in <= _c * np.sqrt(2.0):
+        f_cutoff = _c * np.sqrt(2.0); break
+del _f_in, _c
+#balance with N_poles for stability and better distribution of poles
 Temp = v[3]
 R_spec = 287.05
 gamma = 1.4
@@ -684,7 +694,8 @@ def _fit_sig(alpha_oct, soft):
     # resolution change that leaves dt unchanged does not invalidate the fit.
     canon = ("|".join(f"{x:.8g}" for x in a)
              + f"|soft={int(bool(soft))}|dt={dt:.10g}"
-             + f"|fc={float(f_cutoff):.10g}|N={int(N)}")
+             + f"|fc={float(v[2]):.10g}|N={int(N)}")   # RAW config value: gui.stale_fits hashes the same
+                                                        # (the seam f_cutoff is a function of it)
     return hashlib.sha1(canon.encode()).hexdigest()[:16]
 
 def _read_fit_sig(path):

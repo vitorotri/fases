@@ -8,13 +8,29 @@ plot as param-vs-band curves per receiver.
 
 Run from the project's output/ directory, same as allIRs.py.
 """
-import glob, re, os, json
+import glob, re, os, json, sys
 import numpy as np
 import pyfar as pf
 import pyrato as ra
 
 fs = 44100
 OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
+# --fractions 1 (default, octaves -> params.json) or 3 (third octaves -> params3.json). Same IRs,
+# same code; only the pyfar filterbank changes. The simulation itself stays octave-based (GA alpha
+# and scattering are per octave, the FVM/GA seam is on an octave edge): 1/3 is a finer ANALYSIS of
+# the same IR, e.g. to compare with BRAS third-octave data. Low thirds are narrow (15 Hz at 63) ->
+# noisier EDT there.
+FRACTIONS = 3 if ("--fractions" in sys.argv and sys.argv[sys.argv.index("--fractions") + 1] == "3") else 1
+OUT_JSON = "params3.json" if FRACTIONS == 3 else "params.json"
+
+
+def band_centres(fractions=FRACTIONS):
+    """Nominal centre frequencies pyfar's filterbank uses for this fraction (ints, Hz)."""
+    if fractions == 1:
+        return list(OCTAVE_BANDS)
+    nominal, _ = pf.dsp.filter.fractional_octave_frequencies(
+        fractions, frequency_range=(OCTAVE_BANDS[0], OCTAVE_BANDS[-1]), return_cutoff=False)
+    return [int(round(float(v))) for v in np.atleast_1d(nominal)]
 
 
 def receiver_irs():
@@ -74,22 +90,24 @@ def _clarity(h):
     return c50, c80, float(e50 / tot)
 
 
-def params_for(ir):
-    """Per-octave-band ISO 3382 params for one receiver IR (pyfar filterbank + pyrato RT, C/D direct)."""
+def params_for(ir, fractions=FRACTIONS):
+    """Per-band ISO 3382 params for one receiver IR (pyfar filterbank + pyrato RT, C/D direct)."""
     sig = pf.Signal(np.atleast_2d(ir), fs)
+    centres = band_centres(fractions)
     bands = pf.dsp.filter.fractional_octave_bands(
-        sig, num_fractions=1, frequency_range=(OCTAVE_BANDS[0], OCTAVE_BANDS[-1]))
+        sig, num_fractions=fractions, frequency_range=(OCTAVE_BANDS[0], OCTAVE_BANDS[-1]))
     bt = bands.time.reshape(-1, bands.time.shape[-1])           # (n_bands, n_samples)
     # plain Schroeder integral (no noise-floor detection): simulated IRs decay to ~0, they have no
     # noise plateau, so the Chu/Lundeby truncation methods fail ("Low SNR"). Schroeder is correct here.
     edc = ra.edc.schroeder_integration(bands)
     rt = ra.reverberation_time_linear_regression
     C50, C80, D50 = [], [], []
-    for i in range(len(OCTAVE_BANDS)):
+    for i in range(len(centres)):
         c50, c80, d50 = _clarity(bt[i]) if i < bt.shape[0] else (None, None, None)
         C50.append(c50); C80.append(c80); D50.append(d50)
     return {
-        "bands": OCTAVE_BANDS,
+        "bands": centres,
+        "fractions": fractions,
         "T20": _lst(rt(edc, 'T20')),
         "T30": _lst(rt(edc, 'T30')),
         "EDT": _lst(rt(edc, 'EDT')),
@@ -117,9 +135,9 @@ def main():
                     out["sources"][str(src)][str(rec)] = params_for(ir)
                 except Exception as ex:
                     print(f"[acouparams] rec{rec} src{src} FAILED: {ex} -> skipped")
-    with open("params.json", "w") as f:
+    with open(OUT_JSON, "w") as f:
         json.dump(out, f, indent=1)
-    print(f"[acouparams] wrote params.json for {len(recs)} receiver(s): {sorted(recs)}"
+    print(f"[acouparams] wrote {OUT_JSON} (1/{FRACTIONS} octave) for {len(recs)} receiver(s): {sorted(recs)}"
           + (f", {len(by_src)} sources split" if len(by_src) > 1 else ""))
 
 
