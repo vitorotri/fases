@@ -309,6 +309,12 @@ def hornikx_cotte_constrained_fit(
     f_hi_chk = 0.5 / dt
     w_chk = 2*np.pi*np.logspace(np.log10(1.0), np.log10(max(f_hi_chk, 2.0)), 1024)
 
+    # ... and the gain of the filter the KERNEL actually runs (SSP-RK3 stages at dt): it exceeds
+    # the continuous |R| near the cutoff, so a continuously passive fit can still pump. Penalising
+    # it INSIDE the fit lets the optimiser trade accuracy locally instead of a post-hoc residue
+    # scaling that flattened the whole curve. Closed form (discrete_R) -> cheap per evaluation.
+    f_d = np.logspace(np.log10(5.0), np.log10(max(0.999 * f_hi_chk, 6.0)), 256)
+
     def total_sse(x):
         Rinf, A, B, C, zeta, alpha, beta, *_ = _unpack_params(
             x, K, L, zeta_max, alpha_max, beta_max)
@@ -316,7 +322,9 @@ def hornikx_cotte_constrained_fit(
         data = float(np.sum(e.real**2 + e.imag**2))
         Rc = R_expected(Rinf, A, B, C, alpha, beta, zeta, w_chk)
         ov = np.maximum(np.abs(Rc) - (1.0 - passivity_margin), 0.0)
-        return data + passivity_weight * float(np.sum(ov**2))
+        gd = discrete_gain(Rinf, A, zeta, B, C, alpha, beta, dt, f_d)
+        ovd = np.maximum(gd - (1.0 - passivity_margin), 0.0)
+        return data + passivity_weight * (float(np.sum(ov**2)) + float(np.sum(ovd**2)))
 
     sse0 = total_sse(x0)
     if os.environ.get("VFIT_VERBOSE", "0") == "1":
@@ -347,40 +355,42 @@ def _rk3_amp(z):
     return abs(1.0 + z + z * z / 2.0 + z ** 3 / 6.0)
 
 
-def discrete_gain(Rinf, A, zeta, B, C, alpha, beta, dt, freqs):
-    """|R_d(f)| for each f: the ADE as functions3D.cuh ADE_solver integrates it -- SSP-RK3 stages
-    (0,1,1), (3,1,4), (1,2,3) with the input sampled at the stage times t, t+dt, t+dt/2 -- driven by a
-    unit sinusoid, steady-state amplitude by projection over two whole periods. This is the filter the
-    kernel APPLIES; R(jw) is what the fit sees. Near f_cutoff the discrete gain runs up to ~0.1 above
-    the continuous one, so a continuously passive fit can pump in the kernel. Vectorised over freqs."""
+def discrete_R(Rinf, A, zeta, B, C, alpha, beta, dt, freqs):
+    """Complex steady-state response of the ADE exactly as functions3D.cuh ADE_solver runs it:
+    SSP-RK3 stages (0,1,1), (3,1,4), (1,2,3) with the input sampled at t, t+dt, t+dt/2, output
+    R_inf*w(t+dt/2) + A.phi + B.psi1 + C.psi2 from the states at the END of the step. Closed form:
+    per pole the step is phi_{n+1} = G phi_n + u(z) e^{jwt_n} with G = 1/3 + a/2 + a^3/6,
+    a = 1 - zeta dt, u = dt (a^2/6 + a z/6 + 2 z^(1/2)/3), z = e^{jw dt}; steady state
+    phi = z u/(z - G). Complex pairs: the same with the 2x2 matrix Am = I + dt M. Verified against
+    the stage-by-stage simulation to 1e-14 (the old simulated readout was biased above fs/8).
+    Vectorised over freqs; cheap enough to sit inside the optimiser. Returns complex R_d(f)."""
     A = np.asarray(A, float); zeta = np.asarray(zeta, float)
     B = np.asarray(B, float); C = np.asarray(C, float); alpha = np.asarray(alpha, float); beta = np.asarray(beta, float)
-    w = 2 * np.pi * np.asarray(freqs, float)
-    nf = w.size
-    rates = np.concatenate([zeta, alpha]); slow = float(rates[rates > 0].min()) if np.any(rates > 0) else 1.0
-    P = np.maximum(8, np.round(2 * np.pi / (w * dt))).astype(int)
-    nwin = 2 * P
-    nsteps = int(min(60000, 8.0 / slow / dt + nwin.max()))
-    phi = np.zeros((nf, A.size)); p1 = np.zeros((nf, B.size)); p2 = np.zeros((nf, B.size))
-    out = np.zeros((nsteps, nf))
-    def stage(a, b, c, win, phi_m, p1_m, p2_m, phi_r, p1_r, p2_r):
-        nphi = (a * phi_m + b * (phi_r + dt * (win[:, None] - zeta * phi_r))) / c
-        np1 = (a * p1_m + b * (p1_r + dt * (win[:, None] - alpha * p1_r - beta * p2_r))) / c
-        np2 = (a * p2_m + b * (p2_r + dt * (beta * p1_r - alpha * p2_r))) / c
-        y = Rinf * win + nphi @ A + np1 @ B + np2 @ C
-        return nphi, np1, np2, y
-    for n in range(nsteps):
-        t = n * dt
-        w0, w1, w2 = np.cos(w * t), np.cos(w * (t + dt)), np.cos(w * (t + 0.5 * dt))
-        f1, a1, b1, _ = stage(0.0, 1.0, 1.0, w0, phi, p1, p2, phi, p1, p2)
-        f2, a2, b2, _ = stage(3.0, 1.0, 4.0, w1, phi, p1, p2, f1, a1, b1)
-        phi, p1, p2, y = stage(1.0, 2.0, 3.0, w2, phi, p1, p2, f2, a2, b2)
-        out[n] = y
-    g = np.zeros(nf)
-    for i in range(nf):
-        m = min(int(nwin[i]), nsteps); seg = out[-m:, i]; tt = (nsteps - m + np.arange(m)) * dt
-        g[i] = 2.0 * np.hypot(np.dot(seg, np.cos(w[i] * tt)), np.dot(seg, np.sin(w[i] * tt))) / m
-    return g
+    th = 2 * np.pi * np.asarray(freqs, float) * dt
+    z = np.exp(1j * th); zh = np.exp(0.5j * th)
+    y = Rinf * zh
+    if A.size:
+        a = (1.0 - zeta * dt)[:, None]
+        G = 1.0 / 3.0 + a / 2.0 + a ** 3 / 6.0
+        u = dt * (a * a / 6.0 + a * z[None, :] / 6.0 + 2.0 * zh[None, :] / 3.0)
+        y = y + (A[:, None] * z[None, :] * u / (z[None, :] - G)).sum(axis=0)
+    for b_, c_, al, be in zip(B, C, alpha, beta):
+        Am = np.array([[1.0 - al * dt, -be * dt], [be * dt, 1.0 - al * dt]])
+        A2 = Am @ Am; A3 = A2 @ Am
+        G = np.eye(2) / 3.0 + Am / 2.0 + A3 / 6.0
+        # u(z) e1 = dt (A2/6 + Am z/6 + 2/3 zh I) e1, solve (z I - G) P = u per frequency
+        u0 = dt * (A2[0, 0] / 6.0 + Am[0, 0] * z / 6.0 + 2.0 * zh / 3.0)
+        u1 = dt * (A2[1, 0] / 6.0 + Am[1, 0] * z / 6.0)
+        a11 = z - G[0, 0]; a12 = -G[0, 1]; a21 = -G[1, 0]; a22 = z - G[1, 1]
+        det = a11 * a22 - a12 * a21
+        P1 = (a22 * u0 - a12 * u1) / det; P2 = (-a21 * u0 + a11 * u1) / det
+        y = y + z * (b_ * P1 + c_ * P2)
+    return y
+
+
+def discrete_gain(Rinf, A, zeta, B, C, alpha, beta, dt, freqs):
+    """|R_d(f)|: magnitude of discrete_R (closed form; replaces the stage-by-stage simulation)."""
+    return np.abs(discrete_R(Rinf, A, zeta, B, C, alpha, beta, dt, freqs))
 
 
 def stabilize_poles(zeta, alpha, beta, dt, margin=0.999):
@@ -825,6 +835,9 @@ def fit_material(read_file, coefs_path, soft=False):
             R_hat = R_expected(Rc, Aa, Bb, Cc, al, be, zt, w)
             r_rms = float(np.sqrt(np.mean(np.abs(R_hat - R_tgt)**2)))
             maxR  = float(np.max(np.abs(R_expected(Rc,Aa,Bb,Cc,al,be,zt,w_chk))))
+            # passive means passive in the KERNEL: take the larger of continuous and discrete gain
+            f_dchk = np.logspace(np.log10(5.0), np.log10(0.999 * 0.5 / dt), 256)
+            maxR  = max(maxR, float(np.max(discrete_gain(Rc, Aa, zt, Bb, Cc, al, be, dt, f_dchk))))
             return (Rc,Aa,Bb,Cc,zt,al,be), vf_rms, r_rms, maxR
 
         # A steep target (a band at alpha=1 -> |R| floored to 1e-2) can drop VF in a bad
