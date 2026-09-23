@@ -154,14 +154,18 @@ def _shoulder(f, e, hi):                                    # hi=True -> high-pa
     return 0.5 * (1 - np.cos(np.pi * x)) if hi else 0.5 * (1 + np.cos(np.pi * x))
 
 
-def _filt(ir, hp_e, lp_e):
+def _filt(ir, hp_e, lp_e, hp_pow=False, lp_pow=False):
     # zero-padded to 2N: FFT filtering is circular, and a zero-phase filter's negative-time tail of
     # the direct sound (the strongest event, near t=0) would otherwise wrap to the END of the IR
     n = 2 * ir.size
     f = np.fft.rfftfreq(n, 1 / fs)
     w = np.ones_like(f)
-    if hp_e: w *= _shoulder(f, hp_e, True)
-    if lp_e: w *= _shoulder(f, lp_e, False)
+    # POWER-complementary (sqrt of the cosine) where the two sides are INCOHERENT, amplitude-
+    # complementary where they are coherent. GA octave <-> GA octave: same arrivals split in two,
+    # coherent -> w. FVM <-> GA at the seam: a physical field vs a random-phase tail, incoherent ->
+    # sqrt(w), else 0.25P + 0.25P = -3 dB right at the seam (the notch in the 354 band).
+    if hp_e: w *= _shoulder(f, hp_e, True) ** (0.5 if hp_pow else 1.0)
+    if lp_e: w *= _shoulder(f, lp_e, False) ** (0.5 if lp_pow else 1.0)
     return np.fft.irfft(np.fft.rfft(ir, n=n) * w, n=n)[:ir.size]
 
 
@@ -220,7 +224,7 @@ def broadband_ir(rec, src):
                 f"in {hint:.0f}-{fx:.0f} Hz" if (hint is not None and hint < fx) else "")
         print(f"[allIRs] rec{rec} src{src}: crossover f_x = {fx:.1f} Hz (config); lowest GA band {lowest_fc}{note}")
     if have_low:
-        LIR = _filt(LIR, None, fx)                         # FVM: single low-pass at the crossover
+        LIR = _filt(LIR, None, fx, lp_pow=True)            # FVM: low-pass at the seam (incoherent side)
     H_IRs = []
     for hf in high_files:
         fc = int(hf.split("_")[-1].split(".")[0])          # band from HIR..._<band>.bin
@@ -232,7 +236,8 @@ def broadband_ir(rec, src):
         else:
             hp_e = max(fx, fc / 2 ** 0.5)                  # lowest kept band high-passes AT the crossover
         lp_e = None if fc == octave_bands[-1] else fc * 2 ** 0.5   # top band runs to Nyquist
-        H_IRs.append(_filt(arr, hp_e, lp_e))
+        # the high-pass sits ON the seam only for the lowest kept band -> incoherent side, sqrt
+        H_IRs.append(_filt(arr, hp_e, lp_e, hp_pow=(hp_e is not None and abs(hp_e - fx) < 1e-6)))
 
     HIR = np.sum(H_IRs, axis=0) if H_IRs else np.zeros(0)
     N = max(LIR.size, HIR.size)

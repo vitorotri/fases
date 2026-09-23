@@ -5948,7 +5948,7 @@ class MainWindow(QMainWindow):
         root_lay.addWidget(gl_wrap, stretch=1)         # fills; panel overlays its left
 
 		# append "\uFE0E" in front of symbol to stay monochrome
-        self._tabs.addTab(self._build_scene_tab(),   "🞕\uFE0E  Scene")
+        self._tabs.addTab(self._build_scene_tab(),   "🗇\uFE0E  Scene")
         self._tabs.addTab(self._build_src_tab(),     "🔊\uFE0E  Sources")
         self._tabs.addTab(self._build_rec_tab(),     "🎙\uFE0E  Receivers")
         self._tabs.addTab(self._build_config_tab(),  "⚙\uFE0E  Setup")
