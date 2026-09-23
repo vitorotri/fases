@@ -12,8 +12,10 @@ def dB_SPL(p):
 	return 20*np.log10(p/p0)
 
 def R_model(w, Rinf, A, zeta, B, C, alpha, beta):
-    s = 1j*w
-    R = Rinf + 0j
+    s = 1j*np.asarray(w, float)
+    # array, not a scalar: a constant fit (K = L = 0, what a flat alpha gives) runs neither loop
+    # below, and R_ana[mask] then fails with "invalid index to scalar variable"
+    R = np.full(s.shape, Rinf + 0j, dtype=complex)
     #eps = 1e-7
     for Ak, zk in zip(A, zeta):
         R += Ak / (zk + s)
