@@ -451,6 +451,7 @@ inline static void rt_trace_late(const RTScene& S,
             float Rp[RT_NBANDS]; for(int b = 0; b < RT_NBANDS; b++) Rp[b]=1.f; // amplitude reflection product
             float d_travel = 0.f;            		// path length travelled so far [m]
             bool  scattered = false;         		// has this ray taken a diffuse bounce yet?
+            bool  after_diffuse = false;     		// current segment starts at a DIFFUSE bounce (see rain)
 
             for(int bounce = 0; bounce <= max_order; bounce++){
                 float th; int tri;
@@ -461,13 +462,15 @@ inline static void rt_trace_late(const RTScene& S,
                 const vec3 d = v3(r.dx,r.dy,r.dz);
                 const vec3 p1 = add3(o, mul3(d, seg));
 
-                // ---- DETECTION on segment [o,p1]: ONE detector (the sphere), every ray, full energy
-                // (distance-independent energy per crossing). The ray's STATE picks the buffer:
-                // still a pure specular path -> e_spec (main gates it after t_cross, the ISM owns
-                // the early specular); scattered at least once -> e_diff (enters at all times: the
-                // early diffusion). Pure on-off scattering: no next-event / diffuse-rain estimator.
+                // ---- DETECTION on segment [o,p1]: the sphere, every ray, full energy (distance-
+                // independent energy per crossing). The ray's STATE picks the buffer: still a pure
+                // specular path -> e_spec (main gates it after t_cross, the ISM owns the early
+                // specular); scattered at least once -> e_diff (enters at all times).
+                // EXCEPT the segment right after a DIFFUSE draw: "scatter at that bounce, then
+                // straight to the receiver" is exactly what the diffuse rain below deposits
+                // deterministically at that bounce -- detecting it here too would count it twice.
                 std::vector<float>& e_buf = scattered ? e_diff : e_spec;
-                for(int rr = 0; rr < Nr; rr++){
+                for(int rr = 0; !after_diffuse && rr < Nr; rr++){
                     float s_ca;
                     if(rt_point_seg_dist2(rec[(size_t)rr], o, p1, s_ca) <= R2){
                         const float d_run = d_travel + s_ca; // total path to the receiver
@@ -509,6 +512,54 @@ inline static void rt_trace_late(const RTScene& S,
                     //Rrefl[b] = Rp[b] * std::fabs(R_oblique(al, 1.0)); // amplitude validation
                 }
 
+                // ---- DIFFUSE RAIN (next-event estimation) -> e_diff, every bounce, every ray.
+                // The event "scatter here (prob s), then go straight to receiver rr": B = p1 is a
+                // Lambert secondary source of power s * w_ray * Rrefl^2, radiant intensity
+                // cos(theta)/pi, so the receiver gets
+                //     e = w_ray * s * Rrefl^2 * air^2 * cos(theta) / (pi * d_rec^2)
+                // The on-off sphere estimate of the SAME event has the same expectation:
+                //     s * (cos(theta) R^2/d^2) [Lambert direction hits the sphere] * w_ray/(pi R^2)
+                // -> identical; the rain just has no variance, so the early scattered "grass" is
+                // smooth with few rays. That sphere term is skipped (after_diffuse), so nothing is
+                // counted twice, and every LATER segment of a scattered ray is still detected ->
+                // multiple scattering keeps its energy. s = the SAME single value as the draw and the
+                // ISM (one value per surface). d_rec^2 >= R^2: inside the detection radius the sphere
+                // saturates as well; stops a bounce next to a receiver from spiking as 1/d^2.
+                {
+                    const float sgr = (sctr_g && gid>=0 && gid<S.ngroups)
+                                    ? std::max(0.f, std::min(1.f, sctr_g[(size_t)gid])) : 0.f;
+                    if(sgr > 0.f){
+                        const vec3 No = (dot3(N, d) > 0.f) ? mul3(N,-1.f) : N;  // face the incoming side
+                        for(int rr = 0; rr < Nr; rr++){
+                            const vec3 br = sub3(rec[(size_t)rr], p1);
+                            const float d2 = norm2_3(br);
+                            if(d2 < 1e-8f) continue;
+                            const float drec = std::sqrt(d2);
+                            const vec3 u = mul3(br, 1.f/drec);
+                            const float cosr = dot3(No, u);
+                            if(cosr <= 0.f) continue;                          // receiver behind the surface
+                            ray3 sr; sr.ox=p1.x+No.x*1e-4f; sr.oy=p1.y+No.y*1e-4f; sr.oz=p1.z+No.z*1e-4f;
+                            sr.dx=u.x; sr.dy=u.y; sr.dz=u.z;
+                            float sh_t; int sh_tri;
+                            if(rt_closest_hit(S, sr, 1e-4f, sh_t, sh_tri) && sh_t < drec-1e-3f) continue; // occluded
+                            const float d_run = d_travel + drec;
+                            if(d_run/c >= t_end) continue;
+                            const int n0 = (int)((d_run/c)*fs);
+                            if(n0 < 0 || n0 >= Nt) continue;
+                            const float geo = cosr * RT_INVPI / std::max(d2, R2);
+                            for(int b = 0;b < RT_NBANDS; b++){
+                                const float air2 = m_air ? std::exp(-2.f*m_air[b]*d_run) : 1.f;
+                                const float e = Kdiff * sgr * Rrefl[b]*Rrefl[b] * air2 * geo;
+                                float* cell = &e_diff[((size_t)b*Nr + rr)*Nt + n0];
+                                #ifdef _OPENMP
+                                #pragma omp atomic
+                                #endif
+                                *cell += e;
+                            }
+                        }
+                    }
+                }
+
                 // ---- ENERGY CONSERVATION: the ray carries the FULL reflected power (1-alpha)
                 // forward. Scattering changes only the DIRECTION, not the energy, so scattered
                 // energy keeps bouncing (multiple scattering) and the tail decays at the
@@ -524,7 +575,7 @@ inline static void rt_trace_late(const RTScene& S,
                 // so no per-band trajectory conflict). Prob s -> diffuse (Lambert) reflection,
                 // else specular. Over many rays a fraction s scatter and (1-s) stay specular,
                 // reproducing the correct s/(1-s) split in aggregate while every ray keeps its
-                // full energy. The per-band s[b] above weights only the diffuse-rain deposit.
+                // full energy. The rain above uses the same s.
                 const unsigned int seed = ((unsigned)((s*Nrays+ri))*2654435761u) ^ ((unsigned)bounce*40503u);
                 const float sg = (sctr_g && gid>=0 && gid<S.ngroups)
                                ? std::max(0.f, std::min(1.f, sctr_g[(size_t)gid])) : 0.f;
@@ -540,6 +591,7 @@ inline static void rt_trace_late(const RTScene& S,
                 } else {
                     rt_compute_reflected(ref, d, N);
                 }
+                after_diffuse = diffuse;       // next segment's direct detection is the rain's job
                 // No per-band reweighting here (tried s_b/sg, (1-s_b)/(1-sg) per bounce: the weights
                 // compound over 30-60 bounces and a few rays end up carrying the tail -> spikes).
                 // One trajectory, one value: the ISM removes the same sg from its images.
