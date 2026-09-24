@@ -847,6 +847,8 @@ class GLViewer(QOpenGLWidget):
         # points
         self._sources   = []  # list of [x,y,z]
         self._receivers = []  # list of [x,y,z]
+        self._src_on = []     # per point: False = deactivated in its table (not drawn/picked/simulated)
+        self._rec_on = []
         # Index of the highlighted source/receiver (-1 = none). Driven either by
         # table selection or by G-mode hover, so the user can tell which point
         # in the scene corresponds to which table row.
@@ -1107,13 +1109,16 @@ class GLViewer(QOpenGLWidget):
         i = self._pick_group_idx(qpos)
         return self._groups[i]["name"] if i >= 0 else None
 
-    def set_sources(self, pts):
+    def set_sources(self, pts, active=None):
         # keep x,y,z and the SPL (Lp,1m [dB], 4th col) so the particle sim can size its injection
         self._sources = [list(p[:3]) + ([float(p[3])] if len(p) > 3 else []) for p in pts]
+        self._src_on = list(active) if active is not None else [True] * len(self._sources)
         self.update()
 
-    def set_receivers(self, pts):
-        self._receivers = [list(p[:3]) for p in pts]; self.update()
+    def set_receivers(self, pts, active=None):
+        self._receivers = [list(p[:3]) for p in pts]
+        self._rec_on = list(active) if active is not None else [True] * len(self._receivers)
+        self.update()
 
     def set_highlight(self, kind, idx):
         """Highlight a source/receiver by index in the 3D scene. kind is
@@ -1223,7 +1228,7 @@ class GLViewer(QOpenGLWidget):
             self._part_idx[ax] = (rr[keep], cc[keep], pr[keep], pc[keep])
             # project each 3D source onto this plane -> (row, col, SPL), then build the live sim
             srcs = [self._world_to_plane(ax, s, wid, hgt) + (s[3] if len(s) > 3 else 94.0,)
-                    for s in self._sources]
+                    for i_, s in enumerate(self._sources) if self._pt_on("source", i_)]
             self._sim2d[ax] = Slice2DSim(inside, srcs, src_opt=src_opt, absorb=absorb_by_ax[ax])
         # Gain: warm up to measure the grid's displacement-per-unit-amplitude, then anchor the gain
         # to a REFERENCE SPL (not the live field). This way ABSOLUTE source SPL and SPL_AMP_CALIB DO
@@ -2436,8 +2441,8 @@ class GLViewer(QOpenGLWidget):
         COST: zero while the camera (or a dragged point) is moving -- the last result is reused and the
         test runs ONCE, ~150 ms after the view stops changing (one scheduled repaint). The triangle
         arrays are built once per mesh/visibility change, not per test."""
-        pts = ([("source", i, p) for i, p in enumerate(self._sources)] +
-               [("receiver", i, p) for i, p in enumerate(self._receivers)])
+        pts = ([("source", i, p) for i, p in enumerate(self._sources) if self._pt_on("source", i)] +
+               [("receiver", i, p) for i, p in enumerate(self._receivers) if self._pt_on("receiver", i)])
         if not pts or self._mv is None or self._proj is None:
             return {}
         c = self._occ_cache
@@ -2675,6 +2680,8 @@ class GLViewer(QOpenGLWidget):
 
     def _draw_sources(self):
         for i, pt in enumerate(self._sources):
+            if not self._pt_on("source", i):
+                continue
             sel = ("source", i) in self._pt_sel
             hl  = (i == self._hl_src) or sel
             if sel:
@@ -2688,6 +2695,8 @@ class GLViewer(QOpenGLWidget):
 
     def _draw_receivers(self):
         for i, pt in enumerate(self._receivers):
+            if not self._pt_on("receiver", i):
+                continue
             sel = ("receiver", i) in self._pt_sel
             hl  = (i == self._hl_rec) or (i in self._sel_recs) or sel
             if sel:
@@ -3405,6 +3414,8 @@ class GLViewer(QOpenGLWidget):
         best_dist, best_list, best_idx = 30.0, None, -1
         for lst, kind in [(self._sources, "source"), (self._receivers, "receiver")]:
             for i, pt in enumerate(lst):
+                if not self._pt_on(kind, i):
+                    continue
                 try:
                     sx, sy, _ = gluProject(float(pt[0]), float(pt[1]), float(pt[2]),
                                            self._mv, self._proj, viewport)
@@ -3534,6 +3545,8 @@ class GLViewer(QOpenGLWidget):
         best_dist, best_kind, best_idx = radius, None, -1
         for lst, kind in [(self._sources, "source"), (self._receivers, "receiver")]:
             for i, pt in enumerate(lst):
+                if not self._pt_on(kind, i):
+                    continue
                 try:
                     sx, sy, _ = gluProject(float(pt[0]), float(pt[1]), float(pt[2]),
                                            self._mv, self._proj, viewport)
@@ -3547,6 +3560,11 @@ class GLViewer(QOpenGLWidget):
     def _lst(self, kind):
         return self._sources if kind == "source" else self._receivers
 
+    def _pt_on(self, kind, i):
+        """False for a point deactivated in its table: not drawn, picked, box-selected or simulated."""
+        m = self._src_on if kind == "source" else self._rec_on
+        return m[i] if 0 <= i < len(m) else True
+
     def _find_points_in_rect(self, rect):
         """[(kind, idx), …] of sources+receivers whose glyph projects inside the screen rectangle."""
         self.makeCurrent()
@@ -3555,6 +3573,8 @@ class GLViewer(QOpenGLWidget):
         out = []
         for kind in ("source", "receiver"):
             for i, pt in enumerate(self._lst(kind)):
+                if not self._pt_on(kind, i):
+                    continue
                 try:
                     sx, sy, sz = gluProject(float(pt[0]), float(pt[1]), float(pt[2]), self._mv, self._proj, vp)
                     if sz < 0 or sz > 1:
@@ -4205,6 +4225,7 @@ class MaterialPanel(QWidget):
       • Save .mat (per selected row) and Run vectFIT
     """
     rowSelected = Signal(str)   # emitted with layer name when a row is selected
+    layerActiveChanged = Signal(str, bool)   # Layer-cell check box toggled: (layer name, active)
     fitBegan = Signal(str)      # a fit run started; payload = command header line
     fitLog   = Signal(str)      # one line of fitter output -> Run tab Output log
     fitAllDone = Signal(int)    # fit-all finished; payload = return code
@@ -4266,7 +4287,7 @@ class MaterialPanel(QWidget):
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
-            QTableWidget::item:selected:!active {{background:{PAL['bg']};color:{PAL['text']};}}
+            QTableWidget::item:selected:!active {{background:#3c336f;color:{PAL['text']};}}   /* accent @35% over bg: picked-in-scene row stays visible */
             QHeaderView::section {{background:{PAL['panel']};color:{PAL['subtext']};
                 border:1px solid {PAL['border']};font-size:11px;}}
         """)
@@ -4547,6 +4568,7 @@ class MaterialPanel(QWidget):
         """Fill table rows from layer names, loading existing .mat values."""
         self._tbl.blockSignals(True)
         self._tbl.setRowCount(0)
+        self._active_state = {}            # layer name -> last check state (tells toggles from edits)
         for name in layer_names:
             if _is_bbox(name):
                 continue
@@ -4554,7 +4576,9 @@ class MaterialPanel(QWidget):
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
             name_item = QTableWidgetItem(name)
             name_item.setToolTip(name)   # full name on hover (cell may be elided)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            name_item.setFlags((name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                               | Qt.ItemFlag.ItemIsUserCheckable)          # check box = layer active
+            name_item.setCheckState(Qt.CheckState.Checked)
             self._tbl.setItem(r, 0, name_item)
             for c, v in enumerate(vals):
                 self._tbl.setItem(r, c+1, QTableWidgetItem(f"{v:.2f}"))
@@ -4735,7 +4759,27 @@ class MaterialPanel(QWidget):
                 self._undo_stack.pop(0)
         self._prev = self._snapshot()
 
-    def _on_item_changed(self, *_):
+    def set_layer_active(self, name, active):
+        """Programmatic check-box state for a layer (no signal)."""
+        for r in range(self._tbl.rowCount()):
+            it = self._tbl.item(r, 0)
+            if it is not None and it.text() == name:
+                self._tbl.blockSignals(True)
+                it.setCheckState(Qt.CheckState.Checked if active else Qt.CheckState.Unchecked)
+                self._tbl.blockSignals(False)
+                self._active_state[name] = bool(active)
+                return
+
+    def _on_item_changed(self, item=None, *_):
+        # Layer-cell check box: a pure activation toggle -- no undo entry, no .mat save.
+        # Detected by the check state actually changing, so the soft/hard styling of the same cell
+        # (setData/setForeground, which also emits itemChanged) keeps its old path below.
+        if item is not None and item.column() == 0 and (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            st = item.checkState() == Qt.CheckState.Checked
+            if getattr(self, "_active_state", {}).get(item.text(), True) != st:
+                self._active_state[item.text()] = st
+                self.layerActiveChanged.emit(item.text(), st)
+                return
         # a single manual/programmatic cell edit: record pre-edit state, then replot
         self._push_undo()
         self._on_edit()
@@ -5278,11 +5322,61 @@ class PointTable(QWidget):
         self.set_points(pts, emit_changed=False)   # -> display, using the NEW offset
         self.changed.emit()
 
+    # ── active / inactive rows ────────────────────────────────
+    # The Name cell (column 0) carries a check box: unchecked = the point is DEACTIVATED -- hidden from
+    # the scene and left out of src.txt/rec.txt, but its row (name, values, pose) is kept here and in
+    # the <file>.table sidecar so it can be switched back on. No column is added: every column index
+    # (_coff, the name in column 0) stays exactly as before.
+    @staticmethod
+    def _name_item(text, active=True):
+        it = QTableWidgetItem(text)
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        it.setCheckState(Qt.CheckState.Checked if active else Qt.CheckState.Unchecked)
+        return it
+
+    def is_active(self, r):
+        it = self._tbl.item(r, 0)
+        if it is None or not (it.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return True
+        return it.checkState() == Qt.CheckState.Checked
+
+    def _row_world(self, r):
+        """Numeric values of row r (x, y, z world [, p0] [, f0]) or None if a cell is empty/invalid."""
+        try:
+            row = []
+            for c in range(self._coff, self._tbl.columnCount()):
+                item = self._tbl.item(r, c)
+                if item is None: raise ValueError("empty cell")
+                row.append(float(item.text()))
+            for _i in range(min(3, len(row))):       # displayed -> world
+                row[_i] += self._off[_i]
+            return tuple(row)
+        except (TypeError, ValueError):
+            return None
+
+    def solver_values(self, r):
+        """Row r as written to the solver file (world + solver offset), or None."""
+        pt = self._row_world(r)
+        if pt is None:
+            return None
+        return tuple(pt[i] + self._solver_off[i] if i < 3 else pt[i] for i in range(len(pt)))
+
+    def active_rows(self):
+        """Table rows that go into the solver file, in file order (valid AND active). File line k of
+        src.txt/rec.txt is table row active_rows()[k] -- the GUI renames the solver's per-receiver
+        outputs back to table rows after each run, so everything downstream indexes by table row."""
+        return [r for r in range(self._tbl.rowCount())
+                if self.is_active(r) and self._row_world(r) is not None]
+
+    def get_active(self):
+        """Active flag of every row get_points() returns (same order, same skipping)."""
+        return [self.is_active(r) for r in range(self._tbl.rowCount()) if self._row_world(r) is not None]
+
     def _add(self, x=1.0, y=1.0, z=1.0, amp=1.0, freq=100.0, name=None):
         self._tbl.blockSignals(True)
         r = self._tbl.rowCount(); self._tbl.insertRow(r)
         # column 0: editable name, default to the 1-based row number
-        self._tbl.setItem(r, 0, QTableWidgetItem(name if name else str(r + 1)))
+        self._tbl.setItem(r, 0, self._name_item(name if name else str(r + 1)))
         x, y, z = (x - self._off[0], y - self._off[1], z - self._off[2])   # world -> displayed
         vals = [x, y, z] + ([amp] if self._has_amp else []) + ([freq] if self._has_freq else [])
         for c, v in enumerate(vals):
@@ -5378,7 +5472,7 @@ class PointTable(QWidget):
             rr = start_row + dr
             if rr >= self._tbl.rowCount():                    # grow: extra rows -> scene + table
                 self._tbl.insertRow(rr)
-                self._tbl.setItem(rr, 0, QTableWidgetItem(str(rr + 1)))
+                self._tbl.setItem(rr, 0, self._name_item(str(rr + 1)))
                 for c, dv in enumerate(defs):
                     self._tbl.setItem(rr, self._coff + c, QTableWidgetItem(f"{dv:.4g}"))
             for dc, val in enumerate(parts):
@@ -5433,20 +5527,9 @@ class PointTable(QWidget):
 
     def get_points(self):
         """Return numeric rows (x, y, z[, p0]); the Name column is skipped so
-        the 3D view, undo, and saved solver files stay purely numeric."""
-        pts = []
-        for r in range(self._tbl.rowCount()):
-            try:
-                row = []
-                for c in range(self._coff, self._tbl.columnCount()):
-                    item = self._tbl.item(r, c)
-                    if item is None: raise ValueError("empty cell")
-                    row.append(float(item.text()))
-                for _i in range(min(3, len(row))):       # displayed -> world
-                    row[_i] += self._off[_i]
-                pts.append(tuple(row))
-            except (TypeError, ValueError): pass
-        return pts
+        the 3D view, undo, and saved solver files stay purely numeric. ALL valid rows, active or
+        not (indices = table rows for the scene/drag/undo); see get_active()/active_rows()."""
+        return [pt for pt in (self._row_world(r) for r in range(self._tbl.rowCount())) if pt is not None]
 
     def get_names(self):
         """Name (col 0) of every row, in table order. Row index matches the
@@ -5469,6 +5552,9 @@ class PointTable(QWidget):
         ncoord = self._tbl.columnCount() - self._coff   # numeric columns
         # trailing numeric-column defaults, in order: [x y z] [amp?] [f0?]
         full_def = [0.0, 0.0, 0.0] + ([1.0] if self._has_amp else []) + ([100.0] if self._has_freq else [])
+        # keep each surviving row's name + active flag (frame switches and undo rebuild the rows)
+        old = [((self._tbl.item(r, 0).text() if self._tbl.item(r, 0) else str(r + 1)), self.is_active(r))
+               for r in range(self._tbl.rowCount())]
         self._tbl.blockSignals(True)
         self._tbl.setRowCount(0)
         for pt in pts:
@@ -5478,15 +5564,54 @@ class PointTable(QWidget):
             if len(vals) < ncoord:
                 vals += full_def[len(vals):ncoord]
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
-            self._tbl.setItem(r, 0, QTableWidgetItem(str(r + 1)))
+            nm, act = old[r] if r < len(old) else (str(r + 1), True)
+            self._tbl.setItem(r, 0, self._name_item(nm, act))
             for c, v in enumerate(vals[:ncoord]):
                 self._tbl.setItem(r, self._coff + c, QTableWidgetItem(f"{float(v):.4g}"))
         self._tbl.blockSignals(False)
         if emit_changed:
             self.changed.emit()
 
+    def _load_table(self, tpath):
+        """Restore ALL rows (active or not) from the <file>.table sidecar. Values are stored in the
+        solver frame, exactly like the solver file, so the same offsets apply. False on any problem
+        (caller falls back to the plain solver file)."""
+        import json
+        try:
+            d = json.load(open(tpath))
+            rows = d["rows"]
+        except Exception:
+            return False
+        ncoord = self._tbl.columnCount() - self._coff
+        self._tbl.blockSignals(True)
+        self._tbl.setRowCount(0)
+        poses = []
+        for rw in rows:
+            r = self._tbl.rowCount(); self._tbl.insertRow(r)
+            self._tbl.setItem(r, 0, self._name_item(str(rw.get("name") or r + 1), bool(rw.get("active", True))))
+            vals = rw.get("vals")
+            cells = rw.get("cells") or []
+            for c in range(ncoord):
+                if vals is not None and c < len(vals):
+                    v = float(vals[c])
+                    if c < 3:                                # solver -> world -> displayed
+                        v = v - self._solver_off[c] - self._off[c]
+                    txt = f"{v:.6g}"
+                elif c < len(cells):
+                    txt = str(cells[c])                      # an invalid row, kept verbatim
+                else:
+                    continue
+                self._tbl.setItem(r, self._coff + c, QTableWidgetItem(txt))
+            poses.append(list(rw.get("pose") or [0, 0, 0]))
+        self._tbl.blockSignals(False)
+        if self._has_pose:
+            self.poses = [[float(v) for v in p[:3]] + [0.0] * (3 - len(p[:3])) for p in poses]
+        return True
+
     def load_file(self, path):
         self._tbl.setRowCount(0)
+        if os.path.isfile(path + ".table") and self._load_table(path + ".table"):
+            return                                   # full table incl. deactivated rows
         if not os.path.isfile(path): return
         ncoord = self._tbl.columnCount() - self._coff
         with open(path) as f:
@@ -5495,7 +5620,7 @@ class PointTable(QWidget):
                 if not line: continue
                 vals = line.split()
                 r = self._tbl.rowCount(); self._tbl.insertRow(r)
-                self._tbl.setItem(r, 0, QTableWidgetItem(str(r + 1)))  # default name
+                self._tbl.setItem(r, 0, self._name_item(str(r + 1)))  # default name
                 for c, v in enumerate(vals[:ncoord]):
                     if c < 3:                            # file -> world -> displayed
                         try: v = f"{float(v) - self._solver_off[c] - self._off[c]:.6g}"
@@ -5507,7 +5632,7 @@ class PointTable(QWidget):
                 for r, nm in enumerate(fn):
                     nm = nm.rstrip("\n")
                     if r < self._tbl.rowCount() and nm:
-                        self._tbl.setItem(r, 0, QTableWidgetItem(nm))
+                        self._tbl.setItem(r, 0, self._name_item(nm))
         if self._has_pose:                              # head poses from the .poses sidecar
             self.poses = [[0, 0, 0] for _ in range(self._tbl.rowCount())]
             ppath = path + ".poses"
@@ -5519,14 +5644,30 @@ class PointTable(QWidget):
                             self.poses[r] = [float(v[0]), float(v[1]), float(v[2])]
 
     def save_file(self, path):
+        import json
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             hdr = "x y z" + (" p0" if self._has_amp else "") + (" f0" if self._has_freq else "")
             f.write("# " + hdr + "\n")
-            for pt in self.get_points():
-                pt = tuple(pt[i] + self._solver_off[i] if i < 3 else pt[i]
-                           for i in range(len(pt)))       # world -> solver frame
-                f.write("  ".join(f"{v:.6g}" for v in pt) + "\n")
+            for r in self.active_rows():                 # deactivated rows never reach main3D
+                f.write("  ".join(f"{v:.6g}" for v in self.solver_values(r)) + "\n")
+        # GUI-only sidecars. .rows: table row of each file line (for scripts; the GUI's post-run rename
+        # uses its own snapshot taken at launch).
+        # .table: every row incl. deactivated ones, solver frame, so load_file restores them all.
+        with open(path + ".rows", "w") as fr:
+            json.dump(self.active_rows(), fr)
+        rows = []
+        for r in range(self._tbl.rowCount()):
+            sv = self.solver_values(r)
+            cells = [(self._tbl.item(r, c).text() if self._tbl.item(r, c) else "")
+                     for c in range(self._coff, self._tbl.columnCount())]
+            rows.append({"name": (self._tbl.item(r, 0).text() if self._tbl.item(r, 0) else str(r + 1)),
+                         "active": self.is_active(r),
+                         "vals": list(sv) if sv is not None else None,
+                         "cells": None if sv is not None else cells,
+                         "pose": self.get_pose(r) if self._has_pose else None})
+        with open(path + ".table", "w") as ft:
+            json.dump({"version": 1, "rows": rows}, ft, indent=1)
         # names go in a sidecar (one per line, row-matched) so the numeric file main3D parses
         # stays untouched. spaces in names are fine — one name per line.
         with open(path + ".names", "w") as fn:
@@ -7178,19 +7319,11 @@ class MainWindow(QMainWindow):
         self._layer_list.setMaximumHeight(100)
         self._layer_list.currentRowChanged.connect(self._on_layer_row_changed)
 
-        vis_row = QHBoxLayout()
-        toggle_btn = QPushButton("Toggle")
-        toggle_btn.clicked.connect(self._toggle_selected_vis)
-        vis_row.addWidget(toggle_btn)
-        self._layers_all_btn = QPushButton("Hide all")   # one button, name flips with state
-        self._layers_all_btn.clicked.connect(self._toggle_all_layers)
-        vis_row.addWidget(self._layers_all_btn)
-        vis_row.addStretch(); lay.addLayout(vis_row)
-
         lay.addWidget(QLabel("Material - α per octave band"))
         self._mat_panel = MaterialPanel()
         self._mat_panel.status.connect(lambda t: self._sb.showMessage(t))   # shared status bar
         self._mat_panel.rowSelected.connect(self._on_material_row_selected)
+        self._mat_panel.layerActiveChanged.connect(self._on_layer_active_changed)
         self._mat_panel.fitBegan.connect(self._begin_fit_log)
         self._mat_panel.fitLog.connect(self._append_fit_log)
         self._mat_panel.fitAllDone.connect(self._on_fit_all_finished)
@@ -7253,12 +7386,20 @@ class MainWindow(QMainWindow):
         lay.addRow("Number of rays", self._nrays)
 
         # Source type + frequency now live under the source table (Sources tab), built
-        # before this tab. Wire the f_cutoff-dependent clamps here, where _cfg exists:
-        #   PCS/Ricker global spinbox -> 0.5*f_cutoff (their spectrum is wider than f0),
-        #   Sinusoid per-source f0 column -> f_cutoff (a single resolvable line).
+        # before this tab. Wire the f_cutoff-dependent clamps here, where _cfg exists.
+        # The f_cutoff field is the top of the WAVE band: main3D puts the FVM/GA seam on the upper
+        # edge of the octave holding it and builds the grid for 2*seam. So:
+        #   PCS/Ricker global spinbox -> seam (= half the grid ceiling: their spectrum reaches ~2.5 f0)
+        #   Sinusoid per-source f0 column -> seam (above it allIRs hands the band to the GA)
+        # (It was 0.5*f_cutoff when f_cutoff itself was the grid ceiling -> Ricker capped at 65 Hz
+        #  for a typed 130 Hz, although the grid reaches 2*177 Hz.)
         def _apply_src_freq_clamps(fc):
-            self._src_freq.setMaximum(max(1, int(0.5 * fc)))
-            self._src_tbl.set_freq_max(int(fc))
+            seam = float(fc)
+            for c in (63, 125, 250, 500, 1000, 2000, 4000, 8000):   # same rule as main3D / allIRs
+                if fc <= c * 2 ** 0.5:
+                    seam = c * 2 ** 0.5; break
+            self._src_freq.setMaximum(max(1, int(seam)))
+            self._src_tbl.set_freq_max(int(seam))
         self._cfg['f_cutoff'].valueChanged.connect(_apply_src_freq_clamps)
         _apply_src_freq_clamps(self._cfg['f_cutoff'].value())
 
@@ -7936,6 +8077,8 @@ class MainWindow(QMainWindow):
             f.write(f"matdir    = {os.path.join(root, 'input', 'mat')}\n")
             f.write(f"layers    = {layers}\n")
             f.write(f"show_bbox = {int(self._bbox_chk.isChecked())}\n")
+            import json as _json
+            f.write(f"inactive_layers = {_json.dumps(sorted(getattr(self, '_inactive_layers', set())))}\n")
             # Display frame for src/rec coordinates. The FILES always hold shifted
             # (solver) coordinates -- this only records which frame to SHOW them in.
             f.write(f"orig_frame = {int(bool(getattr(self._gl, '_orig_frame', False)))}\n")
@@ -8052,6 +8195,11 @@ class MainWindow(QMainWindow):
         except ValueError:
             self._obj_shift = (0.0, 0.0, 0.0)
         self._gl._shift_enabled = (man.get("shift_positive", "1") == "1")
+        try:                                              # deactivated layers (applied on OBJ load)
+            import json as _json
+            self._inactive_layers = set(_json.loads(man.get("inactive_layers", "[]") or "[]"))
+        except ValueError:
+            self._inactive_layers = set()
         _src = man.get("scene_src", "")
         if _src and os.path.isfile(_src):
             self._obj_orig_path = _src        # so the frame can still be switched later
@@ -8236,7 +8384,7 @@ class MainWindow(QMainWindow):
             # and they CHAIN (foo_positive_merged.obj), so test the stem for any of them.
             _stem = os.path.splitext(os.path.basename(path))[0]
             _derived = any(_stem.endswith(sfx) or (sfx + "_") in _stem
-                           for sfx in ("_positive", "_merged", "_grouped"))
+                           for sfx in ("_positive", "_merged", "_grouped", "_active"))
             if not _derived:
                 self._obj_orig_path = path
             base, ext = os.path.splitext(path)
@@ -8335,15 +8483,30 @@ class MainWindow(QMainWindow):
             self._layer_list.addItem(item)
         self._mat_panel.set_project(self._proj_root)
         self._mat_panel.populate([g["name"] for g in groups])
+        # re-apply deactivated layers that still exist (names can vanish on explode/merge/group)
+        names = {g["name"] for g in groups}
+        self._inactive_layers = {n for n in getattr(self, "_inactive_layers", set()) if n in names}
+        for n in self._inactive_layers:
+            self._mat_panel.set_layer_active(n, False)
+            self._gl.set_layer_visible(n, False)
         # populate() selects material row 0 (needed so edits attribute to a row); don't let that
         # auto-highlight a surface in the 3D scene on load.
         self._gl.clear_selection()
         self._layer_list.setCurrentRow(-1)
 
     def _show_no_layer_selected(self):
-        # Leave the material table selection intact: it must always keep one row
-        # selected so value edits attribute to a material. Nothing to do here.
-        pass
+        # Scene deselect -> drop the table HIGHLIGHT too. clearSelection() keeps the table's current
+        # row, and MaterialPanel resolves the edit target from the selection, else currentRow(), so
+        # value/curve edits still land on a material. Under the sync guard: the selection change
+        # re-emits rowSelected, which would otherwise re-highlight the surface in the 3D view.
+        tbl = self._mat_panel._tbl
+        if tbl.selectionModel() is None or not tbl.selectionModel().hasSelection():
+            return
+        self._sync_guard = True
+        try:
+            tbl.clearSelection()
+        finally:
+            self._sync_guard = False
 
     def _on_layer_picked(self, name):
         """Sync list selection when user clicks in the GL viewport."""
@@ -8539,6 +8702,7 @@ class MainWindow(QMainWindow):
             for r in range(tbl.rowCount()):
                 if tbl.item(r, 0) and tbl.item(r, 0).text() == name:
                     tbl.selectRow(r)
+                    tbl.scrollToItem(tbl.item(r, 0))     # a picked layer may be off-screen
                     break
             self._sync_guard = False
         self._sb.showMessage(f"Selected layer: {name}")
@@ -8564,24 +8728,6 @@ class MainWindow(QMainWindow):
         # focus to the table here is what makes arrow-key row navigation work.
         self._mat_panel._tbl.setFocus(Qt.FocusReason.OtherFocusReason)
         self._sb.showMessage(f"Selected layer: {name}")
-
-    def _set_all_vis(self, v):
-        for g in self._groups: self._gl.set_layer_visible(g["name"], v)
-
-    def _toggle_all_layers(self):
-        all_on = all(self._gl.is_layer_visible(g["name"]) for g in self._groups) if self._groups else True
-        self._set_all_vis(not all_on)
-        self._layers_all_btn.setText("Show all" if all_on else "Hide all")
-
-    def _toggle_selected_vis(self):
-        row = self._layer_list.currentRow()
-        if row < 0 or row >= len(self._groups):
-            self._sb.showMessage("Select a layer to toggle.")
-            return
-        name = self._groups[row]["name"]
-        new_vis = not self._gl.is_layer_visible(name)
-        self._gl.set_layer_visible(name, new_vis)
-        self._sb.showMessage(f"{name}: {'visible' if new_vis else 'hidden'}")
 
     def _save_config(self):
         if not self._proj_root:
@@ -8685,10 +8831,53 @@ class MainWindow(QMainWindow):
             self._rec_tbl.load_file(p)
             self._refresh_gl_points()
 
+    def _solver_scene(self):
+        """The OBJ main3D reads. Normally the loaded file itself (unchanged behaviour). With layers
+        deactivated: a copy <scene>_active.obj without their FACES. EVERY vertex is kept, because
+        main3D takes bmin from all `v` lines and the src/rec solver frame is world - bmin -- dropping
+        vertices could move bmin and shift every source/receiver. Groups are matched to .fit by name,
+        so the remaining layers keep their materials. The bounding box is never dropped."""
+        path = self._obj_path
+        off = set(getattr(self, "_inactive_layers", set()))
+        groups = getattr(self._gl, "_groups", [])
+        if not path or not off or not groups:
+            return path
+        keep = [g for g in groups if g.get("is_bbox") or g["name"] not in off]
+        if len(keep) == len(groups):
+            return path
+        base, ext = os.path.splitext(path)
+        out = base + "_active" + ext
+        verts = np.asarray(self._gl._verts, np.float64)
+        lines = ["# active layers only — written by gui.py for main3D (all vertices kept)\n"]
+        lines += [f"v {x:.9g} {y:.9g} {z:.9g}\n" for x, y, z in verts]
+        for g in keep:
+            lines.append(f"g {g['name']}\n")
+            lines += [f"f {a+1} {b+1} {c+1}\n" for a, b, c in np.asarray(g["tris"])]
+        txt = "".join(lines)
+        try:
+            same = open(out).read() == txt
+        except OSError:
+            same = False
+        if not same:          # unchanged -> keep the mtime, so main3D's SDF cache stays valid
+            with open(out, "w") as f:
+                f.write(txt)
+        return out
+
+    def _on_layer_active_changed(self, name, active):
+        """Material-table check box: deactivate/reactivate a layer -- hidden in the scene AND left out
+        of the solver scene (_solver_scene). Its material (.mat/.fit) stays, ready to re-activate."""
+        if not hasattr(self, "_inactive_layers"):
+            self._inactive_layers = set()
+        (self._inactive_layers.discard if active else self._inactive_layers.add)(name)
+        self._gl.set_layer_visible(name, bool(active))
+        self._mark_dirty()
+        self._sb.showMessage(f"Layer {name}: {'active' if active else 'DEACTIVATED (not simulated)'}")
+
     def _refresh_gl_points(self):
         self._gl.set_sources(  [(p[0],p[1],p[2]) + ((p[3],) if len(p) > 3 else ())
-                                for p in self._src_tbl.get_points()])
-        self._gl.set_receivers([(p[0],p[1],p[2]) for p in self._rec_tbl.get_points()])
+                                for p in self._src_tbl.get_points()], self._src_tbl.get_active())
+        self._gl.set_receivers([(p[0],p[1],p[2]) for p in self._rec_tbl.get_points()],
+                               self._rec_tbl.get_active())
         self._gl.clear_animation()   # source SPL/pos changed -> rebuild the particle sim on next play
 
     def _browse_binary(self):
@@ -8739,6 +8928,9 @@ class MainWindow(QMainWindow):
         }
         obj = self._obj_path if (self._obj_path and os.path.isfile(self._obj_path)) else None
         comps["obj"] = (norm(obj) or "") if obj else ""
+        _off = sorted(getattr(self, "_inactive_layers", set()))
+        if _off:
+            comps["obj"] += "\n#inactive " + "|".join(_off)
         mats = sorted(_glob.glob(os.path.join(root, "input", "mat", "*.mat")))
         comps["mat"] = "\n".join(f"{os.path.basename(m)}={norm(m)}" for m in mats)
         return {k: hashlib.sha1(v.encode()).hexdigest()[:12] for k, v in comps.items()}
@@ -8822,7 +9014,7 @@ class MainWindow(QMainWindow):
         is fine / the check couldn't run (binary missing, etc.) -> caller fails open."""
         binary = self._bin_le.text()
         bin_cmd = binary if os.path.isabs(binary) else os.path.join(self._proj_root, binary)
-        scene = self._obj_path
+        scene = self._solver_scene()
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
         cmd = [bin_cmd, scene, "config/config.txt",
@@ -8907,6 +9099,13 @@ class MainWindow(QMainWindow):
         self._write_config(cfg_path)
         self._src_tbl.save_file(os.path.join(self._proj_root,"input","src","src.txt"))
         self._rec_tbl.save_file(os.path.join(self._proj_root,"input","rec","rec.txt"))
+        if not self._src_tbl.active_rows() or not self._rec_tbl.active_rows():
+            QMessageBox.warning(self, "Nothing to simulate",
+                                "At least one ACTIVE source and one ACTIVE receiver are needed "
+                                "(tick the box next to its name)."); return
+        # main3D names its outputs by LINE of rec.txt; line k is table row _run_rec_rows[k].
+        # Snapshot it now (a toggle during the run must not change how this run is renamed).
+        self._run_rec_rows = self._rec_tbl.active_rows()
         self._mat_panel.save_all()
         # material values changed since last fit -> .fit (and its ADE poles) are stale.
         # Running now would simulate with old impedances. Warn, offer to refit first.
@@ -8947,7 +9146,7 @@ class MainWindow(QMainWindow):
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 return
-        scene = self._obj_path
+        scene = self._solver_scene()
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
         # The solver requires poles.txt (argv[5], written by vectFIT). Catch a
@@ -8974,20 +9173,23 @@ class MainWindow(QMainWindow):
                          "Full run: wave inputs changed (or no prior IR) — computing the FVM.")
         self._tabs.setCurrentIndex(4)
 
-        n_src = len(self._src_tbl.get_points())
-        if self._aural.isChecked() and n_src > 1:
-            # one run per source; _on_solver_done chains the rest
-            self._aural_queue = list(range(1, n_src))
-            self._log.append(f"Auralization: {n_src} sources, one run each")
-            self._run_source(0)
+        act_src = self._src_tbl.active_rows()           # table rows of the ACTIVE sources
+        if self._aural.isChecked() and len(act_src) > 1:
+            # one run per active source (src index = its TABLE row); _on_solver_done chains the rest
+            self._aural_first = act_src[0]                 # this one does the full purge
+            self._aural_queue = act_src[1:]
+            self._log.append(f"Auralization: {len(act_src)} sources, one run each")
+            self._run_source(act_src[0])
         else:
             self._aural_queue = []
+            self._run_src_idx = 0                          # all active sources summed -> suffix 0
             self._write_config(os.path.join(self._proj_root,"config","config.txt"), 0)
             self._launch_solver(self._aural_cmd)
 
     def _launch_solver(self, cmd):
         import time
         self._t_start = time.time()                    # for the live ETA (see _on_solver_progress)
+        self._rename_armed = True                      # exactly one output rename per launched run
         # time-left takes over the status bar for the whole run (released in _on_solver_done)
         self._sb.hold = False
         self._sb.showMessage("Simulating… estimating time left…", priority=True)
@@ -9006,13 +9208,15 @@ class MainWindow(QMainWindow):
         the normal full purge (fresh directory); sources 1..N keep the earlier sources' bins so all
         per-source IR/HIR/ARR accumulate (else each run wipes the last)."""
         self._write_config(os.path.join(self._proj_root,"config","config.txt"), i)
-        pt = self._src_tbl.get_points()[i]
+        self._run_src_idx = i
+        # i is a TABLE row; solver frame (world + solver offset), exactly as save_file writes it
+        pt = self._src_tbl.solver_values(i)
         with open(os.path.join(self._proj_root,"input","src","src.txt"), "w") as f:
             f.write("# x y z p0 f0\n")
             f.write("  ".join(f"{v:.6g}" for v in pt) + "\n")
         self._log.append(f'<span style="color:{PAL["subtext"]};">— source {i} —</span>')
         cmd = list(self._aural_cmd)
-        if i > 0:
+        if i != getattr(self, "_aural_first", 0):
             cmd.append("--keep-other-sources")           # don't wipe sources already computed this batch
         self._launch_solver(cmd)
 
@@ -9213,7 +9417,7 @@ class MainWindow(QMainWindow):
         # on the .mat absorptions, which are otherwise only flushed on Run/Fit/Save.
         self._write_config(os.path.join(self._proj_root, "config", "config.txt"))
         self._mat_panel.save_all()
-        scene = self._obj_path
+        scene = self._solver_scene()
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
         binary = self._bin_le.text()
@@ -9261,7 +9465,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No scene", "Load an OBJ first."); return
         self._write_config(os.path.join(self._proj_root, "config", "config.txt"))
         self._src_tbl.save_file(os.path.join(self._proj_root, "input", "src", "src.txt"))
-        scene = self._obj_path
+        scene = self._solver_scene()
         if scene.startswith(self._proj_root):
             scene = os.path.relpath(scene, self._proj_root)
         binary = self._bin_le.text()
@@ -9337,8 +9541,50 @@ class MainWindow(QMainWindow):
             self._ray_tbl.setRowCount(0)
             self._ray_dock.hide()
 
+    def _rename_run_outputs(self):
+        """main3D names per-receiver outputs by LINE of rec.txt; deactivated receivers are not in it,
+        so line k is table row _run_rec_rows[k]. Rename this run's files to the table row, so allIRs,
+        acouparams, the Results views and auralization keep indexing by table row (as they always
+        have). A GA-only run REUSES the IR/VEL bins (already renamed after the full run) -> only its
+        own HIR/ARR are renamed. Descending k: a target row is always >= k, never a pending source.
+        No-op when every receiver is active."""
+        import glob as _g, re as _re
+        if not getattr(self, "_rename_armed", False):   # never rename the same files twice
+            return
+        self._rename_armed = False
+        rows = list(getattr(self, "_run_rec_rows", []) or [])
+        if not rows or rows == list(range(len(rows))) or not self._proj_root:
+            return
+        out = os.path.join(self._proj_root, "output")
+        s = int(getattr(self, "_run_src_idx", 0))
+        kinds = ("HIR", "ARR") if getattr(self, "_is_ga_only_run", False) else ("IR", "VEL", "HIR", "ARR")
+        pat = _re.compile(r"^(IR|VEL|HIR|ARR)(\d+)_(\d+)(_\w+)?\.bin$")
+        for k in sorted(range(len(rows)), reverse=True):
+            r = rows[k]
+            if r == k:
+                continue
+            for kind in kinds:
+                for f in _g.glob(os.path.join(out, f"{kind}{k}_{s}*.bin")):
+                    m = pat.match(os.path.basename(f))
+                    if not m or m.group(1) != kind or int(m.group(2)) != k or int(m.group(3)) != s:
+                        continue
+                    os.replace(f, os.path.join(out, f"{kind}{r}_{s}{m.group(4) or ''}.bin"))
+        if not getattr(self, "_is_ga_only_run", False):
+            # derived broadband IRs of receivers NOT in this run are stale (allIRs rebuilds the rest)
+            for f in _g.glob(os.path.join(out, f"IR_broad_*_{s}.npy")):
+                m = _re.match(r"^IR_broad_(\d+)_(\d+)\.npy$", os.path.basename(f))
+                if m and int(m.group(2)) == s and int(m.group(1)) not in rows:
+                    os.remove(f)
+        self._log.append(f'<span style="color:{PAL["subtext"]};">outputs renamed to table rows '
+                         f'(receivers {rows})</span>')
+
     def _on_solver_done(self, rc):
         self._sb.hold = False       # run over: the status bar is everyone's again
+        if rc == 0:
+            try:
+                self._rename_run_outputs()
+            except Exception as ex:                        # never lose the run over a rename
+                self._log.append(f"[!] could not rename outputs to table rows: {ex}")
         # Auralization: if more sources queued and this one succeeded, run the next.
         if rc == 0 and self._aural_queue:
             self._run_source(self._aural_queue.pop(0))
