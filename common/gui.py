@@ -837,7 +837,7 @@ class GLViewer(QOpenGLWidget):
         self._bbox_visible  = False
         self._selected_layer = None
         self._surf_sel  = set()    # group names multi-selected for grouping; all highlighted
-        self._surf_pick = False    # armed (RMB) -> next LMB drag rubber-bands surfaces into _surf_sel
+        self._surf_pick = False    # armed (RMB "Select surfaces"): LMB click toggles / drag boxes into _surf_sel, until Esc
         self._hover_world = None   # world coords under mouse for HUD
 
 
@@ -973,10 +973,15 @@ class GLViewer(QOpenGLWidget):
         return {p.layer for p in self._props}
 
     def arm_surface_rect(self):
-        """Arm a one-shot rubber-band surface select: the next LMB drag boxes surfaces (front-most
-        only) into _surf_sel. RMB then groups/explodes them."""
+        """Arm surface selection: LMB drag boxes surfaces (front-most only) into _surf_sel, LMB click
+        toggles the one surface under the cursor. Stays armed for more clicks/boxes until Esc (or the
+        selection is grouped/cleared from the RMB menu)."""
         self._surf_pick = True
         self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _disarm_surface_pick(self):
+        self._surf_pick = False; self._rect = None
+        self.setCursor(Qt.CursorShape.ArrowCursor); self.update()
 
     def _find_surfaces_in_rect(self, rect):
         """Front-most visible surfaces inside the screen rectangle. Samples a grid of pixels and keeps
@@ -2801,7 +2806,8 @@ class GLViewer(QOpenGLWidget):
         ("PROPS (Draw mode)", ["P / R / S  move / rotate / scale · X/Y/Z lock",
                                "C  copy-select · props auto-rest on the surface below (stage/floor)",
                                "Ctrl+Z  undo"]),
-        ("SURFACES (RMB menu)", ["rectangle-select → Group / Explode / Cleanse layers"]),
+        ("SURFACES (RMB menu)", ["Select surfaces: click toggles one, drag boxes several; Esc stops",
+                                 "then RMB → Group / Explode / Cleanse layers"]),
     ]
 
     def _paint_help(self, p):
@@ -2984,11 +2990,21 @@ class GLViewer(QOpenGLWidget):
             self._rect = None; self._pt_box = False
             self.update(); return
 
-        # Finish a surface rect-select: add the front-most enclosed surfaces to the selection (highlight).
+        # Finish a surface select: a drag adds the front-most enclosed surfaces; a click (no drag)
+        # toggles the surface under the cursor -- same filters (no props, no bbox, no dollhouse-cut),
+        # via a 2 px rect that samples exactly the click point. Stays armed until Esc.
         if self._rect is not None and self._surf_pick and e.button() == Qt.MouseButton.LeftButton:
-            self._surf_sel |= self._find_surfaces_in_rect(self._rect)
-            self._rect = None; self._surf_pick = False
-            self.setCursor(Qt.CursorShape.ArrowCursor); self.update(); return
+            a, b = self._rect
+            if abs(b.x() - a.x()) < 4 and abs(b.y() - a.y()) < 4:
+                hit = self._find_surfaces_in_rect([a, QPointF(a.x() + 2, a.y() + 2)])
+                if hit and hit <= self._surf_sel:
+                    self._surf_sel -= hit
+                else:
+                    self._surf_sel |= hit
+            else:
+                self._surf_sel |= self._find_surfaces_in_rect(self._rect)
+            self._rect = None
+            self.update(); return
 
         # Finish the copy box: duplicate props whose center is inside it, then grab the copies (move).
         if self._rect is not None and e.button() == Qt.MouseButton.LeftButton:
@@ -3171,6 +3187,8 @@ class GLViewer(QOpenGLWidget):
                     e.accept(); return
                 elif self._props_undo_stack:
                     self._props_undo_stack.pop()                  # no prop to grab -> drop the snapshot
+        if key == Qt.Key.Key_Escape and self._surf_pick:
+            self._disarm_surface_pick(); e.accept(); return      # keep the selection, stop picking
         if key == Qt.Key.Key_Escape:
             self.exit_placement_mode()
             e.accept(); return
@@ -3307,10 +3325,10 @@ class GLViewer(QOpenGLWidget):
             if m.exec(gpos) is gb:
                 self.fpvExitRequested.emit()
             return
-        # ── surface grouping: rectangle-select surfaces, then group / explode ──
+        # ── surface grouping: select surfaces (click or box), then group / explode ──
         hit_idx = self._pick_group_idx(qpos)
         hit = self._groups[hit_idx]["name"] if hit_idx >= 0 else None
-        sel_s = m.addAction("Select surfaces by rectangle")
+        sel_s = m.addAction("Select surfaces")
         exp_s = grp_s = clr_s = mrg_s = None
         # Explode/merge only on enclosure surfaces — never props (all props share one layer name, so
         # acting by name would shatter every prop at once).
@@ -3357,8 +3375,10 @@ class GLViewer(QOpenGLWidget):
         if chosen is mrg_s:
             self.mergeSiblings.emit(_sibling_base(hit)); return
         if chosen is grp_s:
+            self._disarm_surface_pick()
             self.surfacesPicked.emit(sorted(self._surf_sel)); return
         if chosen is clr_s:
+            self._disarm_surface_pick()
             self._surf_sel = set(); self.update(); return
         if chosen is cln_s:
             self.cleanseLayers.emit(); return
