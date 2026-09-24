@@ -857,6 +857,8 @@ class GLViewer(QOpenGLWidget):
         self._sel_recs = set()          # receivers multi-selected for Results overlay
         self._results_pick = False      # LMB click picks/toggles a receiver instead of ray-pick
         self._glyph_queue = []   # per-frame source/receiver glyph overlay list
+        self._dh_cache = {}      # dollhouse per-triangle masks, keyed on view + pivot + mesh + cut
+        self._dh_cut_frac = 0.75 # dollhouse section plane: fraction of the room height (PgUp/PgDn)
         self._occ = {}           # (kind, i) -> True when a surface hides that source/receiver
         self._occ_cache = {"key": None, "res": {}, "t": 0.0, "n": -1}
         self._grid_h = 0.0       # user grid spacing [m]; drives the i,j,k HUD indices
@@ -1008,8 +1010,9 @@ class GLViewer(QOpenGLWidget):
                 and len(g["tris"]) and g["name"] not in pl]
         if not cand:
             return set()
-        tris = np.concatenate([np.asarray(g["tris"]) for g in cand])
-        tri_grp = np.concatenate([np.full(len(g["tris"]), i, np.int32) for i, g in enumerate(cand)])
+        shown = [np.asarray(self._dh_tris(g)) for g in cand]          # dollhouse-cut triangles excluded
+        tris = np.concatenate(shown)
+        tri_grp = np.concatenate([np.full(len(t), i, np.int32) for i, t in enumerate(shown)])
         verts = np.asarray(self._verts, np.float64)
         v0 = verts[tris[:, 0]]; e1 = verts[tris[:, 1]] - v0; e2 = verts[tris[:, 2]] - v0
 
@@ -1095,12 +1098,17 @@ class GLViewer(QOpenGLWidget):
         W, H = self.width(), self.height()
         ro, rd = ray_from_screen(qpos.x(), qpos.y(), W, H, self._mv, self._proj)
         best_t, best_i = None, -1
+        sec = self._dh_section()
         for i, g in enumerate(self._groups):
             if not g["visible"]: continue
             if g["is_bbox"] and not self._bbox_visible: continue
             if self._dollhouse_cut(g): continue
             if len(g["tris"]) == 0: continue
-            t = ray_group_hit(ro.astype(np.float64), rd.astype(np.float64), self._verts, g["tris"])
+            t = ray_group_hit(ro.astype(np.float64), rd.astype(np.float64), self._verts, self._dh_tris(g))
+            if t is not None and sec is not None:        # clipped away by the dollhouse section?
+                hz = float(ro[2] + t * rd[2])
+                if (hz > sec[0] + 1e-6) if sec[1] else (hz < sec[0] - 1e-6):
+                    t = None
             if t is not None and (best_t is None or t < best_t):
                 best_t, best_i = t, i
         return best_i
@@ -1889,31 +1897,151 @@ class GLViewer(QOpenGLWidget):
             painter.drawText(int(wx), int(wy), label)
         painter.end()
 
-    def _dollhouse_cut(self, g):
-        """True if group g is a near, camera-facing wall to hide in dollhouse mode. Geometric:
-        outward direction (centroid - room centre) vs view direction; grazing bias keeps floor/
-        ceiling. Shared by rendering AND picking so you can't select a hidden near wall."""
-        if not getattr(self, "_dollhouse", False) or g.get("is_bbox"):
+    def _dollhouse_keep(self, g):
+        """Per-TRIANGLE dollhouse mask of group g (True = drawn / pickable), or None = keep all.
+        See _dollhouse_masks for the rule. Shared by drawing AND picking."""
+        if not getattr(self, "_dollhouse", False) or g.get("is_bbox") or len(g["tris"]) == 0:
+            return None
+        return self._dollhouse_masks().get(id(g))
+
+    def _dh_mesh_data(self):
+        """Per-mesh arrays for the dollhouse, built once per loaded mesh: every non-bbox triangle's
+        normal, centroid and lowest-vertex z, plus the room's z range (real layers only, never the
+        domain bounding box)."""
+        d = getattr(self, "_dh_mesh", None)
+        if d is not None and d["gid"] == id(self._groups):
+            return d
+        verts = np.asarray(self._verts, np.float64)
+        idx = [i for i, g in enumerate(self._groups)
+               if not g["is_bbox"] and len(g["tris"]) and g.get("normals") is not None
+               and len(g["normals"]) == len(g["tris"])]
+        d = {"gid": id(self._groups), "idx": idx}
+        if idx and len(verts):
+            tris = np.concatenate([np.asarray(self._groups[i]["tris"]) for i in idx])
+            d["cnt"] = [len(self._groups[i]["tris"]) for i in idx]
+            d["nrm"] = np.concatenate([np.asarray(self._groups[i]["normals"], np.float64) for i in idx])
+            P = verts[tris]                                        # T x 3 x 3
+            d["tc"] = P.mean(axis=1)
+            d["tzmin"] = P[:, :, 2].min(axis=1)
+            d["tzmax"] = P[:, :, 2].max(axis=1)
+            d["zlo"], d["zhi"] = float(P[:, :, 2].min()), float(P[:, :, 2].max())
+        self._dh_mesh = d
+        return d
+
+    def _dh_section(self):
+        """Dollhouse section plane: (z, keep_below) or None when the dollhouse is off.
+        Looking down or level -> keep BELOW floor + f*H (ceiling clipped: see into the room from above).
+        Looking UP (view z > 0.1) -> the mirror, keep ABOVE ceiling - f*H (floor zone clipped: the
+        ceiling and everything hanging from it stays visible from below). f = PgUp/PgDn, 1 = no cut."""
+        if not getattr(self, "_dollhouse", False):
+            return None
+        d = self._dh_mesh_data()
+        if "zlo" not in d:
+            return None
+        f = float(self._dh_cut_frac)
+        vd = getattr(self, "_view_dir", None)
+        if vd is not None and float(vd[2]) > 0.1:
+            return (d["zhi"] - f * (d["zhi"] - d["zlo"]), False)
+        return (d["zlo"] + f * (d["zhi"] - d["zlo"]), True)
+
+    def _dh_clip_on(self):
+        """Enable GL_CLIP_PLANE0 for the current section (world frame = current modelview). Returns
+        True if enabled; the caller disables it in a finally."""
+        sec = self._dh_section()
+        if sec is None:
             return False
+        zc, below = sec
+        glClipPlane(GL_CLIP_PLANE0, (0.0, 0.0, -1.0, float(zc)) if below else (0.0, 0.0, 1.0, -float(zc)))
+        glEnable(GL_CLIP_PLANE0)
+        return True
+
+    def _dollhouse_masks(self):
+        """{id(group): bool mask over its triangles}, cached per view + pivot + mesh + section height.
+
+        Isometric cutaway, two parts:
+        1. SECTION PLANE (_dh_section): the GPU clips everything on its far side (_draw_mesh). From
+           above that is the ceiling -- flat, sloped, coffered, rims, beams, lights -- and walls end
+           cleanly at the plane whatever their triangulation; from below it mirrors (the floor zone
+           goes, the ceiling stays). Here: triangles ENTIRELY on the clipped side are not pickable.
+        2. NEAR WALLS by orientation: a triangle is cut when its OUTWARD normal faces the camera -- its
+           face normal signed to point away from the orbit centre (no consistent winding needed),
+           cut if outward . view_dir < -0.2 (grazing bias keeps side walls and the floor). Per
+           triangle, not per layer: BRAS CR4 layers are materials spanning the whole room.
+        At 100 % section height (PgUp) this is exactly the previous orientation-only dollhouse."""
         vdir = getattr(self, "_view_dir", None)
         if vdir is None:
-            return False
-        cen = g.get("_cen")
-        if cen is None:
-            tris = np.asarray(g["tris"])
-            if len(tris) == 0:
-                return False
-            cen = np.asarray(self._verts, np.float32)[np.unique(tris.ravel())].mean(axis=0)
-            g["_cen"] = cen
-        out = cen - np.asarray(self._pivot, np.float32)
-        n = float(np.linalg.norm(out))
-        if n < 1e-9:
-            return False
-        return float(np.dot(out / n, vdir)) < -0.2
+            return {}
+        vdir = np.asarray(vdir, np.float64)
+        piv = np.asarray(self._pivot, np.float64)
+        sec = self._dh_section()
+        key = (tuple(np.round(vdir, 4)), tuple(np.round(piv, 4)), id(self._groups),
+               None if sec is None else (round(sec[0], 6), sec[1]))
+        c = self._dh_cache
+        if c.get("key") == key:
+            return c["masks"]
+        d = self._dh_mesh_data()
+        masks = {}
+        if d.get("idx") and "nrm" in d:
+            nrm, tc = d["nrm"], d["tc"]
+            side = np.sign(np.einsum('ij,ij->i', nrm, tc - piv))
+            side[side == 0] = 1.0
+            keep = ((nrm * side[:, None]) @ vdir) >= -0.2          # outward normal vs view direction
+            if sec is not None:                                     # entirely on the clipped side: gone
+                keep &= (d["tzmin"] <= sec[0]) if sec[1] else (d["tzmax"] >= sec[0])
+            o = 0
+            for i, n in zip(d["idx"], d["cnt"]):
+                masks[id(self._groups[i])] = keep[o:o + n]
+                o += n
+        c.clear(); c["key"] = key; c["masks"] = masks
+        return masks
+
+    def _dollhouse_cut(self, g):
+        """True if the WHOLE group is cut by the dollhouse (see _dollhouse_keep)."""
+        m = self._dollhouse_keep(g)
+        return m is not None and not m.any()
+
+    def _dh_tris(self, g):
+        """g's triangles minus the dollhouse-cut ones (all of them when the dollhouse is off)."""
+        m = self._dollhouse_keep(g)
+        return g["tris"] if m is None else np.asarray(g["tris"])[m]
+
+    def _dh_edge_mask(self, g, keep):
+        """Which of g's feature edges still border a KEPT triangle of g. Edges not adjacent to any of
+        g's own triangles (global feature-edge attribution) are kept. Adjacency built once per group."""
+        E = np.asarray(g["edges"])
+        csr = g.get("_e_csr")
+        if csr is None or csr[0] is not g["edges"]:
+            emap = {}
+            for k, (a_, b_, c_) in enumerate(np.asarray(g["tris"])):
+                for u, v in ((a_, b_), (b_, c_), (c_, a_)):
+                    emap.setdefault((min(u, v), max(u, v)), []).append(k)
+            idx, cnt = [], []
+            for i, j in E:
+                lst = emap.get((min(i, j), max(i, j)), [])
+                idx += lst; cnt.append(len(lst))
+            csr = (g["edges"], np.asarray(idx, np.int64), np.asarray(cnt, np.int64))
+            g["_e_csr"] = csr
+        _, idx, cnt = csr
+        if len(idx) == 0:
+            return np.ones(len(E), bool)
+        seg = np.repeat(np.arange(len(E)), cnt)
+        kept = np.bincount(seg, weights=keep[idx].astype(np.float64), minlength=len(E))
+        return (cnt == 0) | (kept > 0)
 
     def _draw_mesh(self):
         if len(self._verts) == 0:
             return
+        # Dollhouse section (_dh_section). glClipPlane takes the plane in the CURRENT modelview's
+        # frame -- here the world camera transform, as for every mesh vertex. try/finally: GL state
+        # persists across frames, a stuck clip plane would cut everything drawn afterwards.
+        if not self._dh_clip_on():
+            return self._draw_mesh_body()
+        try:
+            return self._draw_mesh_body()
+        finally:
+            glDisable(GL_CLIP_PLANE0)
+
+    def _draw_mesh_body(self):
         verts = np.asarray(self._verts, np.float32)
         # dollhouse: hide wall groups facing the camera (fills+wires) so the outside view matches
         # the inside view. Selected wall is kept so you always see what you're editing.
@@ -1938,8 +2066,8 @@ class GLViewer(QOpenGLWidget):
         glDisable(GL_BLEND)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
-        def draw_triangles(g, alpha, color=None):
-            tris = g["tris"]
+        def draw_triangles(g, alpha, color=None, tris=None):
+            tris = g["tris"] if tris is None else tris
             if len(tris) == 0:
                 return
             r, gr, b = color if color else g["color"]
@@ -1970,10 +2098,12 @@ class GLViewer(QOpenGLWidget):
         for g in self._groups:
             if g["is_bbox"] or not g["visible"] or _cut(g):
                 continue
+            keep = None if g["name"] == self._selected_layer else self._dollhouse_keep(g)
+            tris = None if keep is None else np.asarray(g["tris"])[keep]   # dollhouse: per triangle
             if self._selected_layer == g["name"] or g["name"] in self._surf_sel:
-                draw_triangles(g, alpha=SEL_ALPHA)            # selected / surface-picked: own colour
+                draw_triangles(g, alpha=SEL_ALPHA, tris=tris)            # selected / surface-picked: own colour
             else:
-                draw_triangles(g, alpha=fill_a, color=GREY)   # others: grey
+                draw_triangles(g, alpha=fill_a, color=GREY, tris=tris)   # others: grey
 
         # Pass B: feature-edge wireframe for ALL visible layers (the selected
         # one included), drawn last so the edges always sit on top of every
@@ -1986,6 +2116,9 @@ class GLViewer(QOpenGLWidget):
             edges = g.get("edges")
             if edges is None or len(edges) == 0:
                 continue
+            keep = None if g["name"] == self._selected_layer else self._dollhouse_keep(g)
+            if keep is not None:
+                edges = np.asarray(edges)[self._dh_edge_mask(g, keep)]   # edges of cut triangles go too
             glBegin(GL_LINES)
             for i, j in edges:
                 glVertex3fv(verts[i])
@@ -2026,6 +2159,14 @@ class GLViewer(QOpenGLWidget):
         return colorsys.hsv_to_rgb(m[name] / 360.0, 0.55, 0.95)
 
     def _draw_props(self):
+        if not self._dh_clip_on():                                 # props obey the section too
+            return self._draw_props_body()
+        try:
+            return self._draw_props_body()
+        finally:
+            glDisable(GL_CLIP_PLANE0)
+
+    def _draw_props_body(self):
         """Filled + wire pass for placed props (props3d.Prop), colored per layer — ONLY in Draw mode
         (placement). In Simulation the props are the baked scene groups, drawn transparent/grey by
         _draw_mesh with normal layer highlighting; the colorful overlay would fight that."""
@@ -2448,7 +2589,7 @@ class GLViewer(QOpenGLWidget):
         c = self._occ_cache
         key = (np.asarray(self._mv).tobytes(), np.asarray(self._proj).tobytes(),
                tuple(tuple(float(v) for v in p[:3]) for _, _, p in pts),
-               bool(getattr(self, "_dollhouse", False)),
+               bool(getattr(self, "_dollhouse", False)), float(getattr(self, "_dh_cut_frac", 1.0)),
                id(self._verts), tuple((id(g["tris"]), g["visible"]) for g in self._groups),
                self._selected_layer, frozenset(self._surf_sel))
         if key == c["key"]:
@@ -2489,6 +2630,11 @@ class GLViewer(QOpenGLWidget):
                 allow = np.array([g["visible"] and not g["is_bbox"] and not self._dollhouse_cut(g)
                                   for g in self._groups], bool)
                 m = allow[tg]
+                if getattr(self, "_dollhouse", False):       # per-triangle dollhouse cut
+                    km = [self._dollhouse_keep(self._groups[i]) for i in sorted(set(tg.tolist()))]
+                    parts = [(k if k is not None else np.ones(len(self._groups[i]["tris"]), bool))
+                             for k, i in zip(km, sorted(set(tg.tolist())))]
+                    m = m & np.concatenate(parts)
                 if m.any():
                     v0, e1, e2, tgm = v0[m], e1[m], e2[m], tg[m]
                     pane_a = np.array([SEL_ALPHA if (self._selected_layer == g["name"] or g["name"] in self._surf_sel)
@@ -2925,6 +3071,10 @@ class GLViewer(QOpenGLWidget):
         if self._nav_mode:                   return "NAVIGATE"
         if self._grab_held:                  return "EDIT POINTS"
         if self._props_mode:                 return "DRAW / PROPS"
+        if getattr(self, "_dollhouse", False):
+            sec = self._dh_section()
+            return (f"DOLLHOUSE  cut z = {sec[0]:.2f} m, showing {'below' if sec[1] else 'above'} "
+                    f"({round(100 * self._dh_cut_frac)} %)  PgUp/PgDn" if sec is not None else "DOLLHOUSE")
         return "VIEW"
 
     _HELP = [
@@ -2937,6 +3087,7 @@ class GLViewer(QOpenGLWidget):
         ("PROPS (Draw mode)", ["P / R / S  move / rotate / scale · X/Y/Z lock",
                                "C  copy-select · props auto-rest on the surface below (stage/floor)",
                                "Ctrl+Z  undo"]),
+        ("DOLLHOUSE (RMB menu)", ["PgUp / PgDn  raise / lower the section plane (100 % = no cut)"]),
         ("SURFACES (RMB menu)", ["Select surfaces: click toggles one, drag boxes several; Esc stops",
                                  "then RMB → Group / Explode / Cleanse layers"]),
     ]
@@ -3323,6 +3474,10 @@ class GLViewer(QOpenGLWidget):
         if key == Qt.Key.Key_Escape:
             self.exit_placement_mode()
             e.accept(); return
+        if getattr(self, "_dollhouse", False) and key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            step = 0.05 if key == Qt.Key.Key_PageUp else -0.05
+            self._dh_cut_frac = min(1.0, max(0.05, round(self._dh_cut_frac + step, 2)))
+            self.update(); e.accept(); return
         if key == Qt.Key.Key_T and self._mode == self.MODE_NONE:
             # reset camera to the exact initial view captured at load time
             self._reset_view()
