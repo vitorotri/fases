@@ -5221,7 +5221,20 @@ class _PointTableWidget(QTableWidget):
     def edit(self, index, trigger, event):
         if (index.isValid() and index.column() == 0
                 and trigger != QAbstractItemView.EditTrigger.DoubleClicked):
-            return False        # Name cell: block single-click/selected-click edits, allow selection
+            # Name cell: no text editor on a single click -- but Qt delivers the check-box click
+            # (the active toggle) THROUGH edit(), so hand the event to the delegate before refusing.
+            if event is not None:
+                try:
+                    from PySide6.QtWidgets import QStyleOptionViewItem
+                    opt = QStyleOptionViewItem()
+                    self.initViewItemOption(opt)
+                    opt.rect = self.visualRect(index)
+                    if self.itemDelegateForIndex(index).editorEvent(event, self.model(), opt, index):
+                        self.update(index)
+                        return True
+                except (AttributeError, TypeError):
+                    pass            # older binding: behave exactly as before (no toggle, no editor)
+            return False        # block single-click/selected-click edits, allow selection
         return super().edit(index, trigger, event)
 
 
