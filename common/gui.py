@@ -5948,7 +5948,7 @@ class ResultsView(QWidget):
         from PySide6.QtWidgets import QComboBox, QSizePolicy, QPushButton, QHBoxLayout
         top = QHBoxLayout()
         self._metric = QComboBox()
-        self._metric.addItems(["IR + Spectrum", "T20", "T30", "EDT", "C50", "C80", "D50", "Summary (avg)"])
+        self._metric.addItems(["IR + Spectrum", "h² normalized (dB)", "T20", "T30", "EDT", "C50", "C80", "D50", "Summary (avg)"])
         self._metric.currentIndexChanged.connect(self._on_metric_changed)
         top.addWidget(self._metric, 1)
         self._frac = QComboBox()                       # band resolution of the parameter plots
@@ -6020,7 +6020,7 @@ class ResultsView(QWidget):
     def _on_metric_changed(self, *_):
         summary = self.current_metric() == "Summary (avg)"
         self._add_sim_btn.setVisible(summary); self._clear_sim_btn.setVisible(summary)
-        self._frac.setVisible(self.current_metric() not in ("IR + Spectrum", "Summary (avg)"))
+        self._frac.setVisible(self.current_metric() not in ("IR + Spectrum", "h² normalized (dB)", "Summary (avg)"))
         self.metricChanged.emit()
 
     def _add_sim(self):
@@ -7116,6 +7116,9 @@ class MainWindow(QMainWindow):
         if metric == "IR + Spectrum":
             self._results.set_export(None)             # no tabular export for IR/Spectrum
             self._render_overlay(recs) if len(recs) > 1 else self._results.show_receiver(recs[0])
+        elif metric == "h² normalized (dB)":
+            self._results.set_export(None)
+            self._render_h2(recs)
         else:
             self._render_params(recs, metric)
 
@@ -7169,6 +7172,63 @@ class MainWindow(QMainWindow):
             for t in leg.get_texts(): t.set_color(FG)
         fig.tight_layout()
         path = os.path.join(out, "IR_overlay.png")
+        fig.savefig(path, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
+        self._results.show_png(path)
+
+    def _render_h2(self, recs, floor_db=-40.0, pre=0.02):
+        """Squared impulse responses normalized by their own maximum, in dB: 10 log10(h^2 / max h^2),
+        from the saved IR_broad_<rec>_<src>.npy (no re-run). One panel per receiver (rows) x source
+        (columns); all panels share one time window, from `pre` s before the earliest direct sound
+        (the maximum of each normalized IR) to the end of the longest IR, and a floor at `floor_db`."""
+        import glob, re
+        import matplotlib; matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        out = os.path.join(self._proj_root, "output")
+        fs = 44100                                     # allIRs saves broadband IRs at this rate
+        FG, BG = PAL['text'], PAL['bg']
+        irs = {}
+        for rec in recs:
+            for f in glob.glob(os.path.join(out, f"IR_broad_{rec}_*.npy")):
+                m = re.search(r"IR_broad_(\d+)_(\d+)\.npy$", f)
+                if m:
+                    irs[(rec, int(m.group(2)))] = np.asarray(np.load(f), float)
+        irs = {k: v for k, v in irs.items() if v.size and np.max(np.abs(v)) > 0}
+        if not irs:
+            self._results.show_png(None); return
+        rnames, snames = self._rec_tbl.get_names(), self._src_tbl.get_names()
+        rname = lambda i: rnames[i] if 0 <= i < len(rnames) and rnames[i] else f"receiver {i}"
+        sname = lambda i: snames[i] if 0 <= i < len(snames) and snames[i] else f"source {i}"
+        rows = sorted({r for r, _ in irs}); cols = sorted({s_ for _, s_ in irs})
+        t_dir = min(int(np.argmax(np.abs(v))) for v in irs.values()) / fs
+        t0 = max(0.0, t_dir - pre)
+        t1 = max(v.size for v in irs.values()) / fs      # up to the IRs' own maximum time
+        fig, axes = plt.subplots(len(rows), len(cols), figsize=(4.2 * len(cols) + 1.5, 2.2 * len(rows) + 0.8),
+                                 sharex=True, sharey=True, squeeze=False)
+        for i, rec in enumerate(rows):
+            for j, src in enumerate(cols):
+                ax = axes[i, j]
+                ir = irs.get((rec, src))
+                if ir is not None:
+                    e = ir * ir
+                    y = np.maximum(10.0 * np.log10(e / e.max() + 1e-30), floor_db)
+                    n0, n1 = int(t0 * fs), min(int(t1 * fs) + 1, y.size)
+                    t = np.arange(n0, n1) / fs
+                    col = _plot_color(recs.index(rec))
+                    ax.fill_between(t, y[n0:n1], floor_db, color=col, alpha=0.85, linewidth=0)
+                    ax.plot(t, y[n0:n1], color=col, lw=0.5)
+                ax.set_title(f"{rname(rec)} ← {sname(src)}", fontsize=9)
+                ax.set_xlim(t0, t1); ax.set_ylim(floor_db, 2.0)
+                if j == 0: ax.set_ylabel("h²(t) [dB]")
+                if i == len(rows) - 1: ax.set_xlabel("Time [s]")
+        fig.patch.set_facecolor(BG)
+        for ax in axes.ravel():                        # GUI dark theme
+            ax.set_facecolor(BG)
+            for sp in ax.spines.values(): sp.set_color(FG)
+            ax.tick_params(colors=FG, which='both')
+            ax.xaxis.label.set_color(FG); ax.yaxis.label.set_color(FG); ax.title.set_color(FG)
+            ax.grid(True, which='both', color=PAL['border'], alpha=0.6)
+        fig.tight_layout()
+        path = os.path.join(out, "IR_h2_normalized.png")
         fig.savefig(path, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
         self._results.show_png(path)
 
