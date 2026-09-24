@@ -152,15 +152,25 @@ int main(int argc, char *argv[]){
     // domain variables
     h = conf_arr[0]; // uniform grid spacing [m]
     t_max = conf_arr[1]; // maximum simulation time [s]
-    // With PCS, the FVM is only excited/valid up to ~0.5*f_cutoff (source peak ~0.45*f_cutoff), so the FVM<->GA
-	// crossover sits at f_x = 0.5*f_cutoff, NOT at f_cutoff (which stays the grid/mesh ceiling). Emit
-	// GA octave bands down to the one containing f_x so the GA reaches the crossover. allIRs filters
-	// at the same f_x. So a circumvention is to already read f_cutoff doubled like below so the srouce is
-	// strong enough uo to the desired f_cutoff.
-    f_cutoff = 2.0f * conf_arr[2]; // [Hz] (cutoff frequency)
-    
-    const float f_x = 0.5f * f_cutoff; // FVM<->GA crossover frequency
-    if (f_x < 63.0) ga_only = true; // simulate only GA
+    // Config line 3 = the highest frequency the user wants WAVE-based. The whole octave containing
+    // it is wave-based: the FVM<->GA seam f_x is that octave's UPPER edge, the GA starts at the
+    // next octave, and allIRs low-/high-passes at the same f_x (same rule, same config line).
+    // With PCS the FVM is well excited only to ~0.5*f_cutoff (source peak ~0.45*f_cutoff), so the
+    // grid/pulse ceiling is f_cutoff = 2*f_x. Example: 251 -> octave 250 (177-354) -> f_x = 354,
+    // f_cutoff = 707, GA from 500. Typing exactly an edge (354) gives the same.
+    const float f_in = conf_arr[2];
+    float f_x = f_in;                                    // seam: upper edge of the octave holding f_in
+    {
+        const float oct_c[8] = {63.f, 125.f, 250.f, 500.f, 1000.f, 2000.f, 4000.f, 8000.f};
+        for (int b = 0; b < 8; b++){
+            const float hi = oct_c[b] * 1.41421356f;
+            if (f_in <= hi){ f_x = hi; break; }
+        }
+    }
+    f_cutoff = 2.0f * f_x;                               // [Hz] grid / PCS pulse ceiling
+    if (f_in < 63.0f / 1.41421356f) ga_only = true;      // below the lowest octave: nothing wave-based
+    printf("[OK] wave band up to %.1f Hz (config %.1f Hz) -> FVM/GA seam at %.1f Hz, grid cutoff %.1f Hz\n",
+           f_x, f_in, f_x, f_cutoff);
     
     // PML keys
     U_PML = (float)conf_arr[6];
@@ -464,7 +474,7 @@ int main(int argc, char *argv[]){
 	c = sqrt(gamma*R_spec*Temp); // speed of sound [m/s]
 	// c = sqrt(K/rho) in case of liquids
     
-     printf("\n[OK] Speed of sound c = %.2f m/s\n\n",c);
+     printf("\n[OK] Speed of sound c = %.2f m/s\n",c);
     
      // attenuation coefficients for sound pressure according to ISO 9613-1
 	std::vector<float> m_air(8);
@@ -747,7 +757,7 @@ int main(int argc, char *argv[]){
 	
 	// rule of thumb for good boundary modelling etc: 10 ~ 20 cells per minimum wavelength (from f_cutoff)
 	// ppw
-	float lambda = 2.0 * c/f_cutoff; // since f_cutoff = 2.0 f_input on GUI side
+	float lambda = c/f_x;
 	if (lambda / h < 10.0f){
 		printf("[!] Resolution too low...\n\n");
 		//return -1;
@@ -1645,9 +1655,8 @@ int main(int argc, char *argv[]){
 	
 	// for each band
 	for (int b = 0; b < 8; b++){
-		// skip octaves ENTIRELY below the seam; the one straddling
-		// f_x is written and allIRs high-passes it at f_x
-		if (octave_bands[b] * 1.41421356f <= f_x) continue;
+		if (octave_bands[b] * 1.41421356f <= f_x) continue; // skip octaves ENTIRELY below the seam; the one
+		                                                   // straddling f_x is written and allIRs high-passes it at f_x
 		
 		// allocate memory for high frequency IRs: for each rec, first index sample is time, second is
 		// receiver's index (flattened)
