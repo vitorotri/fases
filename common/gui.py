@@ -149,6 +149,9 @@ def set_scene_mode(light):
 # Transparency of the SELECTED (highlighted) layer's fill, 0.0 (invisible) ..
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
+MESH_FILL_ALPHA = 0.22   # unselected surface fill opacity (x-ray view); glyphs behind surfaces fade by it
+GLYPH_BEHIND_GAIN = 4.0  # source/receiver behind n OBSTACLES (the room shell seen from outside doesn't count)
+                         # is drawn at alpha T**gain, T = prod(1 - pane alpha): 1 obstacle -> 37 %, 2 -> 14 %
 
 # Single source of truth for the X/Y/Z axis colours, shared by the corner
 # gizmo, the placement cursor, and the drag-to-move axis guides so they always
@@ -852,6 +855,8 @@ class GLViewer(QOpenGLWidget):
         self._sel_recs = set()          # receivers multi-selected for Results overlay
         self._results_pick = False      # LMB click picks/toggles a receiver instead of ray-pick
         self._glyph_queue = []   # per-frame source/receiver glyph overlay list
+        self._occ = {}           # (kind, i) -> True when a surface hides that source/receiver
+        self._occ_cache = {"key": None, "res": {}, "t": 0.0, "n": -1}
         self._grid_h = 0.0       # user grid spacing [m]; drives the i,j,k HUD indices
         self._hud_left = 0       # left inset [px] so the bottom-left HUD clears the tab panel
 
@@ -1625,6 +1630,7 @@ class GLViewer(QOpenGLWidget):
         self._draw_anim()
         self._draw_particles()
         self._draw_rays()
+        self._occ = self._glyph_occlusion()
         self._draw_sources()
         self._draw_receivers()
         if self._mode != self.MODE_NONE:
@@ -1950,7 +1956,7 @@ class GLViewer(QOpenGLWidget):
         # anything else and draw order alone controls layering.
         GREY = GREY_FILL
         glDepthMask(GL_FALSE)
-        fill_a = 0.22
+        fill_a = MESH_FILL_ALPHA
 
         # Pass A: FILLS first. Unselected layers get a transparent grey plane;
         # the selected layer gets its own vivid hue at SEL_ALPHA. Drawing every
@@ -2415,7 +2421,120 @@ class GLViewer(QOpenGLWidget):
         p = np.array([x, y, z], np.float32)
         return bool(np.any(p < self._domain_min) or np.any(p > self._domain_max))
 
-    def _point_glyph(self, x, y, z, color, kind, hl=False):
+    def _glyph_occlusion(self):
+        """{(kind, i): T} for every source/receiver behind visible surfaces, T = the fraction of the glyph
+        that shows through them. The surfaces are TRANSLUCENT panes (MESH_FILL_ALPHA, SEL_ALPHA for
+        selected/picked layers), so a glyph behind n panes is what GL would give if it were drawn under
+        the fills: T = prod(1 - alpha_i); the painter mixes (1 - T) of the pane grey into it.
+
+        The glyphs are a 2-D QPainter overlay (always on top) and the GL surface is multisampled, so the
+        depth buffer can't be read back reliably; instead cast the pixel ray through each glyph against
+        the surfaces actually shown -- same filters as surface picking: visible, not the bounding box,
+        not removed by the dollhouse cut. Props not yet baked into the mesh do not occlude. A point
+        within max(2 cm, 0.1 % of the scene) of the hit surface counts as ON it -> visible.
+
+        COST: zero while the camera (or a dragged point) is moving -- the last result is reused and the
+        test runs ONCE, ~150 ms after the view stops changing (one scheduled repaint). The triangle
+        arrays are built once per mesh/visibility change, not per test."""
+        pts = ([("source", i, p) for i, p in enumerate(self._sources)] +
+               [("receiver", i, p) for i, p in enumerate(self._receivers)])
+        if not pts or self._mv is None or self._proj is None:
+            return {}
+        c = self._occ_cache
+        key = (np.asarray(self._mv).tobytes(), np.asarray(self._proj).tobytes(),
+               tuple(tuple(float(v) for v in p[:3]) for _, _, p in pts),
+               bool(getattr(self, "_dollhouse", False)),
+               id(self._verts), tuple((id(g["tris"]), g["visible"]) for g in self._groups),
+               self._selected_layer, frozenset(self._surf_sel))
+        if key == c["key"]:
+            return c["res"]
+        import time
+        now = time.monotonic()
+        if c["n"] >= 0 and len(pts) == c["n"]:           # not the first frame, same point set: debounce
+            if key != c.get("pending"):
+                c["pending"] = key; c["t_change"] = now  # view/points still changing
+                QTimer.singleShot(150, self.update)
+                return c["res"]
+            if now - c["t_change"] < 0.12:
+                QTimer.singleShot(150, self.update)
+                return c["res"]
+        res = {}
+        try:
+            gk = (id(self._verts), len(self._verts), tuple(id(g["tris"]) for g in self._groups))
+            arr = c.get("arr")
+            if arr is None or arr[0] != gk:              # (re)build only when the mesh itself changes
+                idx = [i for i, g in enumerate(self._groups) if len(g["tris"])]
+                if idx:
+                    tris = np.concatenate([np.asarray(self._groups[i]["tris"]) for i in idx])
+                    tg = np.concatenate([np.full(len(self._groups[i]["tris"]), i, np.int32) for i in idx])
+                    verts = np.asarray(self._verts, np.float64)
+                    v0 = verts[tris[:, 0]]
+                    # room extent from the real layers (not the domain bbox): tells whether the camera
+                    # is outside, looking IN through the shell
+                    rt = np.concatenate([np.asarray(self._groups[i]["tris"]) for i in idx
+                                         if not self._groups[i]["is_bbox"]] or [tris])
+                    rv = verts[np.unique(rt.ravel())]
+                    arr = (gk, v0, verts[tris[:, 1]] - v0, verts[tris[:, 2]] - v0, tg,
+                           rv.min(axis=0), rv.max(axis=0))
+                else:
+                    arr = (gk, None, None, None, None, None, None)
+                c["arr"] = arr
+            _, v0, e1, e2, tg, lo, hi = arr
+            if v0 is not None:
+                allow = np.array([g["visible"] and not g["is_bbox"] and not self._dollhouse_cut(g)
+                                  for g in self._groups], bool)
+                m = allow[tg]
+                if m.any():
+                    v0, e1, e2, tgm = v0[m], e1[m], e2[m], tg[m]
+                    pane_a = np.array([SEL_ALPHA if (self._selected_layer == g["name"] or g["name"] in self._surf_sel)
+                                       else MESH_FILL_ALPHA for g in self._groups], np.float64)
+                    W, H = self.width(), self.height()
+                    vp = [0, 0, int(W), int(H)]
+                    tol = max(0.02, 1e-3 * float(self._scene_span))
+                    for kind, i, p in pts:
+                        sx, sy, sz = gluProject(float(p[0]), float(p[1]), float(p[2]), self._mv, self._proj, vp)
+                        if sz < 0.0 or sz > 1.0:
+                            continue                        # not drawn anyway
+                        ro, rd = ray_from_screen(sx, H - sy, W, H, self._mv, self._proj)
+                        ro = ro.astype(np.float64); rd = rd.astype(np.float64)
+                        tp = float(np.dot(np.asarray(p[:3], np.float64) - ro, rd))  # camera -> point on the ray
+                        pv = np.cross(rd, e2)
+                        det = np.einsum('ij,ij->i', e1, pv)
+                        ok = np.abs(det) > 1e-12
+                        inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
+                        tv = ro - v0
+                        u = np.einsum('ij,ij->i', tv, pv) * inv
+                        q = np.cross(tv, e1)
+                        v = np.einsum('j,ij->i', rd, q) * inv
+                        tt = np.einsum('ij,ij->i', e2, q) * inv
+                        hit = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (tt > 1e-6) & (tt < tp - tol)
+                        if hit.any():
+                            # one pane per crossing: a ray through a shared edge hits both triangles at
+                            # the same depth -> keep one per (depth within tol, layer)
+                            order = np.argsort(tt[hit])
+                            th, gh = tt[hit][order], tgm[hit][order]
+                            panes, seen = [], set()
+                            for d, gi in zip(th, gh):
+                                k2 = (int(round(float(d) / tol)), int(gi))
+                                if k2 not in seen:
+                                    seen.add(k2); panes.append(pane_a[gi])
+                            # camera OUTSIDE the room (no dollhouse cut): the nearest crossing is the shell
+                            # you are looking in through -- not an obstacle, it doesn't fade the point.
+                            # Inside the room (navigation / receiver view) every crossing is an obstacle.
+                            outside = bool(np.any(ro < lo - tol) or np.any(ro > hi + tol))
+                            if outside and not getattr(self, "_dollhouse", False) and panes:
+                                panes = panes[1:]
+                            T = 1.0
+                            for a_ in panes:
+                                T *= 1.0 - a_
+                            if T < 1.0:
+                                res[(kind, i)] = T
+        except Exception:
+            res = {}                                        # never let the overlay break painting
+        c.update(key=key, pending=key, res=res, t_change=now, n=len(pts))
+        return res
+
+    def _point_glyph(self, x, y, z, color, kind, hl=False, through=1.0):
         """
         Queue a source/receiver to be drawn as its real Unicode glyph at the
         EXACT world coordinate (no offset icon beside it):
@@ -2437,7 +2556,7 @@ class GLViewer(QOpenGLWidget):
             return
         # GL y is bottom-up; QPainter y is top-down
         self._glyph_queue.append((float(sx), float(H - sy), tuple(color),
-                                  kind, bool(hl)))
+                                  kind, bool(hl), float(through)))
 
     def _paint_origin(self, painter):
         """Origin marker at world (0,0,0): three positive-axis lines, each 0.1 of the
@@ -2475,12 +2594,13 @@ class GLViewer(QOpenGLWidget):
             return
         from PySide6.QtGui import QFont, QColor
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        for sx, sy, col, kind, hl in self._glyph_queue:
+        for sx, sy, col, kind, hl, T in self._glyph_queue:
             ch   = "\u25C9" if kind == "source" else "\u25CD"
             size = 20 if hl else 16
             f = QFont("Noto Sans Symbols2", size)
             painter.setFont(f)
-            painter.setPen(QColor(int(col[0]*255), int(col[1]*255), int(col[2]*255)))
+            a = 255 if (hl or T >= 1.0) else int(round(255 * T ** GLYPH_BEHIND_GAIN))  # hovered/selected: full
+            painter.setPen(QColor(int(col[0]*255), int(col[1]*255), int(col[2]*255), a))
             fm = painter.fontMetrics()
             # centre the glyph on the projected point
             wx = sx - fm.horizontalAdvance(ch) / 2.0
@@ -2563,7 +2683,8 @@ class GLViewer(QOpenGLWidget):
                 col = OUTSIDE_COLOR
             else:
                 col = HL_COLOR if hl else SRC_COLOR
-            self._point_glyph(pt[0], pt[1], pt[2], col, "source", hl=hl)
+            self._point_glyph(pt[0], pt[1], pt[2], col, "source", hl=hl,
+                              through=self._occ.get(("source", i), 1.0))
 
     def _draw_receivers(self):
         for i, pt in enumerate(self._receivers):
@@ -2575,7 +2696,8 @@ class GLViewer(QOpenGLWidget):
                 col = OUTSIDE_COLOR
             else:
                 col = HL_COLOR if hl else REC_COLOR
-            self._point_glyph(pt[0], pt[1], pt[2], col, "receiver", hl=hl)
+            self._point_glyph(pt[0], pt[1], pt[2], col, "receiver", hl=hl,
+                              through=self._occ.get(("receiver", i), 1.0))
 
     def _draw_placement_cursor(self):
         """Axis arrow + crosshair at _cursor_world."""
