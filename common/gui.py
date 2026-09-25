@@ -856,6 +856,7 @@ class GLViewer(QOpenGLWidget):
         self._hl_rec = -1
         self._sel_recs = set()          # receivers multi-selected for Results overlay
         self._results_pick = False      # LMB click picks/toggles a receiver instead of ray-pick
+        self._points_locked = False     # Results/Draw: no src/rec placement, no Edit (E) mode, no RMB delete
         self._glyph_queue = []   # per-frame source/receiver glyph overlay list
         self._dh_cache = {}      # dollhouse per-triangle masks, keyed on view + pivot + mesh + cut
         self._dh_cut_frac = 0.75 # dollhouse section plane: fraction of the room height (PgUp/PgDn)
@@ -1139,10 +1140,25 @@ class GLViewer(QOpenGLWidget):
         """Receivers highlighted as the Results multi-selection."""
         self._sel_recs = set(int(i) for i in indices); self.update()
 
+    def set_points_locked(self, on):
+        """Results/Draw modes: sources/receivers can't be placed, moved (E) or deleted (RMB). Turning the
+        lock on also ends any src/rec placement or Edit mode in progress."""
+        self._points_locked = bool(on)
+        if on:
+            if self._mode in (self.MODE_SRC, self.MODE_REC):
+                self.exit_placement_mode()
+            if self._grab_held:
+                self._grab_held = False
+                self.set_highlight(None, -1)
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
+
     def set_results_pick(self, on):
         self._results_pick = bool(on)
 
     def enter_placement_mode(self, mode):
+        if self._points_locked and mode in (self.MODE_SRC, self.MODE_REC):
+            return                      # Results/Draw: sources/receivers are placed in Simulation only
         self._mode      = mode
         self._axis_lock = None
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -3341,7 +3357,8 @@ class GLViewer(QOpenGLWidget):
                 return                                   # pick+highlight domain surfaces (annoying)
             self._do_ray_pick(e.position())
         if not moved and e.button() == Qt.MouseButton.RightButton:
-            if self._fpv is not None or not self._do_point_remove(e.position()):  # empty -> scene menu
+            if (self._fpv is not None or self._points_locked          # Results/Draw: never delete src/rec
+                    or not self._do_point_remove(e.position())):     # empty -> scene menu
                 self._scene_menu(e.position())
 
     def wheelEvent(self, e):
@@ -3485,6 +3502,8 @@ class GLViewer(QOpenGLWidget):
         # "E" toggles "edit positions" (Edit) mode: press once to arm, again to
         # disarm. While armed, LMB grabs and drags the nearest placed point.
         # The mode also self-deactivates after a completed move (see release).
+        if key == Qt.Key.Key_E and self._mode == self.MODE_NONE and self._points_locked:
+            e.accept(); return          # Results/Draw: no Edit mode for sources/receivers
         if key == Qt.Key.Key_E and self._mode == self.MODE_NONE:
             self._grab_held = not self._grab_held
             self.setCursor(Qt.CursorShape.OpenHandCursor if self._grab_held
@@ -6544,12 +6563,13 @@ class MainWindow(QMainWindow):
         if not self._panel_open or getattr(self, "_panel_locked", False):
             return                                     # Results mode: panel never shrinks
         self._panel_open = False
-        self._panel_grip.show(); self._panel_grip.raise_()   # strip becomes clickable
+        if getattr(self, "_view_mode", "sim") not in ("results", "draw"):
+            self._panel_grip.show(); self._panel_grip.raise_()   # strip becomes clickable
         self._animate_panel(-self._PANEL_W - 12)             # overshoot so no sliver/border peeks
 
     def _show_panel(self):
-        if self._panel_open:
-            return
+        if self._panel_open or getattr(self, "_view_mode", "sim") in ("results", "draw"):
+            return                                     # the Simulation panel belongs to Simulation mode
         self._panel_open = True
         self._panel_grip.hide()
         self._animate_panel(0)
@@ -6567,6 +6587,22 @@ class MainWindow(QMainWindow):
         self._view_mode = mode
         self._gl.set_props_mode(mode == "draw")        # Draw: P/R/S transform props, src/rec locked
         self._gl.set_results_pick(mode == "results")   # click-to-select receivers only in Results
+        # Sources/receivers are placed and edited in Simulation only; Results/Draw never show the
+        # Simulation panel (it slides out and the left-edge hotzone can't reopen it).
+        locked = mode in ("results", "draw")
+        self._gl.set_points_locked(locked)
+        for b in (self._src_btn, self._rec_btn):
+            if locked:
+                b.setChecked(False)
+            b.setEnabled(not locked)
+        if locked:
+            self._panel_idle.stop()
+            if self._panel_open:
+                self._panel_open = False
+                self._animate_panel(-self._PANEL_W - 12)
+            self._panel_grip.hide()
+        elif not self._panel_open:
+            self._panel_grip.show(); self._panel_grip.raise_()
         if mode != "results":
             self._gl.set_selected_receivers([])        # drop the multi-select highlight
         if mode != "draw" and getattr(self, "_sketch", None) is not None:
@@ -6656,7 +6692,13 @@ class MainWindow(QMainWindow):
                 if self._proj_root else None)
 
     def _load_props_json(self):
+        # Once per project: an EMPTY in-session list may be the user's own doing (last prop deleted),
+        # so emptiness can't mean "not loaded yet" -- refilling it from disk brought the deleted prop
+        # back. _reset_scene_editors re-arms this on a project switch.
         import json, props3d
+        if getattr(self, "_props_loaded_for", None) == self._proj_root:
+            return
+        self._props_loaded_for = self._proj_root
         p = self._props_json_path()
         if p and os.path.isfile(p) and not self._gl._props:   # don't clobber unsaved in-session props
             try:
@@ -6668,9 +6710,9 @@ class MainWindow(QMainWindow):
     def _save_props_json(self):
         import json
         p = self._props_json_path()
-        if not (p and self._gl._props):
-            return
-        os.makedirs(os.path.dirname(p), exist_ok=True)
+        if not p:
+            return                     # no project. An EMPTY list is saved too ([]): skipping it left the
+        os.makedirs(os.path.dirname(p), exist_ok=True)   # deleted last prop in props.json -> it came back
         try:
             with open(p, "w") as f:
                 json.dump([pr.to_dict() for pr in self._gl._props], f)
@@ -6695,6 +6737,7 @@ class MainWindow(QMainWindow):
         in-session state, so without this the new project shows the PREVIOUS project's domain), then load
         the new project's saved editors."""
         self._gl._props = []; self._gl._prop_sel = -1; self._gl.update()
+        self._props_loaded_for = None            # new project -> its props.json is loaded once below
         sk = getattr(self, "_sketch", None)
         if sk is not None:
             c = sk.canvas
@@ -7453,6 +7496,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "_view_mode", "sim") == "draw" and key in (
                 Qt.Key.Key_S, Qt.Key.Key_R, Qt.Key.Key_L):
             e.accept(); return
+        if getattr(self, "_view_mode", "sim") == "results" and key in (Qt.Key.Key_S, Qt.Key.Key_R):
+            e.accept(); return          # Results: no source/receiver placement either
         if key == Qt.Key.Key_S:
             checked = not self._src_btn.isChecked()
             self._src_btn.setChecked(checked)
