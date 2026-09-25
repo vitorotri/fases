@@ -150,7 +150,7 @@ def set_scene_mode(light):
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
 MESH_FILL_ALPHA = 0.22   # unselected surface fill opacity (x-ray view); glyphs behind surfaces fade by it
-DH_OBJ_NEAR_FRAC = 0.5   # dollhouse: objects whose centre is in this front fraction of the room lose upright faces
+DH_OBJ_NEAR_FRAC = 0.5   # dollhouse FRONT part of the room (fraction of its depth along the view): objects there go
 GLYPH_BEHIND_GAIN = 4.0  # source/receiver behind n OBSTACLES (the room shell seen from outside doesn't count)
                          # is drawn at alpha T**gain, T = prod(1 - pane alpha): 1 obstacle -> 37 %, 2 -> 14 %
 
@@ -2040,7 +2040,6 @@ class GLViewer(QOpenGLWidget):
             d["pc"] = pc
             d["pobj"] = np.bincount(pc, side.astype(np.float64), npc) == 0
             d["pcen"] = np.stack([np.bincount(pc, area * P[:, :, q].mean(1), npc) / wsum for q in range(3)], 1)
-            d["flat"] = np.abs(d["nrm"][:, 2]) >= 0.7                 # floor / ceiling-like faces
             d["bb"] = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
             d["tc"] = P.mean(axis=1)
             d["tzmin"] = P[:, :, 2].min(axis=1)
@@ -2076,6 +2075,21 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_CLIP_PLANE0)
         return True
 
+    def _dh_front(self):
+        """(h, pmin, R): horizontal view direction and the room's extent along it, or None when
+        looking (nearly) straight down/up. Front part of the room = h . p < pmin + DH_OBJ_NEAR_FRAC*R."""
+        vd = getattr(self, "_view_dir", None)
+        d = self._dh_mesh_data()
+        if vd is None or "bb" not in d:
+            return None
+        h = np.array([float(vd[0]), float(vd[1]), 0.0])
+        n = float(np.linalg.norm(h))
+        if n < 0.3:
+            return None
+        h /= n
+        pr = d["bb"] @ h
+        return h, float(pr.min()), float(pr.max() - pr.min())
+
     def _dollhouse_masks(self):
         """{id(group): bool mask over its triangles}, cached per view + pivot + mesh + section height.
 
@@ -2089,10 +2103,9 @@ class GLViewer(QOpenGLWidget):
            of the room, also re-entrant ones (L-rooms: the side comes from the mesh, not from where the
            orbit centre is), and the hidden back faces of objects. Side walls exactly edge-on and the
            floor stay. Per triangle, not per layer: BRAS CR4 layers are materials spanning the room.
-        3. FRONT OBJECTS: pieces not reaching the scene's side limits (CR4's end-wall whitePanels slabs,
-           which are objects so their wall side faces the camera) whose centre is in the front
-           DH_OBJ_NEAR_FRAC of the room along the horizontal view lose their non-flat faces; floor /
-           ceiling-like faces (|n_z| >= 0.7) and the room shell are never touched by this.
+        3. FRONT OBJECTS: pieces not reaching the scene's side limits (CR4: end-wall whitePanels slabs,
+           the sloped stage reflector) whose centre is in the front DH_OBJ_NEAR_FRAC of the room along
+           the horizontal view are removed whole. The room shell is never touched by this.
         At 100 % section height (PgUp) this is exactly the previous orientation-only dollhouse."""
         vdir = getattr(self, "_view_dir", None)
         if vdir is None:
@@ -2111,12 +2124,11 @@ class GLViewer(QOpenGLWidget):
             keep = (d["nout"] @ vdir >= -0.05) | ~d["cuttable"]     # away-from-air normal vs view
             if sec is not None:                                     # entirely on the clipped side: gone
                 keep &= (d["tzmin"] <= sec[0]) if sec[1] else (d["tzmax"] >= sec[0])
-            h = np.array([vdir[0], vdir[1], 0.0])
-            if np.linalg.norm(h) >= 0.3:                            # not looking straight down/up
-                h /= np.linalg.norm(h)                              # objects in the FRONT part of the room
-                pr = d["bb"] @ h                                    # lose their non-flat faces
-                near = d["pobj"] & (d["pcen"] @ h < pr.min() + DH_OBJ_NEAR_FRAC * (pr.max() - pr.min()))
-                keep &= ~(near[d["pc"]] & ~d["flat"])
+            fr = self._dh_front()
+            if fr is not None:                                      # objects in the FRONT part: gone
+                h, pmin, R = fr
+                near = d["pobj"] & (d["pcen"] @ h < pmin + DH_OBJ_NEAR_FRAC * R)
+                keep &= ~near[d["pc"]]
             o = 0
             for i, n in zip(d["idx"], d["cnt"]):
                 masks[id(self._groups[i])] = keep[o:o + n]
@@ -3221,7 +3233,7 @@ class GLViewer(QOpenGLWidget):
                                "C  copy-select · props auto-rest on the surface below (stage/floor)",
                                "Ctrl+Z  undo"]),
         ("DOLLHOUSE (RMB menu)", ["+ / -  (or PgUp / PgDn)  raise / lower the section plane (100 % = no cut)",
-                                  "automatic: walls facing you and upright faces of objects in the front half go"]),
+                                  "automatic: walls facing you and objects in the front half are removed"]),
         ("SURFACES (RMB menu)", ["Select surfaces: click toggles one, drag boxes several; Esc stops",
                                  "then RMB → Group / Explode / Cleanse layers"]),
     ]
