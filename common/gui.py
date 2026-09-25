@@ -3094,13 +3094,17 @@ class GLViewer(QOpenGLWidget):
         return "VIEW"
 
     _HELP = [
-        ("VIEW / NAVIGATE", ["LMB drag orbit · MMB pan · wheel zoom",
+        ("VIEW / NAVIGATE", ["LMB drag orbit · MMB pan · wheel zoom · T reset view · RMB scene menu",
+                             "LMB+Ctrl roll · LMB+Alt free tumble · LMB+Shift look (no clamp)",
                              "Space  fly nav (W/X fwd·back, A/D strafe, Q/Z height, mouse looks)",
-                             "T  reset view · RMB  scene menu"]),
-        ("POINTS (Simulation)", ["S / R  place source / receiver  (+ G  make a grid/shell array)",
+                             "Esc  leave the current mode / cancel · Tab / Shift+Tab  cycle panel tabs"]),
+        ("POINTS (Simulation mode only)", ["S / R  place source / receiver  (+ G  make a grid/shell array)",
                                  "E  edit: drag a point · box-select many · P move · R rotate · Del delete",
-                                 "hold X / Y / Z  lock an axis"]),
-        ("PROPS (Draw mode)", ["P / R / S  move / rotate / scale · X/Y/Z lock",
+                                 "hold X / Y / Z  lock an axis · RMB on a point  delete it · Ctrl+Z  undo",
+                                 "L  slice planes: hold X / Y / Z and drag to move a plane"]),
+        ("RESULTS mode", ["LMB on a receiver  select / deselect it for the plots"]),
+        ("RECEIVER VIEW", ["LMB look · Ctrl+LMB roll · position fixed · RMB → Go back"]),
+        ("PROPS (Draw mode)", ["P / R / S  move / rotate / scale · X/Y/Z lock · Enter confirm · Esc cancel",
                                "C  copy-select · props auto-rest on the surface below (stage/floor)",
                                "Ctrl+Z  undo"]),
         ("DOLLHOUSE (RMB menu)", ["PgUp / PgDn  raise / lower the section plane (100 % = no cut)"]),
@@ -3112,7 +3116,10 @@ class GLViewer(QOpenGLWidget):
         """Semi-transparent shortcuts panel, toggled with '?'."""
         from PySide6.QtCore import QRect
         W, H = self.width(), self.height()
-        bw, bh = min(560, W - 40), min(320, H - 40)
+        # height from the content (header + per section 18 px + 13 px per row + margin), so a longer
+        # list can't spill out of the box; still capped by the widget.
+        need = 38 + sum(18 + 13 * len(rows) for _, rows in self._HELP) + 16
+        bw, bh = min(600, W - 40), min(need, H - 40)
         x = (W - bw) // 2; y = (H - bh) // 2
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(QColor(PAL["accent"])); p.setBrush(QColor(15, 18, 24, 236))
