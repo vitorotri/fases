@@ -462,6 +462,88 @@ def mesh_inside_vote(pts, geom):
     return out
 
 
+def mesh_outward_signs(verts, tris, weld_tol, inside, samples=3):
+    """Which side of every triangle is AIR, from the mesh itself (no reliance on OBJ winding), for
+    the dollhouse. Pure Python graph walk, runs once per mesh; `inside` is the point-in-air test.
+
+    1. Weld coincident vertices (weld_tol), so layers that share a corner are connected.
+    2. Consistent orientation: two triangles sharing an edge must traverse it in OPPOSITE directions.
+       Propagate that across every manifold edge (exactly 2 triangles) -> connected pieces whose
+       triangles all agree. Boundary / non-manifold edges don't connect (CR4's shell is one piece
+       with a few open edges, so no "closed -> signed volume" shortcut).
+    3. Per piece, its `samples` largest triangles probe a point just off each face, on both sides:
+       inside(c + eps n) != inside(c - eps n) -> that side is air, one vote. Room shell -> normals
+       point OUT of the room; objects (seats, columns) -> normals point INTO the object. A
+       free-hanging panel counts as a boundary for parity (same as the particle mask), so it gets a
+       side too; a piece with no decisive vote is never cut.
+       ponytail: probes are O(pieces * samples * T); fine for welded meshes (CR4: 43 pieces, <1 s),
+       lower `samples` if a T-junction-riddled OBJ splits into thousands of pieces.
+
+    verts: [(x, y, z)], tris: [(i, j, k)], inside: list of points -> list of bools.
+    Returns (sign, cuttable), one per triangle: sign * cross(v1 - v0, v2 - v0) points away from the
+    air (the stored face normal's orientation times sign)."""
+    T = len(tris)
+    if T == 0:
+        return [], []
+    wid, ids = [], {}
+    for x, y, z in verts:
+        k = (round(x / weld_tol), round(y / weld_tol), round(z / weld_tol))
+        wid.append(ids.setdefault(k, len(ids)))
+    edges = {}
+    for t, (i, j, k) in enumerate(tris):
+        a, b, c = wid[i], wid[j], wid[k]
+        for u, v in ((a, b), (b, c), (c, a)):
+            if u != v:
+                edges.setdefault((u, v) if u < v else (v, u), []).append((t, u < v))
+    adj = [[] for _ in range(T)]
+    for lst in edges.values():
+        if len(lst) == 2:
+            (t1, d1), (t2, d2) = lst
+            same = d1 == d2                 # same direction -> one of the two must be flipped
+            adj[t1].append((t2, same)); adj[t2].append((t1, same))
+    comp, flip, members = [-1] * T, [False] * T, []
+    for s0 in range(T):
+        if comp[s0] >= 0:
+            continue
+        comp[s0] = len(members); stack = [s0]; mem = [s0]
+        while stack:
+            u = stack.pop()
+            for v, same in adj[u]:
+                if comp[v] < 0:
+                    comp[v] = comp[s0]; flip[v] = flip[u] ^ same; stack.append(v); mem.append(v)
+        members.append(mem)
+    lo = [min(p[q] for p in verts) for q in range(3)]
+    hi = [max(p[q] for p in verts) for q in range(3)]
+    diag = sum((hi[q] - lo[q]) ** 2 for q in range(3)) ** 0.5
+    eps = min(max(1e-3 * diag, 1e-3), 1e-2)
+    pts, own = [], []                       # own[k] = component of probe pair k
+    for c, mem in enumerate(members):
+        nrm = []
+        for t in mem:
+            p0, p1, p2 = (verts[i] for i in tris[t])
+            e1 = [p1[q] - p0[q] for q in range(3)]; e2 = [p2[q] - p0[q] for q in range(3)]
+            n = (e1[1]*e2[2] - e1[2]*e2[1], e1[2]*e2[0] - e1[0]*e2[2], e1[0]*e2[1] - e1[1]*e2[0])
+            ln = (n[0]**2 + n[1]**2 + n[2]**2) ** 0.5
+            if ln > 0:
+                nrm.append((ln, t, n))
+        nrm.sort(reverse=True)
+        for ln, t, n in nrm[:samples]:
+            s = (-1.0 if flip[t] else 1.0) * eps / ln
+            cen = [sum(verts[i][q] for i in tris[t]) / 3 for q in range(3)]
+            pts.append(tuple(cen[q] + s * n[q] for q in range(3)))
+            pts.append(tuple(cen[q] - s * n[q] for q in range(3)))
+            own.append(c)
+    ins = list(inside(pts)) if pts else []
+    vote = [0] * len(members)
+    for k, c in enumerate(own):
+        plus, minus = bool(ins[2 * k]), bool(ins[2 * k + 1])
+        if plus != minus:
+            vote[c] += -1 if plus else 1    # air on the + side -> away-from-air is -n
+    sign = [(-1.0 if flip[t] else 1.0) * (1.0 if vote[comp[t]] >= 0 else -1.0) for t in range(T)]
+    cuttable = [vote[comp[t]] != 0 for t in range(T)]
+    return sign, cuttable
+
+
 def write_obj(path, verts, groups):
     """Write (verts, groups) back as a plain OBJ: one `v` per vertex, then `g name`
     + triangle `f` (1-based) per group. Used to persist the coplanar-MERGED group set
@@ -1922,8 +2004,9 @@ class GLViewer(QOpenGLWidget):
 
     def _dh_mesh_data(self):
         """Per-mesh arrays for the dollhouse, built once per loaded mesh: every non-bbox triangle's
-        normal, centroid and lowest-vertex z, plus the room's z range (real layers only, never the
-        domain bounding box)."""
+        AWAY-FROM-AIR normal (mesh_outward_signs: room shell -> out of the room, objects -> into the
+        object) and whether it may be cut, centroid, z extent, plus the room's z range (real layers
+        only, never the domain bounding box)."""
         d = getattr(self, "_dh_mesh", None)
         if d is not None and d["gid"] == id(self._groups):
             return d
@@ -1937,6 +2020,12 @@ class GLViewer(QOpenGLWidget):
             d["cnt"] = [len(self._groups[i]["tris"]) for i in idx]
             d["nrm"] = np.concatenate([np.asarray(self._groups[i]["normals"], np.float64) for i in idx])
             P = verts[tris]                                        # T x 3 x 3
+            G = self._obj_geom()
+            sign, cut = mesh_outward_signs(
+                verts.tolist(), tris.tolist(), 1e-4,
+                (lambda p: mesh_inside_vote(p, G)) if G is not None else (lambda p: [False] * len(p)))
+            d["nout"] = d["nrm"] * np.asarray(sign, np.float64)[:, None]
+            d["cuttable"] = np.asarray(cut, bool)
             d["tc"] = P.mean(axis=1)
             d["tzmin"] = P[:, :, 2].min(axis=1)
             d["tzmax"] = P[:, :, 2].max(axis=1)
@@ -1979,10 +2068,11 @@ class GLViewer(QOpenGLWidget):
            above that is the ceiling -- flat, sloped, coffered, rims, beams, lights -- and walls end
            cleanly at the plane whatever their triangulation; from below it mirrors (the floor zone
            goes, the ceiling stays). Here: triangles ENTIRELY on the clipped side are not pickable.
-        2. NEAR WALLS by orientation: a triangle is cut when its OUTWARD normal faces the camera -- its
-           face normal signed to point away from the orbit centre (no consistent winding needed),
-           cut if outward . view_dir < -0.2 (grazing bias keeps side walls and the floor). Per
-           triangle, not per layer: BRAS CR4 layers are materials spanning the whole room.
+        2. NEAR WALLS by orientation: a triangle is cut when its AWAY-FROM-AIR normal faces the camera
+           (nout . view_dir < -0.05), i.e. you'd be looking at it from behind the material: near walls
+           of the room, also re-entrant ones (L-rooms: the side comes from the mesh, not from where the
+           orbit centre is), and the hidden back faces of objects. Side walls exactly edge-on and the
+           floor stay. Per triangle, not per layer: BRAS CR4 layers are materials spanning the room.
         At 100 % section height (PgUp) this is exactly the previous orientation-only dollhouse."""
         vdir = getattr(self, "_view_dir", None)
         if vdir is None:
@@ -1998,10 +2088,7 @@ class GLViewer(QOpenGLWidget):
         d = self._dh_mesh_data()
         masks = {}
         if d.get("idx") and "nrm" in d:
-            nrm, tc = d["nrm"], d["tc"]
-            side = np.sign(np.einsum('ij,ij->i', nrm, tc - piv))
-            side[side == 0] = 1.0
-            keep = ((nrm * side[:, None]) @ vdir) >= -0.2          # outward normal vs view direction
+            keep = (d["nout"] @ vdir >= -0.05) | ~d["cuttable"]     # away-from-air normal vs view
             if sec is not None:                                     # entirely on the clipped side: gone
                 keep &= (d["tzmin"] <= sec[0]) if sec[1] else (d["tzmax"] >= sec[0])
             o = 0
