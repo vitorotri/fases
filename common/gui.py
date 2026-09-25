@@ -150,6 +150,7 @@ def set_scene_mode(light):
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
 MESH_FILL_ALPHA = 0.22   # unselected surface fill opacity (x-ray view); glyphs behind surfaces fade by it
+DH_OBJ_NEAR_FRAC = 0.5   # dollhouse: objects whose centre is in this front fraction of the room lose upright faces
 GLYPH_BEHIND_GAIN = 4.0  # source/receiver behind n OBSTACLES (the room shell seen from outside doesn't count)
                          # is drawn at alpha T**gain, T = prod(1 - pane alpha): 1 obstacle -> 37 %, 2 -> 14 %
 
@@ -480,8 +481,8 @@ def mesh_outward_signs(verts, tris, weld_tol, inside, samples=3):
        lower `samples` if a T-junction-riddled OBJ splits into thousands of pieces.
 
     verts: [(x, y, z)], tris: [(i, j, k)], inside: list of points -> list of bools.
-    Returns (sign, cuttable), one per triangle: sign * cross(v1 - v0, v2 - v0) points away from the
-    air (the stored face normal's orientation times sign)."""
+    Returns (sign, cuttable, piece), one per triangle: sign * cross(v1 - v0, v2 - v0) points away
+    from the air (the stored face normal's orientation times sign); piece = connected-piece index."""
     T = len(tris)
     if T == 0:
         return [], []
@@ -541,7 +542,7 @@ def mesh_outward_signs(verts, tris, weld_tol, inside, samples=3):
             vote[c] += -1 if plus else 1    # air on the + side -> away-from-air is -n
     sign = [(-1.0 if flip[t] else 1.0) * (1.0 if vote[comp[t]] >= 0 else -1.0) for t in range(T)]
     cuttable = [vote[comp[t]] != 0 for t in range(T)]
-    return sign, cuttable
+    return sign, cuttable, comp
 
 
 def write_obj(path, verts, groups):
@@ -2021,11 +2022,26 @@ class GLViewer(QOpenGLWidget):
             d["nrm"] = np.concatenate([np.asarray(self._groups[i]["normals"], np.float64) for i in idx])
             P = verts[tris]                                        # T x 3 x 3
             G = self._obj_geom()
-            sign, cut = mesh_outward_signs(
+            sign, cut, piece = mesh_outward_signs(
                 verts.tolist(), tris.tolist(), 1e-4,
                 (lambda p: mesh_inside_vote(p, G)) if G is not None else (lambda p: [False] * len(p)))
             d["nout"] = d["nrm"] * np.asarray(sign, np.float64)[:, None]
             d["cuttable"] = np.asarray(cut, bool)
+            # OBJECTS = pieces not reaching the scene's side (x/y) limits, which the room shell always
+            # does (CR4: the end-wall whitePanels slabs, ceiling clouds, stage reflector). Per piece:
+            # area-weighted centre, for the "object in front" cut in _dollhouse_masks.
+            pc = np.asarray(piece, np.int64); npc = int(pc.max()) + 1
+            lo, hi = P.reshape(-1, 3).min(0), P.reshape(-1, 3).max(0)
+            tol = 1e-3 * float(np.linalg.norm(hi - lo))
+            side = ((P[:, :, 0].min(1) <= lo[0] + tol) | (P[:, :, 0].max(1) >= hi[0] - tol) |
+                    (P[:, :, 1].min(1) <= lo[1] + tol) | (P[:, :, 1].max(1) >= hi[1] - tol))
+            area = 0.5 * np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1)
+            wsum = np.maximum(np.bincount(pc, area, npc), 1e-30)
+            d["pc"] = pc
+            d["pobj"] = np.bincount(pc, side.astype(np.float64), npc) == 0
+            d["pcen"] = np.stack([np.bincount(pc, area * P[:, :, q].mean(1), npc) / wsum for q in range(3)], 1)
+            d["flat"] = np.abs(d["nrm"][:, 2]) >= 0.7                 # floor / ceiling-like faces
+            d["bb"] = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
             d["tc"] = P.mean(axis=1)
             d["tzmin"] = P[:, :, 2].min(axis=1)
             d["tzmax"] = P[:, :, 2].max(axis=1)
@@ -2073,6 +2089,10 @@ class GLViewer(QOpenGLWidget):
            of the room, also re-entrant ones (L-rooms: the side comes from the mesh, not from where the
            orbit centre is), and the hidden back faces of objects. Side walls exactly edge-on and the
            floor stay. Per triangle, not per layer: BRAS CR4 layers are materials spanning the room.
+        3. FRONT OBJECTS: pieces not reaching the scene's side limits (CR4's end-wall whitePanels slabs,
+           which are objects so their wall side faces the camera) whose centre is in the front
+           DH_OBJ_NEAR_FRAC of the room along the horizontal view lose their non-flat faces; floor /
+           ceiling-like faces (|n_z| >= 0.7) and the room shell are never touched by this.
         At 100 % section height (PgUp) this is exactly the previous orientation-only dollhouse."""
         vdir = getattr(self, "_view_dir", None)
         if vdir is None:
@@ -2091,6 +2111,12 @@ class GLViewer(QOpenGLWidget):
             keep = (d["nout"] @ vdir >= -0.05) | ~d["cuttable"]     # away-from-air normal vs view
             if sec is not None:                                     # entirely on the clipped side: gone
                 keep &= (d["tzmin"] <= sec[0]) if sec[1] else (d["tzmax"] >= sec[0])
+            h = np.array([vdir[0], vdir[1], 0.0])
+            if np.linalg.norm(h) >= 0.3:                            # not looking straight down/up
+                h /= np.linalg.norm(h)                              # objects in the FRONT part of the room
+                pr = d["bb"] @ h                                    # lose their non-flat faces
+                near = d["pobj"] & (d["pcen"] @ h < pr.min() + DH_OBJ_NEAR_FRAC * (pr.max() - pr.min()))
+                keep &= ~(near[d["pc"]] & ~d["flat"])
             o = 0
             for i, n in zip(d["idx"], d["cnt"]):
                 masks[id(self._groups[i])] = keep[o:o + n]
@@ -3177,7 +3203,7 @@ class GLViewer(QOpenGLWidget):
         if getattr(self, "_dollhouse", False):
             sec = self._dh_section()
             return (f"DOLLHOUSE  cut z = {sec[0]:.2f} m, showing {'below' if sec[1] else 'above'} "
-                    f"({round(100 * self._dh_cut_frac)} %)  PgUp/PgDn" if sec is not None else "DOLLHOUSE")
+                    f"({round(100 * self._dh_cut_frac)} %)  +/- or PgUp/PgDn" if sec is not None else "DOLLHOUSE")
         return "VIEW"
 
     _HELP = [
@@ -3194,7 +3220,8 @@ class GLViewer(QOpenGLWidget):
         ("PROPS (Draw mode)", ["P / R / S  move / rotate / scale · X/Y/Z lock · Enter confirm · Esc cancel",
                                "C  copy-select · props auto-rest on the surface below (stage/floor)",
                                "Ctrl+Z  undo"]),
-        ("DOLLHOUSE (RMB menu)", ["PgUp / PgDn  raise / lower the section plane (100 % = no cut)"]),
+        ("DOLLHOUSE (RMB menu)", ["+ / -  (or PgUp / PgDn)  raise / lower the section plane (100 % = no cut)",
+                                  "automatic: walls facing you and upright faces of objects in the front half go"]),
         ("SURFACES (RMB menu)", ["Select surfaces: click toggles one, drag boxes several; Esc stops",
                                  "then RMB → Group / Explode / Cleanse layers"]),
     ]
@@ -3585,8 +3612,10 @@ class GLViewer(QOpenGLWidget):
         if key == Qt.Key.Key_Escape:
             self.exit_placement_mode()
             e.accept(); return
-        if getattr(self, "_dollhouse", False) and key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
-            step = 0.05 if key == Qt.Key.Key_PageUp else -0.05
+        if getattr(self, "_dollhouse", False) and key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+                                                          Qt.Key.Key_Plus, Qt.Key.Key_Equal, Qt.Key.Key_Minus):
+            # +/- (= is unshifted + on US) for keyboards without PgUp/PgDn
+            step = 0.05 if key in (Qt.Key.Key_PageUp, Qt.Key.Key_Plus, Qt.Key.Key_Equal) else -0.05
             self._dh_cut_frac = min(1.0, max(0.05, round(self._dh_cut_frac + step, 2)))
             self.update(); e.accept(); return
         if key == Qt.Key.Key_T and self._mode == self.MODE_NONE:
@@ -6586,11 +6615,11 @@ class MainWindow(QMainWindow):
         self._sb = _RunStatusBar()
         self.setStatusBar(self._sb)
         self._sb.showMessage("Ready.  Open a project folder to begin.")
-        self._mode_lbl = QLabel("VIEW   ·   ? = shortcuts")     # persistent mode badge, bottom-right
+        self._mode_lbl = QLabel("VIEW   ·   ? Shortcuts")     # persistent mode badge, bottom-right
         self._mode_lbl.setStyleSheet(f"color:{PAL['accent2']};font-weight:bold;padding:0 8px;")
         self._sb.addPermanentWidget(self._mode_lbl)
         self._gl.modeLabelChanged.connect(
-            lambda s: self._mode_lbl.setText(f"{s}   ·   ? = shortcuts"))
+            lambda s: self._mode_lbl.setText(f"{s}   ·   ? Shortcuts"))
 
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._undo_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
