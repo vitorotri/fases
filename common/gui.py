@@ -6763,6 +6763,23 @@ class MainWindow(QMainWindow):
             self._results.hide()
             self._open_props()          # loads props JSON first, so the sketch footprints populate on first entry
             self._open_sketch()
+            QTimer.singleShot(0, self._place_draw_windows)   # after show: frame sizes are known then
+
+    def _place_draw_windows(self):
+        """Draw mode: props window in the TOP-LEFT corner, 2D sketch in the BOTTOM-RIGHT corner of the
+        main window (clamped to the screen's usable area), instead of both stacked in the middle.
+        move() places a top-level window's frame, so the title bar is included."""
+        pw, sk = getattr(self, "_propswin", None), getattr(self, "_sketch", None)
+        if pw is None or sk is None:
+            return
+        scr = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        area = self.frameGeometry().intersected(scr)
+        if area.isEmpty():
+            area = scr
+        pw.move(area.left(), area.top())
+        f = sk.frameGeometry()
+        sk.move(max(area.left(), area.right() + 1 - f.width()),
+                max(area.top(), area.bottom() + 1 - f.height()))
 
     def _open_sketch(self):
         """Open the 2D domain sketcher (its own top-level window). Created once, reused."""
