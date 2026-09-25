@@ -150,6 +150,10 @@ def set_scene_mode(light):
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
 MESH_FILL_ALPHA = 0.22   # unselected surface fill opacity (x-ray view); glyphs behind surfaces fade by it
+PART_SPL_GAMMA = 0.25     # particles: on-screen motion follows this fraction of the Lp,1m change (dB) around 94 dB
+PART_COLOR_FULL = 2.0     # particles: displacement [cells] shown in the full (amber) colour
+PART_RAMP_T = [0.0, 0.5, 1.0]                                    # rest -> moving -> max
+PART_RAMP = np.array([(0.34, 0.30, 1.00), (0.95, 0.35, 0.80), (1.00, 0.80, 0.25)], np.float32)
 DH_OBJ_NEAR_FRAC = 0.5   # dollhouse FRONT part of the room (fraction of its depth along the view): objects there go
 GLYPH_BEHIND_GAIN = 4.0  # source/receiver behind n OBSTACLES (the room shell seen from outside doesn't count)
                          # is drawn at alpha T**gain, T = prod(1 - pane alpha): 1 obstacle -> 37 %, 2 -> 14 %
@@ -1341,7 +1345,7 @@ class GLViewer(QOpenGLWidget):
         # to a REFERENCE SPL (not the live field). This way ABSOLUTE source SPL and SPL_AMP_CALIB DO
         # change the on-screen pulse: displayed ~ 1.2 * CALIB * 10^((SPL - 94dB)/20) cells. (An
         # auto-normalised gain would cancel amplitude entirely.) Reset after so playback starts at t=0.
-        from slice2d import P_REF
+        from slice2d import P_REF, SPL_AMP_CALIB
         REF_SPL = 94.0
         peaks = []; rep_amp = 0.0
         for sim in self._sim2d.values():
@@ -1357,6 +1361,12 @@ class GLViewer(QOpenGLWidget):
             k = float(np.median(peaks)) / rep_amp              # displacement per unit source amplitude
             amp_ref = P_REF * 10.0 ** (REF_SPL / 20.0)         # reference pressure (no calib)
             self._part_gain = 1.2 / (k * amp_ref)              # ~1.2*CALIB cells at 94 dB, scales w/ SPL
+            # Level COMPRESSION: displayed motion follows the loudest source's Lp,1m at PART_SPL_GAMMA of
+            # its dB change around REF_SPL (not 1:1), so quiet sources still visibly move and loud ones
+            # don't just sit on the clamp. Louder still moves more; relative levels inside the field
+            # (two sources) stay physical. displayed ~ 1.2*CALIB * 10^(GAMMA*(SPL-94)/20) cells.
+            spl = 20.0 * np.log10(rep_amp / (P_REF * SPL_AMP_CALIB))
+            self._part_gain *= 10.0 ** ((PART_SPL_GAMMA - 1.0) * (spl - REF_SPL) / 20.0)
         self._anim_frame = 0
         self.update()
         return frames
@@ -1563,8 +1573,8 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, self._particle_tex())
         glEnable(GL_POINT_SPRITE); glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE)
-        glPointSize(5.0); glColor4f(0.34, 0.30, 1.0, 1.0)     # bright purple-blue
-        glEnableClientState(GL_VERTEX_ARRAY)
+        glPointSize(5.0)
+        glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY)
         for ax, sim in self._sim2d.items():
             if not self._plane_vis[ax] or ax not in self._part_idx:
                 continue
@@ -1573,6 +1583,12 @@ class GLViewer(QOpenGLWidget):
             disp = sim.disp[rr, cc]                            # (Nsel,2) live displacement in cells
             col = cc + 0.5 + pc + np.clip(G * disp[:, 0], -clamp, clamp)
             row = rr + 0.5 + pr + np.clip(G * disp[:, 1], -clamp, clamp)
+            # colour by the displayed displacement: rest = purple-blue, moving -> magenta -> amber
+            t = np.clip(G * np.hypot(disp[:, 0], disp[:, 1]) / PART_COLOR_FULL, 0.0, 1.0)
+            rgba = np.empty((len(t), 4), np.float32); rgba[:, 3] = 1.0
+            for ch in range(3):
+                rgba[:, ch] = np.interp(t, PART_RAMP_T, PART_RAMP[:, ch])
+            glColorPointer(4, GL_FLOAT, 0, np.ascontiguousarray(rgba))
             u = col / W; v = row / H
             world = np.empty((len(col), 3), np.float32)
             if ax == 'x':
@@ -1587,7 +1603,7 @@ class GLViewer(QOpenGLWidget):
             world = np.ascontiguousarray(world)
             glVertexPointer(3, GL_FLOAT, 0, world)
             glDrawArrays(GL_POINTS, 0, len(world))
-        glDisableClientState(GL_VERTEX_ARRAY)
+        glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY)
         glDisable(GL_POINT_SPRITE); glDisable(GL_TEXTURE_2D)
         glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
 
