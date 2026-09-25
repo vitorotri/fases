@@ -6770,12 +6770,81 @@ class MainWindow(QMainWindow):
             from sketch2d import SketchWindow      # lives next to gui.py in common/
             self._sketch = SketchWindow(self)
             self._sketch.canvas.objReady.connect(self._on_sketch_obj)
+            self._sketch.canvas.propsBake.connect(self._bake_props_into_scene)
+        self._sketch_shadow()                      # top view of the scene loaded in 3D
         if self._gl._grid_h > 0:                   # background grid = solver grid spacing h
             self._sketch.canvas.h = self._gl._grid_h
         self._sketch.canvas.set_prop_footprints(self._prop_footprints())   # top-down prop outlines
         if not self._sketch.canvas.shapes:         # empty -> restore this project's saved sketch
             self._load_sketch_json()
         self._sketch.show(); self._sketch.raise_(); self._sketch.activateWindow()
+
+    def _sketch_shadow(self):
+        """Hand the sketch a read-only top view of the scene loaded in 3D (non-bbox layers): projected
+        triangles (their union is the filled footprint) + projected feature edges. Rebuilt only when
+        the loaded mesh changes."""
+        sk = getattr(self, "_sketch", None)
+        if sk is None:
+            return
+        key = (id(self._gl._verts), len(self._gl._verts), tuple(id(g["tris"]) for g in self._gl._groups))
+        if getattr(self, "_shadow_key", None) == key:
+            return
+        self._shadow_key = key
+        V = np.asarray(self._gl._verts, np.float64)
+        tris, segs = [], set()
+        for g in self._gl._groups:
+            if g["is_bbox"] or not len(g["tris"]) or not len(V):
+                continue
+            P = V[np.asarray(g["tris"])][:, :, :2]                        # T x 3 x (x, y)
+            a2 = ((P[:, 1, 0] - P[:, 0, 0]) * (P[:, 2, 1] - P[:, 0, 1])
+                  - (P[:, 2, 0] - P[:, 0, 0]) * (P[:, 1, 1] - P[:, 0, 1]))
+            tris += [tuple(map(tuple, t)) for t in P[np.abs(a2) > 1e-9].tolist()]   # walls project to lines
+            for i, j in (g["edges"] if g["edges"] is not None else []):
+                a = (round(float(V[i, 0]), 4), round(float(V[i, 1]), 4))
+                b = (round(float(V[j, 0]), 4), round(float(V[j, 1]), 4))
+                if a != b:                                                  # vertical edges -> a point
+                    segs.add((a, b) if a < b else (b, a))
+        sk.canvas.set_scene_shadow(tris, sorted(segs))
+
+    def _bake_props_into_scene(self):
+        """Sketch RMB 'Update props in scene OBJ' (nothing sketched, e.g. imported BRAS CR4): write
+        <base>_props.obj = the loaded scene WITHOUT earlier baked props + the current props (grouped by
+        layer, merged into a scene layer of the same name) and load it. <base> = the scene before any
+        props were baked (strip `_props`), so re-baking never stacks old props; no props -> back to
+        <base>. The user's own file is never edited (same rule as the other derived OBJs)."""
+        if not self._proj_root or not self._obj_path:
+            self._sb.showMessage("Load a scene OBJ in a project first."); return
+        b, e = os.path.splitext(self._obj_path)
+        if os.path.basename(b).startswith("sketch"):
+            self._sb.showMessage("This scene was made from the sketch: use RMB → Update OBJ on the sketch.")
+            return
+        d, stem = os.path.split(b)
+        k = stem.rfind("_props")                                  # file name only, never a folder name
+        root = os.path.join(d, stem[:k] if k >= 0 else stem)
+        base = root + e
+        if not os.path.isfile(base):
+            QMessageBox.warning(self, "Props", f"Scene without props not found:\n{base}"); return
+        try:
+            verts, groups = parse_obj(base)
+            verts = [tuple(map(float, v)) for v in verts]
+            by_name = {}                                          # a raw OBJ may repeat a group name
+            for g in groups:
+                by_name.setdefault(g["name"], []).extend(list(map(int, t)) for t in np.asarray(g["tris"]))
+            for pr in self._gl._props:
+                pv, pt = pr.world()
+                o = len(verts)
+                verts += [tuple(map(float, v)) for v in pv]
+                by_name.setdefault(pr.layer, []).extend([a + o, b_ + o, c + o] for a, b_, c in pt)
+            out = root + "_props" + e if self._gl._props else base
+            if self._gl._props:
+                write_obj(out, verts, [{"name": n, "tris": t} for n, t in by_name.items()])
+        except Exception as ex:
+            QMessageBox.critical(self, "Props", f"{type(ex).__name__}: {ex}"); return
+        self._save_props_json()
+        self._load_obj_path(out)
+        self._sketch_shadow()
+        self._sb.showMessage(f"{len(self._gl._props)} prop(s) baked into {os.path.basename(out)}."
+                             if self._gl._props else f"No props: back to {os.path.basename(out)}.")
 
     def _open_props(self):
         """Props placement window (own top-level, reused), opened alongside the sketcher in Draw mode."""
@@ -6845,6 +6914,8 @@ class MainWindow(QMainWindow):
     def _save_props_json(self):
         import json
         p = self._props_json_path()
+        if getattr(self, "_props_loaded_for", None) != self._proj_root:
+            return                     # this project's props.json never loaded -> writing [] would wipe it
         if not p:
             return                     # no project. An EMPTY list is saved too ([]): skipping it left the
         os.makedirs(os.path.dirname(p), exist_ok=True)   # deleted last prop in props.json -> it came back
@@ -8669,6 +8740,7 @@ class MainWindow(QMainWindow):
         self._rec_tbl.save_file(os.path.join(self._proj_root, "input", "rec", "rec.txt"))
         self._mat_panel.save_all()
         self._mat_panel.prune_orphans()      # drop .mat/.fit/.sctr for materials no longer in the OBJ
+        self._save_props_json(); self._save_sketch_json()   # prop positions + sketch are project state too
         self._write_manifest()
         self._dirty = False
         self._sb.showMessage(f"Saved project → {self._proj_root}")
@@ -8733,6 +8805,10 @@ class MainWindow(QMainWindow):
         self.close()
 
     def closeEvent(self, e):
+        # Props + sketch are sidecars saved on leaving Draw mode without asking; closing the app while
+        # still IN Draw mode never left it -> save them here the same way, or moved props are lost.
+        if self._proj_root:
+            self._save_props_json(); self._save_sketch_json()
         # Offer to save before quitting only if there are unsaved edits (_dirty). A save clears it,
         # so clicking Save then closing won't nag. On suspend there is nobody to ask: just save.
         if self._proj_root and getattr(self, "_dirty", False) and getattr(self, "_suspending", False):
@@ -8792,7 +8868,7 @@ class MainWindow(QMainWindow):
             # and they CHAIN (foo_positive_merged.obj), so test the stem for any of them.
             _stem = os.path.splitext(os.path.basename(path))[0]
             _derived = any(_stem.endswith(sfx) or (sfx + "_") in _stem
-                           for sfx in ("_positive", "_merged", "_grouped", "_active"))
+                           for sfx in ("_positive", "_merged", "_grouped", "_active", "_props"))
             if not _derived:
                 self._obj_orig_path = path
             base, ext = os.path.splitext(path)
@@ -8875,6 +8951,7 @@ class MainWindow(QMainWindow):
         shown = ", ".join(names[:12]) + (f", … (+{len(names)-12} more)" if len(names) > 12 else "")
         print(f"[OBJ] Parsed {len(groups)} groups: [{shown}]")
         self._gl.load_mesh(verts, groups)
+        self._sketch_shadow()               # sketch window open -> its scene shadow follows the new mesh
         self._populate_layers(groups)
         if self._proj_root:
             self._write_manifest()          # persist the scene path on open/load
