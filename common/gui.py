@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QScrollArea, QAbstractItemView, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar, QSlider, QMenu, QProgressBar, QDialog,
-    QStyledItemDelegate, QStyle, QRadioButton, QButtonGroup
+    QStyledItemDelegate, QStyle, QRadioButton, QButtonGroup, QDial
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
@@ -3359,7 +3359,7 @@ class GLViewer(QOpenGLWidget):
                 dx = e.position().x() - self._last_pos.x()
                 dy = e.position().y() - self._last_pos.y()
                 if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                    self._fpv["roll"] = max(-180.0, min(180.0, self._fpv["roll"] + dx * 0.3))
+                    self._fpv["roll"] = max(-90.0, min(90.0, self._fpv["roll"] + dx * 0.3))   # = roll dial range
                 else:
                     self._fpv["az"] = (self._fpv["az"] - dx * 0.3) % 360.0      # drag right -> look right
                     self._fpv["el"] = max(-89.0, min(89.0, self._fpv["el"] - dy * 0.3))
@@ -8078,17 +8078,16 @@ class MainWindow(QMainWindow):
     def _build_auralize_panel(self):
         """Collapsible panel under the receiver table: head pose dials (az/el/roll) for the SELECTED
         receiver, a SOFA + anechoic-audio picker, Convolve, and a blinking play/scrubber transport."""
-        from PySide6.QtWidgets import QDial
         box = QGroupBox("Head pose and binaural render"); box.setVisible(False)
         v = QVBoxLayout(box); v.setSpacing(6); v.setContentsMargins(8, 6, 8, 8)
 
         dr = QHBoxLayout(); self._aur_dials = {}
-        for key, lo, hi, cap in [("az", 0, 360, "Azimuth ◠\uFE0E"), ("el", -90, 90, "Elevation ⦠\uFE0E"),
-                                 ("roll", -180, 180, "Roll ⭮\uFE0E")]:
+        for key, lo, hi, cap in [("az", 0, 360, "Azimuth"), ("el", -90, 90, "Elevation"),
+                                 ("roll", -90, 90, "Roll")]:              # head tilts, never upside down
             col = QVBoxLayout()
             c = QLabel(cap); c.setAlignment(Qt.AlignmentFlag.AlignCenter)
             c.setStyleSheet(f"color:{PAL['subtext']};font-size:10px;")
-            d = QDial(); d.setRange(lo, hi); d.setValue(0); d.setNotchesVisible(True)
+            d = HeadPoseDial(key); d.setRange(lo, hi); d.setValue(0)   # head icon, stock QDial behaviour
             d.setWrapping(key == "az"); d.setFixedSize(88, 88)
             val = QLabel("0°"); val.setAlignment(Qt.AlignmentFlag.AlignCenter)
             d.valueChanged.connect(lambda x, wv=val: wv.setText(f"{x}°"))
@@ -10169,6 +10168,98 @@ class MainWindow(QMainWindow):
 
 
 # ─────────────────────────────────────────────────────────────
+class HeadPoseDial(QDial):
+    """QDial drawn as a head that turns with its value; value/range/wrapping/wheel/keys/valueChanged are
+    the stock QDial's, only painting and drag mapping change. Angles follow binauralize.head_basis:
+      'az'   top view, nose UP at 0, +az turns the head LEFT (CCW); ears at 0/180 deg of the icon.
+      'el'   side view, nose RIGHT (forward) at 0, +el tilts the nose UP (CCW); ear = circle mid-head.
+      'roll' a smiling face seen like your MIRROR image (your left = screen left), upright at 0, +roll
+             tips the top of the head to its LEFT (CCW) on a FIXED neck, limited to +-90; ears about
+             mid-head.
+    Dragging points the icon's reference direction (nose / top of head) at the mouse."""
+    def __init__(self, kind, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+
+    def _value_at(self, pos):
+        th = math.degrees(math.atan2(self.height() / 2.0 - pos.y(), pos.x() - self.width() / 2.0))
+        if self._kind == "az":
+            v = (th - 90.0) % 360.0                          # nose (up at 0) points at the mouse
+        elif self._kind == "el":
+            v = max(-90.0, min(90.0, th))                    # nose (right at 0), clamped to +-90
+        else:
+            v = (th - 90.0 + 180.0) % 360.0 - 180.0          # top of head points at the mouse,
+            v = max(-90.0, min(90.0, v))                     # clamped to +-90 like elevation
+        return int(round(v)) % 360 if self._kind == "az" else int(round(v))
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(e)
+        self.setSliderDown(True); self.setValue(self._value_at(e.position())); e.accept()
+
+    def mouseMoveEvent(self, e):
+        if not self.isSliderDown():
+            return super().mouseMoveEvent(e)
+        self.setValue(self._value_at(e.position())); e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if not self.isSliderDown():
+            return super().mouseReleaseEvent(e)
+        self.setSliderDown(False); e.accept()
+
+    def paintEvent(self, _):
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QPolygonF
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            W, H = self.width(), self.height()
+            R = min(W, H) / 2.0 - 3.0
+            p.translate(W / 2.0, H / 2.0)
+            dim = 1.0 if self.isEnabled() else 0.45
+            def col(key, a=1.0):
+                c = QColor(PAL[key]); c.setAlphaF(a * dim); return c
+            # dial ring + 30 deg ticks + a mark at the neutral (value 0) direction
+            p.setPen(QPen(col("border"), 2)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(0, 0), R, R)
+            p.setPen(QPen(col("subtext", 0.7), 1))
+            for k in range(12):
+                a = math.radians(30 * k)
+                r0 = R - (6 if k % 3 == 0 else 3)
+                p.drawLine(QPointF(r0 * math.cos(a), -r0 * math.sin(a)), QPointF(R * math.cos(a), -R * math.sin(a)))
+            a0 = math.radians(0.0 if self._kind == "el" else 90.0)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(col("accent2"))
+            p.drawEllipse(QPointF((R - 1) * math.cos(a0), -(R - 1) * math.sin(a0)), 2.5, 2.5)
+            rh = R * 0.55; re = rh * 0.30; rn = rh * 0.20      # rn: nose half-width (small)
+            line = QPen(col("accent2"), 1.6); feat = col("accent")
+            if self._kind == "roll":                         # neck: FIXED (the body doesn't roll); its top
+                p.setPen(line); p.setBrush(col("btn"))       # lies inside the head disc, so the head always
+                nw = rh * 0.28                               # covers the joint whatever the roll
+                p.drawRect(QRectF(-nw, rh * 0.6, 2 * nw, rh * 0.75))
+            # the head, rotated CCW by the value (Qt rotates clockwise on screen -> negate)
+            p.rotate(-float(self.value()))
+            if self._kind in ("az", "roll"):                 # ears left/right, drawn under the head
+                ey = rh * 0.08 if self._kind == "roll" else 0.0   # roll: ears ~ mid-head, a hair lower
+                p.setPen(line); p.setBrush(feat)
+                p.drawEllipse(QPointF(-rh, ey), re, re); p.drawEllipse(QPointF(rh, ey), re, re)
+            p.setPen(line); p.setBrush(col("btn"))
+            p.drawEllipse(QPointF(0, 0), rh, rh)
+            p.setPen(line); p.setBrush(feat)
+            if self._kind == "az":                           # nose up
+                p.drawPolygon(QPolygonF([QPointF(-rn, -rh + 1.5), QPointF(rn, -rh + 1.5),
+                                         QPointF(0, -rh - rn * 1.2)]))
+            elif self._kind == "roll":                       # slight smile (face = your mirror image)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawArc(QRectF(-rh * 0.42, -rh * 0.05, rh * 0.84, rh * 0.62), 215 * 16, 110 * 16)
+            elif self._kind == "el":                         # nose forward (right) + ear mid-head
+                p.drawPolygon(QPolygonF([QPointF(rh - 1.5, -rn), QPointF(rh - 1.5, rn),
+                                         QPointF(rh + rn * 1.2, 0)]))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(QPointF(-rh * 0.12, 0), rh * 0.24, rh * 0.30)
+        finally:
+            p.end()
+
+
 class PropsWindow(QWidget):
     """Place primitives/assets as 3D scene props, assign a layer, transform them. Own top-level window
     (opened in Draw mode, mirrors SketchWindow). Edits gl._props in place; gl draws + exports them."""
