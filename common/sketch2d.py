@@ -16,7 +16,7 @@ Controls (checked against gui.py: Ctrl+K is unused there; the rest are window-sc
 import copy
 import math
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
-from PySide6.QtGui import QPainter, QPen, QColor, QBrush
+from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QTransform
 from PySide6.QtWidgets import (QWidget, QDoubleSpinBox, QLabel, QVBoxLayout, QHBoxLayout, QFormLayout,
                                QGridLayout, QPushButton, QLineEdit, QScrollArea)
 
@@ -418,6 +418,7 @@ def _drop_out_of_range(shapes):
 class _Canvas(QWidget):
     selectionChanged = Signal()
     objReady = Signal(str)          # extruded OBJ text -> gui.py writes + loads it
+    propsBake = Signal()            # no sketch, imported scene: gui.py bakes the props into a scene copy
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -426,6 +427,7 @@ class _Canvas(QWidget):
         self.setMouseTracking(True)  # hover coords without a button held
         self._hover = None           # world (x,y) under cursor, for the readout
         self._prop_foot = []         # read-only top-down prop outlines (from gui), [[(x,y),...], ...]
+        self._shadow = None          # read-only top view of the loaded 3D scene: (fill path, edge path, bbox)
         self._tool = "free"          # free | rect | ellipse | measure | select | cut
         self._draw_drag = None       # [(x0,y0),(x1,y1)] world bbox while dragging a rect/ellipse
         self._tool_drag = None       # active measure/select/cut drag [(x0,y0),(x1,y1)]
@@ -704,6 +706,24 @@ class _Canvas(QWidget):
         self._prop_foot = polys or []
         self.update()
 
+    def set_scene_shadow(self, tris_xy, segs):
+        """Read-only top view ("shadow") of the scene loaded in 3D -- an imported OBJ like BRAS CR4 has
+        no sketch of its own, this is what props are placed against. tris_xy: [((x,y),(x,y),(x,y))]
+        filled together (winding fill = their union), segs: [((x,y),(x,y))] feature edges. World
+        coordinates, built once; paint maps them with one transform. Empty -> no shadow."""
+        if not tris_xy and not segs:
+            self._shadow = None; self.update(); return
+        fill = QPainterPath(); fill.setFillRule(Qt.FillRule.WindingFill)
+        for a, b, c in tris_xy:
+            fill.moveTo(*a); fill.lineTo(*b); fill.lineTo(*c); fill.closeSubpath()
+        edges = QPainterPath()
+        for a, b in segs:
+            edges.moveTo(*a); edges.lineTo(*b)
+        xs = [q[0] for t in tris_xy for q in t] + [q[0] for sg in segs for q in sg]
+        ys = [q[1] for t in tris_xy for q in t] + [q[1] for sg in segs for q in sg]
+        self._shadow = (fill, edges, (min(xs), min(ys), max(xs), max(ys)))
+        self.update()
+
     def load_shapes(self, data):
         data, dropped = _drop_out_of_range(data or [])            # self-heal a corrupt save (see helper)
         if dropped:
@@ -842,9 +862,14 @@ class _Canvas(QWidget):
     def contextMenuEvent(self, e):
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
             return                                              # Ctrl+RMB = delete point (mousePress)
-        if not any(s["closed"] and len(s["pts"]) >= 3 for s in self.shapes):
-            return
         from PySide6.QtWidgets import QMenu, QInputDialog
+        if not any(s["closed"] and len(s["pts"]) >= 3 for s in self.shapes):
+            if self._shadow is not None:                            # imported scene, nothing sketched:
+                m = QMenu(self)                                     # props still go into the scene
+                act = m.addAction("Update props in scene OBJ")
+                if m.exec(e.globalPos()) is act:
+                    self.propsBake.emit()
+            return
         m = QMenu(self)
         act_ex = m.addAction("Extrude to OBJ… (set height)")
         act_up = m.addAction("Update OBJ")                          # rebuild from current z's, no prompt
@@ -947,6 +972,9 @@ class _Canvas(QWidget):
             return                                                 # not laid out yet; showEvent can fire early
         self.off = QPointF(W / 2.0, Hpx / 2.0)                     # origin in the center
         ext = sorted(max(abs(p[0]), abs(p[1])) for sh in self.shapes for p in sh["pts"])
+        if not ext and self._shadow is not None:                  # nothing sketched: frame the scene shadow
+            x0, y0, x1, y1 = self._shadow[2]
+            ext = [max(abs(x0), abs(x1), abs(y0), abs(y1))]
         if ext:
             mx = ext[int(0.9 * (len(ext) - 1))]                   # 90th pct: frame the DRAWING, shrug off
             if mx > 0:                                            # a few stray far points (corrupt saves)
@@ -1008,6 +1036,15 @@ class _Canvas(QWidget):
             qp.setPen(QColor("#cfd8dc"))
             qp.drawText(8, Hpx - 8, f"x {self._hover[0]:.3g} m    y {self._hover[1]:.3g} m")
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)         # shapes/points antialiased
+        if self._shadow is not None:                               # read-only top view of the 3D scene
+            qp.save()
+            qp.setTransform(QTransform(self.scale, 0.0, 0.0, -self.scale, o.x(), o.y()))
+            qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QBrush(QColor(140, 160, 185, 38)))
+            qp.drawPath(self._shadow[0])
+            pen = QPen(QColor("#5d6b7c"), 1); pen.setCosmetic(True)          # 1 px at any zoom
+            qp.setPen(pen); qp.setBrush(Qt.BrushStyle.NoBrush)
+            qp.drawPath(self._shadow[1])
+            qp.restore()
         if self._prop_foot:                                        # read-only 3D-prop footprints (dashed green)
             from PySide6.QtGui import QPolygonF
             pen = QPen(QColor("#2e8b57"), 2, Qt.PenStyle.DashLine); pen.setCosmetic(True)
@@ -1102,7 +1139,9 @@ class SketchWindow(QWidget):
             "name its roof in 'Ceiling layer' → 'Assign→ceiling'<br>"
             "<b>Edge</b>: drag a box to add walls (accumulates) · click toggles one · Esc clears · "
             "type a layer name → 'Assign layer→edges' (walls sharing a name = one material layer)<br>"
-            "Global: MMB pan · wheel zoom · Ctrl+Z undo · RMB = extrude / update OBJ")
+            "Global: MMB pan · wheel zoom · Ctrl+Z undo · RMB = extrude / update OBJ<br>"
+            "Grey = top view of the scene loaded in 3D (read-only). With nothing sketched (imported OBJ), "
+            "RMB → 'Update props in scene OBJ' bakes the props into a copy of it")
         hint.setWordWrap(True); hint.setStyleSheet("color:#8a94a6;font-size:11px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignJustify)          # wrap + justify the help text
         # tool selector, laid out 4 x 2
