@@ -150,6 +150,7 @@ def set_scene_mode(light):
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
 MESH_FILL_ALPHA = 0.22   # unselected surface fill opacity (x-ray view); glyphs behind surfaces fade by it
+AUR_BUSY, AUR_READY = "#e53935", "#43a047"   # live auralization button: preparing (pulsing) / playing
 C_AIR = 343.0             # m/s, particles: 2D sim time per frame = the 3D frame time (solver uses c(T), ~1 %)
 PROP_LIFT = {"plane": ("bottom", 0.75),   # props placed ABOVE the floor beneath them: plane = table top
              "skyline": ("center", 1.20)}  # skyline diffuser centred at seated ear height
@@ -7062,8 +7063,9 @@ class MainWindow(QMainWindow):
 
     def _ensure_results(self):
         """Run allIRs.py in output/ to build IR_broad_<r>_<s>.npy, then plot the current receiver.
-        Skips if a run is already going (reassigning a live QThread aborts the app), and if the
-        broadband files already exist (avoids recomputing every time Results is opened)."""
+        Skips if a run is already going (reassigning a live QThread aborts the app), and skips the
+        whole recompute when the broadband files are up to date (_broadband_fresh; params.json likewise
+        via _params_fresh) -- before, every entry into Results re-ran allIRs + acouparams."""
         if not self._proj_root:
             self._sb.showMessage("Open a project folder first."); return
         t = getattr(self, "_allirs_thread", None)
@@ -7073,6 +7075,12 @@ class MainWindow(QMainWindow):
         script = self._find_common_script("allIRs.py")
         if script is None:
             self._sb.showMessage("allIRs.py not found next to gui.py."); return
+        if self._broadband_fresh(out, script):                # same simulation, already processed
+            self._sb.showMessage("Broadband IRs up to date — reusing them.")
+            if not self._params_fresh(out):
+                self._run_acouparams()
+            self._show_results_now()
+            return
         self._allirs_thread = SolverThread([sys.executable, script], out)
         self._allirs_thread.output.connect(self._log.append)
         self._allirs_thread.done.connect(self._on_allirs_done)
@@ -7087,11 +7095,49 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
             self._run_acouparams()                         # rebuild params.json from the fresh IRs
+        self._show_results_now()
+
+    def _show_results_now(self):
         if getattr(self, "_view_mode", None) == "results":
             if self._results_sel:                          # honour the current multi-selection
                 self._apply_results_selection(mirror_table=True)
             else:
                 self._results.show_receiver(self._current_receiver_row())
+
+    def _broadband_fresh(self, out, script):
+        """True if IR_broad_<r>_<s>.npy exist for every simulated pair and are newer than everything
+        allIRs.py reads: IR<r>_<s>.bin, HIR<r>_<s>_<band>.bin, header.txt, config/p_ref.bin, and
+        allIRs.py itself. config.txt is left out on purpose: the GUI rewrites it on every Save, and a
+        changed cutoff only matters after a new simulation -- which renews the bins anyway."""
+        import glob, re
+        ins, pairs = [], set()
+        for f in glob.glob(os.path.join(out, "*.bin")):
+            m = re.match(r"(?:IR(\d+)_(\d+)|HIR(\d+)_(\d+)_\d+)\.bin$", os.path.basename(f))
+            if m:
+                ins.append(f); g = m.groups()
+                pairs.add((g[0], g[1]) if g[0] is not None else (g[2], g[3]))
+        outs = glob.glob(os.path.join(out, "IR_broad_*.npy"))
+        if not ins or not outs:
+            return False
+        have = {tuple(re.match(r"IR_broad_(\d+)_(\d+)\.npy$", os.path.basename(f)).groups())
+                for f in outs if re.match(r"IR_broad_(\d+)_(\d+)\.npy$", os.path.basename(f))}
+        if not pairs <= have:
+            return False                                   # a pair was never processed
+        extra = [os.path.join(out, "header.txt"), os.path.join(self._proj_root, "config", "p_ref.bin"), script]
+        newest_in = max(os.path.getmtime(f) for f in ins + [f for f in extra if os.path.isfile(f)])
+        return min(os.path.getmtime(f) for f in outs) >= newest_in
+
+    def _params_fresh(self, out):
+        """params.json newer than every IR_broad_*.npy and acouparams.py -> no need to rerun it."""
+        import glob
+        pj = os.path.join(out, "params.json")
+        if not os.path.isfile(pj):
+            return False
+        deps = glob.glob(os.path.join(out, "IR_broad_*.npy"))
+        sc = self._find_common_script("acouparams.py")
+        if sc:
+            deps.append(sc)
+        return all(os.path.getmtime(pj) >= os.path.getmtime(f) for f in deps)
 
     def _run_acouparams(self, fractions=1):
         """Compute the ISO-3382 params (acouparams.py -> params.json, or params3.json for 1/3 octave)
@@ -7917,7 +7963,10 @@ class MainWindow(QMainWindow):
         lay.addRow(_eb)                                                # Estimate, under the atmosphere
         _add("h",        "Grid spacing ↔︎",     0.05, 0.001, 2.0,   3, "m")
         _add("t_max",    "Simulation span 🕑\uFE0E",  0.5,  0.001, 60.0,  3, "s")
-        _add("f_cutoff", "Cutoff frequency ✁︎", 250., 50.,   10000., 1, "Hz")
+        _add("f_cutoff", "Cutoff frequency ✁︎", 250., 0.,    10000., 1, "Hz")   # < 44.5 Hz (lower edge of
+        #   the 63 Hz octave) = GA only: main3D runs no FVM. The old 50 Hz floor made GA-only untypeable.
+        self._cfg["f_cutoff"].setToolTip("Highest wave-based (FVM) frequency. The FVM/GA seam goes on the upper "
+                                         "edge of its octave. Below 44.5 Hz: GA only, no FVM.")
         _add("CFL",      "CFL number",       0.40, 0.05,  0.50,  2, "")
 
         # Number of poles for the ADE (line 6 of config.txt; vectFIT reads v[5])
@@ -8102,9 +8151,11 @@ class MainWindow(QMainWindow):
         self._aur_sofa = QLineEdit(QSettings("phases", "gui").value("last_sofa", "") or "")
         bs = QPushButton("SOFA…"); bs.setFixedHeight(24); bs.clicked.connect(self._pick_sofa)
         sr.addWidget(self._aur_sofa, 1); sr.addWidget(bs); v.addLayout(sr)
-        # Alternative renderer: first-order ambisonics, no HRTF. Head pose is applied LIVE (dials or
-        # FPV mouselook stream to ambisonic.py --live); nothing is re-rendered or written per pose.
-        self._aur_foa = QCheckBox("Ambisonic live (no HRTF): head pose applied while playing")
+        # Alternative renderer: live ambisonics. With a valid SOFA above -> 3rd order + that HRTF (SH-domain
+        # MagLS decode); without -> 1st order, no HRTF. Head pose is applied LIVE (dials or FPV mouselook
+        # stream to ambisonic.py --live); nothing is re-rendered or written per pose.
+        self._aur_foa = QCheckBox("Ambisonic live: head pose applied while playing (3rd order + HRTF with a "
+                                  "SOFA, else 1st order)")
         self._aur_foa.setChecked(bool(QSettings("phases", "gui").value("aur_foa", False, type=bool)))
         self._aur_foa.toggled.connect(self._on_foa_toggled); v.addWidget(self._aur_foa)
 
@@ -8270,8 +8321,7 @@ class MainWindow(QMainWindow):
             line_edit.setText(f)
 
     def _on_foa_toggled(self, on):
-        QSettings("phases", "gui").setValue("aur_foa", bool(on))
-        self._aur_sofa.setEnabled(not on)
+        QSettings("phases", "gui").setValue("aur_foa", bool(on))   # SOFA stays usable: live HOA decodes with it
         self._aur_conv.setText("◉	Live" if on else "∗	Convolve")
         if not on:
             self._stop_foa_live()
@@ -8281,6 +8331,7 @@ class MainWindow(QMainWindow):
         return t is not None and t.isRunning()
 
     def _stop_foa_live(self):
+        self._foa_pulse_stop()
         if self._foa_alive():
             self._foa_thread.send("q"); self._foa_thread.wait(1500)
             if self._foa_thread.isRunning():
@@ -8301,6 +8352,9 @@ class MainWindow(QMainWindow):
             self._sb.showMessage("ambisonic.py not found next to gui.py."); return
         pose = [str(self._aur_dials[k].value()) for k in ("az", "el", "roll")]
         cmd = [sys.executable, script, "--rec", str(rec), "--dry", dry, "--live", "--pose", *pose]
+        sofa = self._aur_sofa.text().strip()
+        if sofa and os.path.isfile(sofa):                     # 3rd order + this HRTF; else 1st order, no HRTF
+            cmd += ["--sofa", sofa, "--order", "3"]
         dm = {str(i): p for i, p in getattr(self, "_src_dry", {}).items() if p and os.path.isfile(p)}
         if dm:
             import json
@@ -8312,12 +8366,43 @@ class MainWindow(QMainWindow):
             self._player.stop()
         self._foa_thread = SolverThread(cmd, out, stdin=True)
         self._foa_thread.output.connect(self._log.append)
-        self._foa_thread.done.connect(lambda rc: (self._aur_conv.setText("◉	Live"),
+        self._foa_thread.output.connect(lambda line, r=rec: self._on_foa_output(line, r))
+        self._foa_thread.done.connect(lambda rc: (self._foa_pulse_stop(), self._aur_conv.setText("◉	Live"),
                                                   self._sb.showMessage("Live auralization ended."
                                                                        if rc == 0 else f"ambisonic.py failed (rc={rc}) — see log.")))
         self._foa_thread.start()
         self._aur_conv.setText("■	Stop")
-        self._sb.showMessage(f"Live auralization of receiver {rec} — move the dials or look around inside it.")
+        self._foa_pulse_start()                                   # pulses until the first block plays
+        self._sb.showMessage(f"Preparing live auralization of receiver {rec} (convolution"
+                             + (", HRTF decoder" if "--sofa" in cmd else "") + ", level)… click Stop to cancel.")
+
+    def _foa_pulse_start(self):
+        """Live button pulses RED while ambisonic.py prepares (nothing audible yet); GREEN once playing."""
+        if getattr(self, "_foa_pulse", None) is None:
+            self._foa_pulse = QTimer(self); self._foa_pulse.timeout.connect(self._foa_pulse_tick)
+        self._foa_pulse_ph = 0.0
+        self._foa_pulse.start(60)
+
+    def _foa_pulse_tick(self):
+        self._foa_pulse_ph += 0.22
+        a = 0.2 + 0.8 * (0.5 + 0.5 * math.sin(self._foa_pulse_ph))
+        c = QColor(AUR_BUSY)
+        self._aur_conv.setStyleSheet(f"background:rgba({c.red()},{c.green()},{c.blue()},{int(a * 255)});"
+                                     f"color:{'#ffffff' if a > 0.6 else PAL['text']};")
+
+    def _foa_pulse_stop(self):
+        t = getattr(self, "_foa_pulse", None)
+        if t is not None and t.isActive():
+            t.stop()
+        self._aur_conv.setStyleSheet("")
+
+    def _on_foa_output(self, line, rec):
+        """ambisonic.py reports its first audio block -> preparation is over: stop pulsing."""
+        if "first block out" in line:
+            self._foa_pulse_stop()
+            self._aur_conv.setStyleSheet(f"background:{AUR_READY};color:#ffffff;")   # green while playing
+            self._sb.showMessage(f"Live auralization of receiver {rec} playing — move the dials or look "
+                                 "around inside it.")
 
     def _run_convolve(self):
         """Render the selected receiver to a binaural wav via binauralize.py (in output/)."""
