@@ -10174,8 +10174,7 @@ class HeadPoseDial(QDial):
       'az'   top view, nose UP at 0, +az turns the head LEFT (CCW); ears at 0/180 deg of the icon.
       'el'   side view, nose RIGHT (forward) at 0, +el tilts the nose UP (CCW); ear = circle mid-head.
       'roll' a smiling face seen like your MIRROR image (your left = screen left), upright at 0, +roll
-             tips the top of the head to its LEFT (CCW) on a FIXED neck, limited to +-90; ears about
-             mid-head.
+             tips the top of the head to its LEFT (CCW), limited to +-90; ears about mid-head.
     Dragging points the icon's reference direction (nose / top of head) at the mouse."""
     def __init__(self, kind, parent=None):
         super().__init__(parent)
@@ -10209,7 +10208,7 @@ class HeadPoseDial(QDial):
 
     def paintEvent(self, _):
         from PySide6.QtCore import QRectF
-        from PySide6.QtGui import QPolygonF
+        from PySide6.QtGui import QPolygonF, QPainterPath
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -10230,12 +10229,8 @@ class HeadPoseDial(QDial):
             a0 = math.radians(0.0 if self._kind == "el" else 90.0)
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(col("accent2"))
             p.drawEllipse(QPointF((R - 1) * math.cos(a0), -(R - 1) * math.sin(a0)), 2.5, 2.5)
-            rh = R * 0.55; re = rh * 0.30; rn = rh * 0.20      # rn: nose half-width (small)
+            rh = R * 0.55; re = rh * 0.30; rn = rh * 0.13; nh = rh * 0.24   # nose half-width (thin), length
             line = QPen(col("accent2"), 1.6); feat = col("accent")
-            if self._kind == "roll":                         # neck: FIXED (the body doesn't roll); its top
-                p.setPen(line); p.setBrush(col("btn"))       # lies inside the head disc, so the head always
-                nw = rh * 0.28                               # covers the joint whatever the roll
-                p.drawRect(QRectF(-nw, rh * 0.6, 2 * nw, rh * 0.75))
             # the head, rotated CCW by the value (Qt rotates clockwise on screen -> negate)
             p.rotate(-float(self.value()))
             if self._kind in ("az", "roll"):                 # ears left/right, drawn under the head
@@ -10245,17 +10240,33 @@ class HeadPoseDial(QDial):
             p.setPen(line); p.setBrush(col("btn"))
             p.drawEllipse(QPointF(0, 0), rh, rh)
             p.setPen(line); p.setBrush(feat)
-            if self._kind == "az":                           # nose up
+            if self._kind == "az":                           # nose up (all 3 noses: base 2rn, length nh)
                 p.drawPolygon(QPolygonF([QPointF(-rn, -rh + 1.5), QPointF(rn, -rh + 1.5),
-                                         QPointF(0, -rh - rn * 1.2)]))
+                                         QPointF(0, -rh - nh)]))
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(col("accent2"))          # eyes / brows, seen from above
+                p.drawEllipse(QPointF(-rh * 0.36, -rh * 0.60), rh * 0.14, rh * 0.045)
+                p.drawEllipse(QPointF(rh * 0.36, -rh * 0.60), rh * 0.14, rh * 0.045)
             elif self._kind == "roll":                       # slight smile (face = your mirror image)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawArc(QRectF(-rh * 0.42, -rh * 0.05, rh * 0.84, rh * 0.62), 215 * 16, 110 * 16)
-            elif self._kind == "el":                         # nose forward (right) + ear mid-head
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(col("accent2"))          # two narrow eyes
+                p.drawEllipse(QPointF(-rh * 0.33, -rh * 0.14), rh * 0.13, rh * 0.045)
+                p.drawEllipse(QPointF(rh * 0.33, -rh * 0.14), rh * 0.13, rh * 0.045)
+                p.setPen(line); p.setBrush(feat)             # front-view nose, same size as the others
+                p.drawPolygon(QPolygonF([QPointF(0, -rh * 0.06), QPointF(rn, -rh * 0.06 + nh),
+                                         QPointF(-rn, -rh * 0.06 + nh)]))
+            elif self._kind == "el":                         # profile: nose forward (right), ear mid-head
                 p.drawPolygon(QPolygonF([QPointF(rh - 1.5, -rn), QPointF(rh - 1.5, rn),
-                                         QPointF(rh + rn * 1.2, 0)]))
-                p.setBrush(Qt.BrushStyle.NoBrush)
+                                         QPointF(rh + nh, 0)]))
+                p.setBrush(col("accent2"))                   # ear filled with the contour colour
                 p.drawEllipse(QPointF(-rh * 0.12, 0), rh * 0.24, rh * 0.30)
+                p.setBrush(Qt.BrushStyle.NoBrush)            # side smile: starts ON the face contour below
+                a = math.radians(25.0)                       # the nose, runs back and curves up at the corner
+                sm = QPainterPath(QPointF(rh * math.cos(a), rh * math.sin(a)))
+                sm.quadTo(QPointF(rh * 0.68, rh * 0.50), QPointF(rh * 0.50, rh * 0.30))
+                p.drawPath(sm)
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(col("accent2"))          # one narrow eye
+                p.drawEllipse(QPointF(rh * 0.55, -rh * 0.28), rh * 0.11, rh * 0.045)
         finally:
             p.end()
 
