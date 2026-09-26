@@ -150,6 +150,8 @@ def set_scene_mode(light):
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
 MESH_FILL_ALPHA = 0.22   # unselected surface fill opacity (x-ray view); glyphs behind surfaces fade by it
+PROP_LIFT = {"plane": ("bottom", 0.75),   # props placed ABOVE the floor beneath them: plane = table top
+             "skyline": ("center", 1.20)}  # skyline diffuser centred at seated ear height
 PART_SPL_GAMMA = 0.25     # particles: on-screen motion follows this fraction of the Lp,1m change (dB) around 94 dB
 PART_COLOR_FULL = 2.0     # particles: displacement [cells] shown in the full (amber) colour
 PART_RAMP_T = [0.0, 0.5, 1.0]                                    # rest -> moving -> max
@@ -2456,6 +2458,9 @@ class GLViewer(QOpenGLWidget):
         v = np.asarray(p.world()[0], float)
         amn, amx = v.min(0), v.max(0)
         top = 0.0                                              # fallback: rest base at z=0 (room floor)
+        lift = PROP_LIFT.get(p.source) if p.kind == "primitive" else None
+        if lift is not None:                                   # lifted props measure from the ROOM floor,
+            exclude = set(range(len(self._props)))             # never from another prop (no diffuser on a table)
         ABC = self._scene_tris_ABC(exclude if exclude is not None else {i})
         if ABC is not None:
             A, B, C = ABC
@@ -2467,7 +2472,13 @@ class GLViewer(QOpenGLWidget):
             hits = [h for h in hits if h is not None]
             if hits:
                 top = max(hits)
-        p.pos = [p.pos[0], p.pos[1], p.pos[2] + (top - amn[2])]
+        if lift is None:
+            z_at = amn[2]                                      # base on the surface
+        else:
+            ref, h = lift                                      # base or centre `h` above the surface
+            top += h
+            z_at = amn[2] if ref == "bottom" else (amn[2] + amx[2]) / 2.0
+        p.pos = [p.pos[0], p.pos[1], p.pos[2] + (top - z_at)]
 
     def _xform_reanchor(self):
         """Re-snapshot the base transforms + mouse anchor to the CURRENT state, so toggling an axis
