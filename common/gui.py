@@ -1604,7 +1604,7 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, self._particle_tex())
         glEnable(GL_POINT_SPRITE); glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE)
-        glPointSize(5.0)
+        glPointSize(4.0)                        # 4 px: ~85 particles/side stay distinct
         glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY)
         for ax, sim in self._sim2d.items():
             if not self._plane_vis[ax] or ax not in self._part_idx:
