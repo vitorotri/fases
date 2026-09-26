@@ -150,12 +150,16 @@ def set_scene_mode(light):
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
 MESH_FILL_ALPHA = 0.22   # unselected surface fill opacity (x-ray view); glyphs behind surfaces fade by it
+C_AIR = 343.0             # m/s, particles: 2D sim time per frame = the 3D frame time (solver uses c(T), ~1 %)
 PROP_LIFT = {"plane": ("bottom", 0.75),   # props placed ABOVE the floor beneath them: plane = table top
              "skyline": ("center", 1.20)}  # skyline diffuser centred at seated ear height
 PART_SPL_GAMMA = 0.25     # particles: on-screen motion follows this fraction of the Lp,1m change (dB) around 94 dB
 PART_COLOR_FULL = 2.0     # particles: displacement [cells] shown in the full (amber) colour
-PART_RAMP_T = [0.0, 0.5, 1.0]                                    # rest -> moving -> max
-PART_RAMP = np.array([(0.34, 0.30, 1.00), (0.95, 0.35, 0.80), (1.00, 0.80, 0.25)], np.float32)
+PART_RAMP_T = [0.0, 0.3, 0.65, 1.0]                              # rest -> front -> moving -> max
+PART_RAMP = np.array([(0.34, 0.30, 1.00),     # rest: purple-blue
+                      (0.20, 0.95, 0.75),     # any wavefront: green-cyan, pops against the purple bed
+                      (0.95, 0.35, 0.80),     # larger motion: magenta
+                      (1.00, 0.80, 0.25)], np.float32)   # max: amber
 DH_OBJ_NEAR_FRAC = 0.5   # dollhouse FRONT part of the room (fraction of its depth along the view): objects there go
 GLYPH_BEHIND_GAIN = 4.0  # source/receiver behind n OBSTACLES (the room shell seen from outside doesn't count)
                          # is drawn at alpha T**gain, T = prod(1 - pane alpha): 1 obstacle -> 37 %, 2 -> 14 %
@@ -978,6 +982,7 @@ class GLViewer(QOpenGLWidget):
         self._sim2d = {}           # axis -> slice2d.Slice2DSim (live 2D FDTD, didactic particle anim)
         self._part_idx = {}        # axis -> (rows,cols) strided display sample indices
         self._part_gain = 1.0      # auto display gain (no knob)
+        self._part_spf = {}; self._part_carry = {}   # particles: 2D steps per frame (3D frame time) + carry
         self._part_tex = None      # lazy round-ball point-sprite texture
         self._lut = None; self._lut_key = None
 
@@ -1280,6 +1285,10 @@ class GLViewer(QOpenGLWidget):
             Nx, Ny, Nz = int(hp[0]), int(hp[1]), int(hp[2])
         except Exception:
             return 0
+        try:                                   # simulated time between two saved 3D frames = anim_step*dt
+            t_frame = int(hp[8]) * float(hp[9])    # (fields before the scene path, which may hold spaces)
+        except Exception:
+            t_frame = None
         planes = {'x': ("pressureX.bin", Nz, Ny),
                   'y': ("pressureY.bin", Nz, Nx),
                   'z': ("pressureZ.bin", Ny, Nx)}
@@ -1343,6 +1352,17 @@ class GLViewer(QOpenGLWidget):
             srcs = [self._world_to_plane(ax, s, wid, hgt) + (s[3] if len(s) > 3 else 94.0,)
                     for i_, s in enumerate(self._sources) if self._pt_on("source", i_)]
             self._sim2d[ax] = Slice2DSim(inside, srcs, src_opt=src_opt, absorb=absorb_by_ax[ax])
+        # Same simulated TIME per frame as the 3D palettes: the 2D sim (c = dx = 1, step dt) advances
+        # c_air * t_frame / dx_cell cells per frame -> steps = that / sim.dt, fractional part carried.
+        # Unknown frame time (old header) -> the old fixed 2 steps per frame.
+        mn, mx = self._domain_min, self._domain_max
+        span = {'x': (1, 2), 'y': (0, 2), 'z': (0, 1)}             # (col axis, row axis) per plane
+        self._part_spf, self._part_carry = {}, {}
+        for ax, sim in self._sim2d.items():
+            a, b = span[ax]
+            dx = 0.5 * ((mx[a] - mn[a]) / sim.W + (mx[b] - mn[b]) / sim.H)   # physical cell [m]
+            self._part_spf[ax] = (C_AIR * t_frame / (dx * sim.dt)) if (t_frame and dx > 0) else 2.0
+            self._part_carry[ax] = 0.0
         # Gain: warm up to measure the grid's displacement-per-unit-amplitude, then anchor the gain
         # to a REFERENCE SPL (not the live field). This way ABSOLUTE source SPL and SPL_AMP_CALIB DO
         # change the on-screen pulse: displayed ~ 1.2 * CALIB * 10^((SPL - 94dB)/20) cells. (An
@@ -1403,18 +1423,30 @@ class GLViewer(QOpenGLWidget):
         if self._anim is None:
             return
         if self._anim_palette == 'particles':          # advance the live 2D sims each tick
-            for ax, sim in self._sim2d.items():
-                if self._plane_vis[ax]:
-                    sim.step()
+            self._step_particles()
         F = max(len(v) for v in self._anim.values())
         self._anim_frame = (self._anim_frame + 1) % F
         # loop the live particle sim in sync with the frame cycle so it repeats like color/greys
         # (otherwise it just rings on forever and never restarts)
         if self._anim_palette == 'particles' and self._anim_frame == 0:
-            for sim in self._sim2d.values():
-                sim.reset()
+            self._reset_particles()
         self.frameChanged.emit(self._anim_frame)
         self.update()
+
+    def _step_particles(self):
+        """One animation frame of the live 2D sims: the same simulated time as one 3D frame
+        (_part_spf steps, fractional remainder carried so the total time is exact)."""
+        for ax, sim in self._sim2d.items():
+            if not self._plane_vis[ax]:
+                continue
+            c = self._part_carry.get(ax, 0.0) + self._part_spf.get(ax, 2.0)
+            n = int(c); self._part_carry[ax] = c - n
+            if n:
+                sim.step(n)
+
+    def _reset_particles(self):
+        for ax, sim in self._sim2d.items():
+            sim.reset(); self._part_carry[ax] = 0.0
 
     def seek(self, k):
         """Scrubber jump to frame k. color/greys index stored frames; the live particle sim has no
@@ -1426,12 +1458,9 @@ class GLViewer(QOpenGLWidget):
             return
         k = max(0, min(F - 1, int(k)))
         if self._anim_palette == 'particles':
-            for sim in self._sim2d.values():
-                sim.reset()
+            self._reset_particles()
             for _ in range(k):
-                for ax, sim in self._sim2d.items():
-                    if self._plane_vis[ax]:
-                        sim.step()
+                self._step_particles()
         self._anim_frame = k
         self.update()
 
@@ -1585,7 +1614,7 @@ class GLViewer(QOpenGLWidget):
             disp = sim.disp[rr, cc]                            # (Nsel,2) live displacement in cells
             col = cc + 0.5 + pc + np.clip(G * disp[:, 0], -clamp, clamp)
             row = rr + 0.5 + pr + np.clip(G * disp[:, 1], -clamp, clamp)
-            # colour by the displayed displacement: rest = purple-blue, moving -> magenta -> amber
+            # colour by the displayed displacement: rest purple-blue -> green-cyan -> magenta -> amber
             t = np.clip(G * np.hypot(disp[:, 0], disp[:, 1]) / PART_COLOR_FULL, 0.0, 1.0)
             rgba = np.empty((len(t), 4), np.float32); rgba[:, 3] = 1.0
             for ch in range(3):
