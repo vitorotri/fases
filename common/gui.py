@@ -2537,7 +2537,7 @@ class GLViewer(QOpenGLWidget):
         self.propsChanged.emit(); self.update()
 
     def _xform_apply(self, qpos):
-        """Drive the transform from the mouse (no button). P moves the WHOLE group by one delta (screen-
+        """Drive the transform from the mouse (no button). M moves the WHOLE group by one delta (screen-
         plane or along the locked axis); R/S act on the primary prop (about its center)."""
         xf = self._xform
         if xf is None:
@@ -3281,12 +3281,12 @@ class GLViewer(QOpenGLWidget):
                              "Space  fly nav (W/X fwd·back, A/D strafe, Q/Z height, mouse looks)",
                              "Esc  leave the current mode / cancel · Tab / Shift+Tab  cycle panel tabs"]),
         ("POINTS (Simulation mode only)", ["S / R  place source / receiver  (+ G  make a grid/shell array)",
-                                 "E  edit: drag a point · box-select many · P move · R rotate · Del delete",
+                                 "E  edit: drag a point · box-select many · M move · R rotate · Del delete",
                                  "hold X / Y / Z  lock an axis · RMB on a point  delete it · Ctrl+Z  undo",
                                  "L  slice planes: hold X / Y / Z and drag to move a plane"]),
         ("RESULTS mode", ["LMB on a receiver  select / deselect it for the plots"]),
         ("RECEIVER VIEW", ["LMB look · Ctrl+LMB roll · position fixed · RMB → Go back"]),
-        ("PROPS (Draw mode)", ["P / R / S  move / rotate / scale · X/Y/Z lock · Enter confirm · Esc cancel",
+        ("PROPS (Draw mode)", ["M / R / S  move / rotate / scale · X/Y/Z lock · Enter confirm · Esc cancel",
                                "C  copy-select · props auto-rest on the surface below (stage/floor)",
                                "Ctrl+Z  undo"]),
         ("DOLLHOUSE (RMB menu)", ["+ / -  (or PgUp / PgDn)  raise / lower the section plane (100 % = no cut)",
@@ -3309,7 +3309,7 @@ class GLViewer(QOpenGLWidget):
         p.drawRoundedRect(x, y, bw, bh, 8, 8)
         cy = y + 24
         p.setPen(QColor(PAL["accent2"])); p.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
-        p.drawText(QRect(x, cy - 16, bw, 20), Qt.AlignmentFlag.AlignHCenter, "Keyboard & mouse — press ? to close")
+        p.drawText(QRect(x, cy - 16, bw, 20), Qt.AlignmentFlag.AlignHCenter, "Shortcuts - press ? to close")
         cy += 14
         for title, rows in self._HELP:
             cy += 14
@@ -3619,14 +3619,14 @@ class GLViewer(QOpenGLWidget):
         key = e.key()
         if key == Qt.Key.Key_Question:          # '?' toggles the shortcuts overlay in any mode
             self._show_help = not self._show_help; self.update(); e.accept(); return
-        # Point group transform modal: G/R switch move/rotate, X/Y/Z pick axis, Enter commits, Esc cancels.
+        # Point group transform modal: M/R switch move/rotate, X/Y/Z pick axis, Enter commits, Esc cancels.
         if self._gxf is not None:
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._gxf_commit(); e.accept(); return
             if key == Qt.Key.Key_Escape:
                 self._gxf_commit(cancel=True); e.accept(); return
-            if key in (Qt.Key.Key_P, Qt.Key.Key_R):        # P move / R rotate (consistent with props)
-                self._gxf["mode"] = 'g' if key == Qt.Key.Key_P else 'r'; self._gxf_reanchor()
+            if key in (Qt.Key.Key_M, Qt.Key.Key_R):        # M move / R rotate (same keys as props)
+                self._gxf["mode"] = 'g' if key == Qt.Key.Key_M else 'r'; self._gxf_reanchor()
                 e.accept(); return
             if key in (Qt.Key.Key_X, Qt.Key.Key_Y, Qt.Key.Key_Z):   # HELD lock (release unlocks)
                 if not e.isAutoRepeat():
@@ -3634,16 +3634,16 @@ class GLViewer(QOpenGLWidget):
                     self._gxf_reanchor()
                 e.accept(); return
             e.accept(); return                              # swallow everything else during the modal
-        # Edit mode with a multi-selection: P move / R rotate the group; Delete removes it.
+        # Edit mode with a multi-selection: M move / R rotate the group; Delete removes it.
         if (self._grab_held and self._pt_sel and self._mode == self.MODE_NONE and not self._props_mode):
-            if key == Qt.Key.Key_P:
+            if key == Qt.Key.Key_M:
                 self.start_group_xform(self._pt_sel, "g"); e.accept(); return
             if key == Qt.Key.Key_R:
                 self.start_group_xform(self._pt_sel, "r"); e.accept(); return
             if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
                 self.pointsDeleted.emit(list(self._pt_sel)); self._pt_sel = []
                 self.update(); e.accept(); return
-        # ── Draw mode: modal prop transform. P move, R rotate, S scale; X/Y/Z lock axis (toggle);
+        # ── Draw mode: modal prop transform. M move, R rotate, S scale; X/Y/Z lock axis (toggle);
         #    Enter confirms, Esc cancels. Blender-style: after the key, the mouse drives it (no button). ──
         if self._props_mode and self._mode == self.MODE_NONE:
             if self._xform is None and self._rect is None and e.matches(QKeySequence.StandardKey.Undo):
@@ -3665,14 +3665,14 @@ class GLViewer(QOpenGLWidget):
                         self._xform['axis'] = {Qt.Key.Key_X: 'X', Qt.Key.Key_Y: 'Y', Qt.Key.Key_Z: 'Z'}[key]
                         self.update()
                     e.accept(); return
-                if not e.isAutoRepeat() and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
+                if not e.isAutoRepeat() and key in (Qt.Key.Key_M, Qt.Key.Key_R, Qt.Key.Key_S):
                     self._xform_reanchor()                                # switch mode mid-transform
-                    self._xform['mode'] = {Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]
+                    self._xform['mode'] = {Qt.Key.Key_M: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]
                     self._xform['axis'] = None
                     self.update(); e.accept(); return
-            if self._xform is None and key in (Qt.Key.Key_P, Qt.Key.Key_R, Qt.Key.Key_S):
+            if self._xform is None and key in (Qt.Key.Key_M, Qt.Key.Key_R, Qt.Key.Key_S):
                 self.push_props_undo()                            # so Ctrl+Z reverts this transform
-                if self._xform_start({Qt.Key.Key_P: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]):
+                if self._xform_start({Qt.Key.Key_M: 'p', Qt.Key.Key_R: 'r', Qt.Key.Key_S: 's'}[key]):
                     e.accept(); return
                 elif self._props_undo_stack:
                     self._props_undo_stack.pop()                  # no prop to grab -> drop the snapshot
@@ -6377,6 +6377,36 @@ class ChamferTabBar(FillTabBar):
         p.end()
 
 
+def _bw_scrollbar_qss():
+    """Stylesheet for a black-and-white vertical scrollbar WITH up/down arrow buttons (the Output log).
+    Qt stylesheets draw arrows only from images, so two small white triangles are rendered once into
+    the temp dir and referenced by path."""
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "fases_ui")
+    os.makedirs(d, exist_ok=True)
+    paths = {}
+    for name, pts in (("up", [(1, 7), (5, 2), (9, 7)]), ("down", [(1, 3), (5, 8), (9, 3)])):
+        f = os.path.join(d, f"arrow_{name}.png")
+        if not os.path.isfile(f):
+            pm = QPixmap(10, 10); pm.fill(QColor(0, 0, 0, 0))
+            qp = QPainter(pm); qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+            qp.setPen(Qt.PenStyle.NoPen); qp.setBrush(QColor("#ffffff"))
+            qp.drawPolygon(QPolygon([QPoint(x, y) for x, y in pts])); qp.end()
+            pm.save(f, "PNG")
+        paths[name] = f.replace("\\", "/")
+    return (
+        "QScrollBar:vertical{background:#000000;width:14px;margin:14px 0 14px 0;border-left:1px solid #5a5a5a;}"
+        "QScrollBar::handle:vertical{background:#bdbdbd;min-height:22px;border-radius:3px;margin:2px;}"
+        "QScrollBar::handle:vertical:hover{background:#ffffff;}"
+        "QScrollBar::sub-line:vertical{background:#000000;height:14px;subcontrol-position:top;"
+        "subcontrol-origin:margin;border-bottom:1px solid #5a5a5a;}"
+        "QScrollBar::add-line:vertical{background:#000000;height:14px;subcontrol-position:bottom;"
+        "subcontrol-origin:margin;border-top:1px solid #5a5a5a;}"
+        f"QScrollBar::up-arrow:vertical{{image:url({paths['up']});width:10px;height:10px;}}"
+        f"QScrollBar::down-arrow:vertical{{image:url({paths['down']});width:10px;height:10px;}}"
+        "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:none;}")
+
+
 class DraggableProgress(QWidget):
     """
     A small progress bar pinned to the top-left corner of the 3D viewport.
@@ -6598,8 +6628,6 @@ class MainWindow(QMainWindow):
         self._slice_btn.clicked.connect(lambda: self._toggle_placement("slice"))
         place_bar.addWidget(self._slice_btn)
 
-        self._hint_lbl = QLabel("press  ?  in the 3D view for shortcuts")   # full cheatsheet is the ? overlay now
-        place_bar.addWidget(self._hint_lbl)
         place_bar.addStretch()
         # bottom-align the buttons so the bottom margin (not layout centering) sets their height,
         # landing them 8px above the bar bottom == the tab rows' 8px bottom margin.
@@ -6668,7 +6696,6 @@ class MainWindow(QMainWindow):
         self._gl.sliceChanged.connect(self._on_slice_changed)
         self._cfg['h'].valueChanged.connect(self._gl.set_grid_h)
         self._gl.set_grid_h(self._cfg['h'].value())
-        self._restyle_scene_theme()        # initial hint styling
         self._dirty = False; self._wire_dirty()   # track unsaved edits for the close prompt
 
         # ── auto-hide sliding tab panel (translate the fixed-width overlay) ──
@@ -7181,14 +7208,7 @@ class MainWindow(QMainWindow):
     def _toggle_scene_theme(self):
         """Flip the viewport between Dark and Light and repaint."""
         set_scene_mode(not SCENE_LIGHT_MODE)
-        self._restyle_scene_theme()
         self._gl.update()
-
-    def _restyle_scene_theme(self):
-        """Recolour the placement-hint text so it stays readable in both scene modes.
-        (The Dark/Light button was replaced by the RMB scene-menu toggle.)"""
-        hint_col = "#202020" if SCENE_LIGHT_MODE else PAL["subtext"]
-        self._hint_lbl.setStyleSheet(f"color:{hint_col};font-size:9px;")
 
     def _toggle_placement(self, kind):
         btns = {"source": self._src_btn, "receiver": self._rec_btn, "slice": self._slice_btn}
@@ -8033,6 +8053,7 @@ class MainWindow(QMainWindow):
         self._pml_all_btn = QPushButton("Deselect all")
         self._pml_all_btn.clicked.connect(self._toggle_all_pml)
         grid.addWidget(self._pml_all_btn, 2, 0, 1, 3)
+        root.addSpacing(14)                       # a bit more air between the sub-sections
         root.addWidget(pml_box)
 
         cfg_btns = QHBoxLayout()
@@ -8052,11 +8073,6 @@ class MainWindow(QMainWindow):
     # ── Sources tab ──────────────────────────────────────────
     def _build_src_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8)
-        info = QLabel("Press S (or the toolbar button) to enter placement mode.\n"
-                      "Drag LMB to position; hold X/Y/Z to lock an axis; release to place. Esc to finish.\n"
-                      "Or add rows manually below.")
-        info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
-        info.setWordWrap(True); lay.addWidget(info)
         self._src_tbl = PointTable(has_amplitude=True, has_freq=True)
         self._src_tbl.changed.connect(self._refresh_gl_points)
         self._src_tbl._tbl.itemSelectionChanged.connect(
@@ -8112,11 +8128,6 @@ class MainWindow(QMainWindow):
 
     def _build_rec_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8)
-        info = QLabel("Press R (or the toolbar button) to enter placement mode.\n"
-                      "Drag LMB to position; hold X/Y/Z to lock an axis; release to place. Esc to finish.\n"
-                      "Or add rows manually below.")
-        info.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
-        info.setWordWrap(True); lay.addWidget(info)
         self._rec_tbl = PointTable(has_amplitude=False, has_pose=True)
         self._rec_tbl.changed.connect(self._refresh_gl_points)
         self._rec_tbl._tbl.itemSelectionChanged.connect(
@@ -8540,7 +8551,11 @@ class MainWindow(QMainWindow):
         self._btn_rays = QPushButton("Trace rays"); self._btn_rays.clicked.connect(self._toggle_rays)
         self._btn_rays.setFixedHeight(24)
         rt.addWidget(self._btn_rays, 1)
-        lay.addWidget(rt_box)
+        # boxes live in an upper pane; the Output log in a lower pane of a vertical splitter, so the
+        # log's height is dragged by the handle between them (starts small, at the bottom).
+        upper = QWidget(); up = QVBoxLayout(upper); up.setContentsMargins(0, 0, 0, 0); up.setSpacing(8)
+        up.addWidget(rt_box)
+        up.addSpacing(14)                         # more air between the sub-sections
 
         # ── Animation: fps + slice-plane positions (or pick in scene with Slice [L]) ──
         an_box = QGroupBox("Animation \U0001F39E\uFE0E"); an = QGridLayout(an_box)
@@ -8612,7 +8627,8 @@ class MainWindow(QMainWindow):
         self._gl.frameChanged.connect(self._on_anim_frame)
         an.addWidget(self._anim_btn, 6, 0)
         an.addWidget(self._anim_slider, 6, 1, 1, 6)
-        lay.addWidget(an_box)
+        up.addWidget(an_box)
+        up.addSpacing(14)
 
         # ── Simulation: Fit impedances + Run/Stop ──
         sim_box = QGroupBox("Simulation ∿"); top = QHBoxLayout(sim_box); top.setSpacing(8)
@@ -8628,23 +8644,37 @@ class MainWindow(QMainWindow):
             f"background:{PAL['accent']};color:{PAL['bg']};font-weight:bold;padding:8px;")
         self._run_btn.clicked.connect(self._toggle_run)
         top.addWidget(self._run_btn, 1)
-        lay.addWidget(sim_box)
+        up.addWidget(sim_box)
+        up.addStretch(1)                          # spare height stays under the boxes
+        up.addWidget(QLabel("Output log"))        # right above the log's top border = the drag line
 
         # groups hug their content (don't inflate to fill the tab)
         from PySide6.QtWidgets import QSizePolicy
         for box in (rt_box, an_box, sim_box):
             box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        # ── output log ── fills all remaining height under the (fixed-height) boxes above
-        lay.addWidget(QLabel("Output log:"))
-        self._log = QTextEdit(); self._log.setReadOnly(True)
+        # ── output log ── lower splitter pane: starts small, drag the handle up to enlarge it
+        class _LogEdit(QTextEdit):
+            def sizeHint(self):                   # small default height; the splitter keeps it on resize
+                return QSize(300, 110)
+        lower = QWidget(); lo = QVBoxLayout(lower); lo.setContentsMargins(0, 0, 0, 0); lo.setSpacing(0)
+        self._log = _LogEdit(); self._log.setReadOnly(True)
         self._log.setFont(QFont("Monospace", 10))
-        self._log.setMinimumHeight(120)
+        self._log.setMinimumHeight(60)
         self._log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._log.setStyleSheet(
-            f"background:#000000;color:{PAL['text']};"
-            f"border:1px solid {PAL['border']};")
-        lay.addWidget(self._log, 1)         # stretch factor -> takes the leftover space
+            f"QTextEdit{{background:#000000;color:{PAL['text']};border:1px solid {PAL['border']};}}"
+            + _bw_scrollbar_qss())                 # black-and-white scrollbar with up/down arrows
+        lo.addWidget(self._log, 1)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(upper); split.addWidget(lower)
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0, 1); split.setStretchFactor(1, 0)   # window resizes go to the upper pane
+        split.setHandleWidth(6)
+        split.setStyleSheet("QSplitter::handle{background:transparent;}")   # invisible, on the log's top
+        #   border: the cursor turns into the up/down resize arrow there; drag to resize the log
+        lay.addWidget(split, 1)
+
 
         self._solver_thread = None
         self._aural_queue = []      # remaining source indices to run (auralization mode)
