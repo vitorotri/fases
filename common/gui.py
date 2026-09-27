@@ -6062,7 +6062,9 @@ class PointTable(QWidget):
 # ─────────────────────────────────────────────────────────────
 class SolverThread(QThread):
     output   = Signal(str)
-    progress = Signal(int)          # parsed NN% from the solver's progress bar
+    progress = Signal(int)          # parsed NN% from the solver's progress bar (FVM)
+    ga_progress = Signal(int, float)   # "[GA] progress NN% eta X s" (ray tracer, main3D)
+    ga_estimate = Signal(float)        # "[GA] estimate: X s ..." (timed on the first 2 % of rays)
     done     = Signal(int)          # NOT 'finished' (that shadows QThread's own)
 
     def __init__(self, cmd, cwd, stdin=False):
@@ -6082,6 +6084,8 @@ class SolverThread(QThread):
     def run(self):
         import re, shutil
         pct_re = re.compile(r"(\d+)\s*%")
+        ga_pct = re.compile(r"\[GA\] progress (\d+)% eta ([\d.]+) s")
+        ga_est = re.compile(r"\[GA\] estimate: ([\d.]+) s")
         # C stdout is block-buffered when piped (not a TTY), so printf() lines arrive in
         # bursts and are LOST if the solver aborts. Force line-buffering via stdbuf so every
         # line reaches the log live and survives a crash. (stderr is already unbuffered.)
@@ -6098,6 +6102,14 @@ class SolverThread(QThread):
             for line in self._proc.stdout:
                 line = line.rstrip()
                 self.output.emit(line)
+                if line.startswith("[GA]"):   # GA phase lines: own signals, not the FVM bar
+                    m = ga_pct.match(line)
+                    if m:
+                        self.ga_progress.emit(int(m.group(1)), float(m.group(2)))
+                    m = ga_est.match(line)
+                    if m:
+                        self.ga_estimate.emit(float(m.group(1)))
+                    continue
                 m = pct_re.search(line)        # e.g. "[====   ] 39%"
                 if m:
                     try: self.progress.emit(int(m.group(1)))
@@ -6375,9 +6387,12 @@ class DraggableProgress(QWidget):
         super().__init__(parent)
         self.setStyleSheet(
             f"background:{PAL['bg']};border:1px solid {PAL['border']};border-radius:5px;")
-        self.setFixedSize(220, 30)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 4, 8, 4); lay.setSpacing(6)
+        self.setFixedSize(300, 46)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 5); lay.setSpacing(3)
+        self._lbl = QLabel("")                     # "Source 2 of 4 (name) - FVM 37%"
+        self._lbl.setStyleSheet(f"border:none;background:transparent;color:{PAL['text']};font-size:10px;")
+        lay.addWidget(self._lbl)
         self._bar = QProgressBar()
         self._bar.setRange(0, 100); self._bar.setValue(0)
         self._bar.setTextVisible(True)
@@ -6392,6 +6407,9 @@ class DraggableProgress(QWidget):
 
     def setValue(self, v):
         self._bar.setValue(max(0, min(100, int(v))))
+
+    def setText(self, t):
+        self._lbl.setText(t)
 
 
 class MainWindow(QMainWindow):
@@ -9816,6 +9834,11 @@ class MainWindow(QMainWindow):
         self._tabs.setCurrentIndex(4)
 
         act_src = self._src_tbl.active_rows()           # table rows of the ACTIVE sources
+        self._batch_n = len(act_src) if (self._aural.isChecked() and len(act_src) > 1) else 1
+        self._batch_i = 0                                # runs finished in this batch
+        self._fvm_dur = self._ga_dur = None              # measured on the first run, reused for the rest
+        self._run_names = self._src_tbl.get_names()
+        self._cur_src = None if self._batch_n == 1 else act_src[0]
         if self._aural.isChecked() and len(act_src) > 1:
             # one run per active source (src index = its TABLE row); _on_solver_done chains the rest
             self._aural_first = act_src[0]                 # this one does the full purge
@@ -9842,7 +9865,11 @@ class MainWindow(QMainWindow):
         self._solver_thread = SolverThread(cmd, self._proj_root)
         self._solver_thread.output.connect(self._log.append)
         self._solver_thread.progress.connect(self._on_solver_progress)
+        self._solver_thread.ga_progress.connect(self._on_ga_progress)
+        self._solver_thread.ga_estimate.connect(self._on_ga_estimate)
         self._solver_thread.done.connect(self._on_solver_done)
+        self._t_ga_start = None; self._ga_est_cur = None   # this run's GA phase (set by main3D lines)
+        self._float_prog.setText(f"{self._run_label()} - starting")
         self._solver_thread.start()
 
     def _run_source(self, i):
@@ -9851,6 +9878,7 @@ class MainWindow(QMainWindow):
         per-source IR/HIR/ARR accumulate (else each run wipes the last)."""
         self._write_config(os.path.join(self._proj_root,"config","config.txt"), i)
         self._run_src_idx = i
+        self._cur_src = i
         # i is a TABLE row; solver frame (world + solver offset), exactly as save_file writes it
         pt = self._src_tbl.solver_values(i)
         with open(os.path.join(self._proj_root,"input","src","src.txt"), "w") as f:
@@ -9919,14 +9947,74 @@ class MainWindow(QMainWindow):
             return f"{s // 60}m {s % 60:02d}s"
         return f"{s}s"
 
+    def _run_label(self):
+        """Text above the progress bar: which source of the batch is running."""
+        n = getattr(self, "_batch_n", 1)
+        if n <= 1:
+            return "All sources" if len(self._src_tbl.active_rows()) > 1 else "Source"
+        i = getattr(self, "_cur_src", None)
+        names = getattr(self, "_run_names", [])
+        nm = names[i] if (i is not None and i < len(names) and names[i]) else f"row {i}"
+        return f"Source {getattr(self, '_batch_i', 0) + 1} of {n} ({nm})"
+
+    def _later_runs_s(self):
+        """Seconds for the runs still queued after this one, from the first run's measured FVM + GA
+        (same room, grid, rays and receivers for every source). None until both are known."""
+        q = len(getattr(self, "_aural_queue", []) or [])
+        if q == 0:
+            return 0.0
+        fv, ga = getattr(self, "_fvm_dur", None), getattr(self, "_ga_dur", None)
+        if fv is None or ga is None:
+            return None
+        return q * (fv + ga)
+
+    def _show_eta(self, phase, pct, phase_left, ga_left=None):
+        """Status bar: phase percent + time left (this phase, this run's GA if known, queued runs)."""
+        parts, total = [], phase_left
+        if ga_left is None and phase == "FVM":
+            ga_left = getattr(self, "_ga_dur", None)       # GA of an earlier source, if measured
+        if phase == "FVM":
+            if ga_left is None:
+                parts.append("GA timed after the FVM")
+            else:
+                total += ga_left
+        later = self._later_runs_s()
+        if later is None:
+            parts.append("other sources estimated after the first")
+        else:
+            total += later
+        extra = ("  (" + ", ".join(parts) + ")") if parts else ""
+        self._sb.showMessage(f"Simulating... {phase} {pct}%  -  about {self._fmt_eta(total)} left{extra}",
+                             priority=True)
+
     def _on_solver_progress(self, pct):
         self._float_prog.setValue(pct)
+        self._float_prog.setText(f"{self._run_label()} - FVM {pct}%")
         t0 = getattr(self, "_t_start", None)
         if t0 and pct > 0:                             # live ETA: extrapolate from elapsed / percent
             import time
             remaining = (time.time() - t0) * (100 - pct) / pct
-            self._sb.showMessage(f"Simulating… {pct}%  ·  ~{self._fmt_eta(remaining)} left",
-                                 priority=True)
+            self._show_eta("FVM", pct, remaining)
+
+    def _ga_phase_started(self):
+        import time
+        if self._t_ga_start is None:
+            self._t_ga_start = time.time()
+            self._fvm_cur = (0.0 if getattr(self, "_is_ga_only_run", False)
+                             else self._t_ga_start - getattr(self, "_t_start", self._t_ga_start))
+            self._float_prog.setValue(0)
+
+    def _on_ga_estimate(self, total_s):
+        """main3D timed the first 2 % of the rays: total ray-tracing time for this run."""
+        self._ga_phase_started()
+        self._ga_est_cur = total_s
+        self._float_prog.setText(f"{self._run_label()} - GA (estimate {self._fmt_eta(total_s)})")
+
+    def _on_ga_progress(self, pct, eta):
+        self._ga_phase_started()
+        self._float_prog.setValue(pct)
+        self._float_prog.setText(f"{self._run_label()} - GA {pct}%")
+        self._show_eta("GA", pct, eta)
 
     def _stop_solver(self):
         self._sb.hold = False       # user aborted: release the ETA hold
@@ -10222,6 +10310,13 @@ class MainWindow(QMainWindow):
 
     def _on_solver_done(self, rc):
         self._sb.hold = False       # run over: the status bar is everyone's again
+        if rc == 0:                 # measure this run's phases once: the queued sources reuse them
+            import time
+            t_ga = getattr(self, "_t_ga_start", None)
+            if t_ga is not None and getattr(self, "_ga_dur", None) is None:
+                self._fvm_dur = getattr(self, "_fvm_cur", 0.0)
+                self._ga_dur = time.time() - t_ga
+            self._batch_i = getattr(self, "_batch_i", 0) + 1
         if rc == 0:
             try:
                 self._rename_run_outputs()
@@ -10248,8 +10343,11 @@ class MainWindow(QMainWindow):
         self._log.append(
             f'<span style="color:{c};">{"[OK]" if rc==0 else "[FAIL]"}  rc={rc}</span>')
         self._sb.showMessage(f"Solver finished  (rc={rc})")
+        n = getattr(self, "_batch_n", 1)
+        self._float_prog.setText((f"All {n} sources done" if n > 1 else "Done") if rc == 0
+                                 else f"{self._run_label()} - failed (rc={rc})")
         # hide the floating bar shortly after completion
-        QTimer.singleShot(1500, self._float_prog.hide)
+        QTimer.singleShot(2500, self._float_prog.hide)
 
 
 # ─────────────────────────────────────────────────────────────

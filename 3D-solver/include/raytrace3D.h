@@ -42,6 +42,10 @@ decoupled from the material/impedance code.
 #include <cmath>
 #include <cfloat>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <numeric>
 
 #ifndef RT_NBANDS
 #define RT_NBANDS 8   // octave bands, matches the ISM section in main3D.cu
@@ -425,6 +429,22 @@ inline static void rt_trace_late(const RTScene& S,
     // Note the two pi-family constants differ by role: SOURCE uses 4 pi (free monopole, full
     // sphere); a SCATTER patch uses 1/pi (cosine-weighted hemisphere).
     // =====================================================================================
+    // GA TIMING for the GUI. Rays are traced in a SPREAD order (index stride P coprime with Nrays,
+    // ~golden ratio), because Fibonacci ray numbers run pole to pole: the first 2 % traced are then
+    // a uniform sample of ALL directions, so their time extrapolates to the whole run (rays x
+    // bounces, t_end, receivers and scene are all inside the measurement). Results are unchanged:
+    // each ray's direction and random draws depend on its number only, not on when it is traced.
+    const long long NT = (long long)Ns * (long long)Nrays;
+    long long P = (long long)(0.6180339887 * Nrays) | 1;
+    while (P > 1 && std::gcd(P, (long long)Nrays) != 1) P += 2;
+    if (P < 1 || Nrays < 3) P = 1;
+    std::atomic<long long> rays_done{0};
+    const long long n_sample = std::max(1LL, NT / 50);          // estimate after 2 %
+    const long long n_step   = std::max(1LL, NT / 20);          // progress line every 5 %
+    const auto t_rt0 = std::chrono::steady_clock::now();
+    auto rt_elapsed = [&]{ return std::chrono::duration<double>(std::chrono::steady_clock::now() - t_rt0).count(); };
+    std::printf("[GA] tracing %lld rays (%d source(s) x %d)\n", NT, Ns, Nrays); std::fflush(stdout);
+
 	// for each source
     for(int s = 0; s < Ns; s++){
         const vec3 o0 = xform(src_arr[(size_t)(3*s)],src_arr[(size_t)(3*s+1)],src_arr[(size_t)(3*s+2)]); // source in solver space
@@ -446,7 +466,8 @@ inline static void rt_trace_late(const RTScene& S,
         #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic)
         #endif
-        for(int ri = 0; ri < Nrays; ri++){			// breadth: independent samples
+        for(int rk = 0; rk < Nrays; rk++){			// breadth: independent samples
+            const int ri = (int)(((long long)rk * P) % Nrays);   // spread order (see GA TIMING)
             ray3 r = rt_fib_ray(o0, ri, Nrays);		// depth: one linear path, in place
             float Rp[RT_NBANDS]; for(int b = 0; b < RT_NBANDS; b++) Rp[b]=1.f; // amplitude reflection product
             float d_travel = 0.f;            		// path length travelled so far [m]
@@ -600,8 +621,25 @@ inline static void rt_trace_late(const RTScene& S,
                 r.ox=p1.x + ref.x*1e-4f; r.oy=p1.y + ref.y*1e-4f; r.oz=p1.z + ref.z*1e-4f;
                 r.dx=ref.x; r.dy=ref.y; r.dz=ref.z;
             }
+            const long long k = ++rays_done;                    // this ray is finished
+            if (k == n_sample || k % n_step == 0 || k == NT){
+                const double el = rt_elapsed();
+                #ifdef _OPENMP
+                #pragma omp critical(rt_progress)
+                #endif
+                {
+                    if (k == n_sample)
+                        std::printf("[GA] estimate: %.1f s for all rays (timed on %lld of %lld)\n",
+                                    el * (double)NT / (double)k, k, NT);
+                    if (k % n_step == 0 || k == NT)
+                        std::printf("[GA] progress %d%% eta %.1f s\n", (int)(100LL * k / NT),
+                                    el * (double)(NT - k) / (double)k);
+                    std::fflush(stdout);
+                }
+            }
         }
     }
+    std::printf("[GA] rays traced in %.1f s\n", rt_elapsed()); std::fflush(stdout);
     // e_spec / e_diff hold physical ENERGY (not rooted). main sums the required channels
     // per bin and takes sqrt -> pressure (see the header note above).
 }

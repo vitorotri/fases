@@ -1550,7 +1550,11 @@ int main(int argc, char *argv[]){
 	int max_order = (conf_arr.size() > 12) ? (int)conf_arr[12] : 3;
 	if (max_order < 0) max_order = 0;
 	printf("\n[OK] ISM max_order = %d\n", max_order);
+	const auto t_ism0 = std::chrono::steady_clock::now();
 	ISMResult Q = ism_solve(sc, src_arr, rec_arr, {}, Z, max_order, src_pressure_Pa, cfg); // gets main values for IRs
+	printf("[GA] image sources: %.1f s\n",
+	       std::chrono::duration<double>(std::chrono::steady_clock::now() - t_ism0).count());
+	fflush(stdout);
 
 	// Ray-traced late tail: build BVH scene ONCE (before the mesh is freed); the
 	// tracer continues the ISM past max_order into the reverberant tail.
