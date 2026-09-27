@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QScrollArea, QAbstractItemView, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QStatusBar, QSlider, QMenu, QProgressBar, QDialog,
-    QStyledItemDelegate, QStyle, QRadioButton, QButtonGroup, QDial
+    QStyledItemDelegate, QStyle, QRadioButton, QButtonGroup, QDial, QComboBox
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL  import *
@@ -929,6 +929,11 @@ class GLViewer(QOpenGLWidget):
         self._groups = []   # {name, tris, color, visible, is_bbox}
         self._ray_paths = {}     # ray-tracer overlay: {ray_id: [(p0,p1,order), ...]} world coords
         self._ray_src   = {}     # ray_id -> source index it was launched from
+        self._ray_gid   = {}     # ray_id -> [surface group id each segment ends on] (-1 escaped; None: old file)
+        self._ray_groups = {}    # group id -> layer name (from ray_paths.txt '# group' lines)
+        self._ray_filter = None  # None = all rays; else a set of group ids: only rays hitting them
+        self._ray_filter_names = None   # the chosen layer name(s); resolved to ids when rays load
+        self._ray_trunc  = True  # filtered rays drawn only up to the segment leaving that surface
         self._selected_ray = None
         self._show_rays = True
         self._bbox_visible  = False
@@ -2964,29 +2969,117 @@ class GLViewer(QOpenGLWidget):
         """Load ray_paths.txt (segment/line: src_id ray_id x0 y0 z0 x1 y1 z1 order) from
         the solver's --dump-rays pass. World coords, so it overlays the raw OBJ. Groups
         segments by ray_id (unique across sources); records each ray's source index."""
-        rays = {}; srcs = {}
+        rays = {}; srcs = {}; gids = {}; groups = {}
         try:
             with open(path) as f:
                 for ln in f:
+                    if ln.startswith("#"):                 # "# group <id> <name>" (newer solvers)
+                        q = ln.split(None, 3)
+                        if len(q) == 4 and q[1] == "group":
+                            groups[int(q[2])] = q[3].strip()
+                        continue
                     p = ln.split()
                     if len(p) < 9:
                         continue
                     sid = int(float(p[0])); rid = int(float(p[1]))
                     x0,y0,z0,x1,y1,z1 = (float(v) for v in p[2:8])
                     rays.setdefault(rid, []).append(((x0,y0,z0), (x1,y1,z1), int(float(p[8]))))
+                    gids.setdefault(rid, []).append(int(float(p[9])) if len(p) > 9 else None)
                     srcs[rid] = sid
         except OSError:
             return {}
         self._ray_paths = rays
         self._ray_src = srcs
+        self._ray_gid = gids
+        self._ray_groups = groups
+        if not groups or all(v is None for g in gids.values() for v in g):
+            self._infer_ray_groups()              # older main3D: find the surfaces from the mesh
+        self._resolve_ray_filter()                # a surface picked before tracing applies now
         self._selected_ray = None
         self._show_rays = True
         self.update()
         return rays
 
+    def _infer_ray_groups(self):
+        """Which layer each ray segment ENDS on, found from the loaded mesh (for ray_paths.txt from a
+        main3D without the surface column): the triangle whose plane holds the end point (within a
+        small tolerance) and whose area contains its projection. Ids = indices into self._groups.
+        ponytail: loops over end points in chunks x all triangles; fine for the debug overlay's
+        hundreds to a few thousand points, slow for 100k+."""
+        V = np.asarray(self._verts, np.float64)
+        A, B, C, G = [], [], [], []
+        for gi, g in enumerate(self._groups):
+            if g.get("is_bbox") or not len(g["tris"]):
+                continue
+            T = np.asarray(g["tris"])
+            A.append(V[T[:, 0]]); B.append(V[T[:, 1]]); C.append(V[T[:, 2]]); G.append(np.full(len(T), gi))
+        if not A:
+            return
+        A, B, C, G = (np.concatenate(x) for x in (A, B, C, G))
+        e1, e2 = B - A, C - A
+        n = np.cross(e1, e2); nn = np.linalg.norm(n, axis=1); ok = nn > 1e-12
+        nu = np.where(ok[:, None], n / np.where(ok, nn, 1.0)[:, None], 0.0)
+        d11, d12, d22 = (e1 * e1).sum(1), (e1 * e2).sum(1), (e2 * e2).sum(1)
+        den = np.where(ok, d11 * d22 - d12 * d12, 1.0)
+        span = float(np.linalg.norm(V.max(0) - V.min(0))) if len(V) else 1.0
+        tol_d, tol_b = 2e-3 * span, 1e-3
+        pts, where = [], []
+        for rid, segs in self._ray_paths.items():
+            for k, (p0, p1, order) in enumerate(segs):
+                if order >= 0:
+                    pts.append(p1); where.append((rid, k))
+        out = {rid: [-1] * len(segs) for rid, segs in self._ray_paths.items()}
+        P = np.asarray(pts, np.float64)
+        for i0 in range(0, len(P), 64):
+            p = P[i0:i0 + 64][:, None, :]                              # (m,1,3)
+            w = p - A[None]                                            # (m,T,3)
+            dist = np.abs((w * nu[None]).sum(2))
+            q = w - (w * nu[None]).sum(2)[..., None] * nu[None]        # projection, relative to A
+            d1, d2 = (q * e1[None]).sum(2), (q * e2[None]).sum(2)
+            u = (d22 * d1 - d12 * d2) / den; v = (d11 * d2 - d12 * d1) / den
+            inside = ok[None] & (u >= -tol_b) & (v >= -tol_b) & (u + v <= 1 + tol_b) & (dist <= tol_d)
+            dist = np.where(inside, dist, np.inf)
+            best = dist.argmin(1)
+            for j, bi in enumerate(best):
+                if np.isfinite(dist[j, bi]):
+                    rid, k = where[i0 + j]
+                    out[rid][k] = int(G[bi])
+        self._ray_gid = out
+        self._ray_groups = {gi: g["name"] for gi, g in enumerate(self._groups) if not g.get("is_bbox")}
+
+    def set_ray_filter(self, names, truncate=True):
+        """Show only rays that hit one of the layers `names` (None = all rays); may be set before any
+        trace. truncate: draw such a ray only up to the segment LEAVING that surface (first hit on it)."""
+        self._ray_filter_names = set(names) if names else None
+        self._ray_trunc = bool(truncate)
+        self._resolve_ray_filter()
+        self.update()
+
+    def _resolve_ray_filter(self):
+        nm = getattr(self, "_ray_filter_names", None)
+        self._ray_filter = (None if nm is None else
+                            {gid for gid, name in self._ray_groups.items() if name in nm})
+
+    def _ray_segs_shown(self, rid, segs):
+        """The segments of ray rid to draw under the current surface filter (None = hidden)."""
+        if self._ray_filter is None:
+            return segs
+        g = self._ray_gid.get(rid) or []
+        k = next((i for i, v in enumerate(g) if v in self._ray_filter), None)
+        if k is None:
+            return None
+        return segs[:k + 2] if self._ray_trunc else segs
+
+    def rays_hitting(self):
+        """Number of traced rays that pass the current surface filter."""
+        return sum(1 for rid, segs in self._ray_paths.items() if self._ray_segs_shown(rid, segs) is not None)
+
     def clear_ray_paths(self):
         self._ray_paths = {}
         self._ray_src = {}
+        self._ray_gid = {}
+        self._ray_groups = {}                     # the chosen surface (names) is kept for the next trace
+        self._resolve_ray_filter()
         self._selected_ray = None
         self.update()
 
@@ -3003,6 +3096,9 @@ class GLViewer(QOpenGLWidget):
         glBegin(GL_LINES)
         for rid, segs in self._ray_paths.items():
             if rid == self._selected_ray:
+                continue
+            segs = self._ray_segs_shown(rid, segs)          # surface filter (Ray-Tracing box)
+            if segs is None:
                 continue
             for p0, p1, order in segs:
                 glColor4f(*(self.RAY_ESCAPE if order < 0 else self.RAY_COLOR),
@@ -4687,6 +4783,12 @@ class MaterialPanel(QWidget):
 
         # ── hard/soft toggle for the selected layer + Save all .mat, one row ──
         hs = QHBoxLayout()
+        self._all_btn = QPushButton("Deactivate all")   # every layer's check box at once
+        self._all_btn.setFixedHeight(24)
+        self._all_btn.setToolTip("Activate / deactivate every layer (deactivated = hidden and not simulated)")
+        self._all_btn.clicked.connect(self._toggle_all_layers)
+        hs.addWidget(self._all_btn)
+        hs.addWidget(self._save_btn)             # Save all .mat, then the hard/soft switch
         self._soft_btn = ToggleSwitch()          # small on/off slider switch
         self._soft_btn.toggled.connect(self._on_soft_toggled)
         hs.addWidget(self._soft_btn)
@@ -4694,7 +4796,6 @@ class MaterialPanel(QWidget):
         self._soft_lbl.setStyleSheet(f"color:{PAL['text']};font-size:11px;")
         hs.addWidget(self._soft_lbl)
         hs.addStretch(1)
-        hs.addWidget(self._save_btn)             # Save all .mat, right of the toggle
         lay.addLayout(hs)
 
     # ── curve editor bridge ──
@@ -4952,6 +5053,7 @@ class MaterialPanel(QWidget):
                               QTableWidgetItem(f"{self._load_sctr_value(name):.2f}"))  # Scatter col
             self._set_row_soft(r, soft)   # after the cells exist
         self._tbl.blockSignals(False)
+        self._update_all_btn()
         # always land on a selected material so value edits attribute to a row
         # (an unselected table silently dropped edits -> stale-check missed them).
         if self._tbl.rowCount() > 0:
@@ -5125,6 +5227,26 @@ class MaterialPanel(QWidget):
                 self._undo_stack.pop(0)
         self._prev = self._snapshot()
 
+    def _layer_items(self):
+        return [it for it in (self._tbl.item(r, 0) for r in range(self._tbl.rowCount()))
+                if it is not None and (it.flags() & Qt.ItemFlag.ItemIsUserCheckable)]
+
+    def _toggle_all_layers(self):
+        """Any layer active -> deactivate all; none active -> activate all. Each row goes through the
+        normal check-box path (_on_item_changed -> layerActiveChanged), exactly like clicking it."""
+        items = self._layer_items()
+        target = (Qt.CheckState.Unchecked if any(it.checkState() == Qt.CheckState.Checked for it in items)
+                  else Qt.CheckState.Checked)
+        for it in items:
+            if it.checkState() != target:
+                it.setCheckState(target)
+        self._update_all_btn()
+
+    def _update_all_btn(self):
+        if hasattr(self, "_all_btn"):
+            on = any(it.checkState() == Qt.CheckState.Checked for it in self._layer_items())
+            self._all_btn.setText("Deactivate all" if on else "Activate all")
+
     def set_layer_active(self, name, active):
         """Programmatic check-box state for a layer (no signal)."""
         for r in range(self._tbl.rowCount()):
@@ -5134,6 +5256,7 @@ class MaterialPanel(QWidget):
                 it.setCheckState(Qt.CheckState.Checked if active else Qt.CheckState.Unchecked)
                 self._tbl.blockSignals(False)
                 self._active_state[name] = bool(active)
+                self._update_all_btn()
                 return
 
     def _on_item_changed(self, item=None, *_):
@@ -5145,6 +5268,7 @@ class MaterialPanel(QWidget):
             if getattr(self, "_active_state", {}).get(item.text(), True) != st:
                 self._active_state[item.text()] = st
                 self.layerActiveChanged.emit(item.text(), st)
+                self._update_all_btn()
                 return
         # a single manual/programmatic cell edit: record pre-edit state, then replot
         self._push_undo()
@@ -8539,7 +8663,8 @@ class MainWindow(QMainWindow):
         self._bin_le.setVisible(False)        # path lives in SOLVER_BINARY now
 
         # ── Ray-Tracing: debug ray overlay (count + order + Trace/Clear) ──
-        rt_box = QGroupBox("☈ay-Tracing"); rt = QHBoxLayout(rt_box); rt.setSpacing(8)
+        rt_box = QGroupBox("☈ay-Tracing"); rtv = QVBoxLayout(rt_box); rtv.setSpacing(6)
+        rt = QHBoxLayout(); rt.setSpacing(8); rtv.addLayout(rt)
         rt.addWidget(QLabel("Track rays ↯"))
         self._dbg_rays = QSpinBox(); self._dbg_rays.setRange(1, 5000)
         self._dbg_rays.setValue(64); self._dbg_rays.setMinimumWidth(70)
@@ -8550,7 +8675,15 @@ class MainWindow(QMainWindow):
         rt.addWidget(self._dbg_order)
         self._btn_rays = QPushButton("Trace rays"); self._btn_rays.clicked.connect(self._toggle_rays)
         self._btn_rays.setFixedHeight(24)
-        rt.addWidget(self._btn_rays, 1)
+        rt.addStretch(1)
+        # second row: show only the rays that hit one surface (filter on the traced paths, no re-trace)
+        rt2 = QHBoxLayout(); rt2.setSpacing(8); rtv.addLayout(rt2)
+        rt2.addWidget(QLabel("Surface"))
+        self._ray_surf = QComboBox(); self._ray_surf.addItem("All surfaces"); self._ray_surf.setEnabled(False)
+        self._ray_surf.setToolTip("Show only the traced rays that hit this surface (pick before or after tracing)")
+        self._ray_surf.currentIndexChanged.connect(self._on_ray_surface)
+        rt2.addWidget(self._ray_surf, 1)              # shares the row with Trace rays
+        rt2.addWidget(self._btn_rays, 1)
         # boxes live in an upper pane; the Output log in a lower pane of a vertical splitter, so the
         # log's height is dragged by the handle between them (starts small, at the bottom).
         upper = QWidget(); up = QVBoxLayout(upper); up.setContentsMargins(0, 0, 0, 0); up.setSpacing(8)
@@ -9157,6 +9290,7 @@ class MainWindow(QMainWindow):
         print(f"[OBJ] Parsed {len(groups)} groups: [{shown}]")
         self._gl.load_mesh(verts, groups)
         self._sketch_shadow()               # sketch window open -> its scene shadow follows the new mesh
+        self._fill_ray_surfaces()           # Ray-Tracing 'Surface' list = this scene's layers
         self._populate_layers(groups)
         if self._proj_root:
             self._write_manifest()          # persist the scene path on open/load
@@ -10244,6 +10378,7 @@ class MainWindow(QMainWindow):
         if rc == 0:
             paths = self._gl.load_ray_paths(
                 os.path.join(self._proj_root, "output", "ray_paths.txt"))
+            self._on_ray_surface()                  # apply the chosen surface to the new rays
             self._populate_ray_table()
             nsrc = len(set(self._gl._ray_src.values()))
             self._sb.showMessage(f"Traced {len(paths)} rays from {nsrc} source(s) — "
@@ -10289,13 +10424,39 @@ class MainWindow(QMainWindow):
         t.clearSelection()
         self._ray_dock.show(); self._ray_dock.raise_()
 
+    def _fill_ray_surfaces(self):
+        """Surface dropdown = the scene's layers (bounding box left out), filled when a scene loads, so a
+        surface can be picked BEFORE tracing. Keeps the current choice if that layer still exists."""
+        cb = getattr(self, "_ray_surf", None)
+        if cb is None:
+            return
+        keep = cb.currentData()
+        cb.blockSignals(True)
+        cb.clear(); cb.addItem("All surfaces")
+        names = sorted({g["name"] for g in getattr(self._gl, "_groups", []) if not g.get("is_bbox")},
+                       key=str.lower)
+        for name in names:
+            cb.addItem(name, name)
+        i = cb.findData(keep) if keep is not None else -1
+        cb.setCurrentIndex(i if i >= 0 else 0)
+        cb.setEnabled(cb.count() > 1)
+        cb.blockSignals(False)
+        self._on_ray_surface()
+
+    def _on_ray_surface(self, *_):
+        name = self._ray_surf.currentData()
+        self._gl.set_ray_filter(None if name is None else [name])   # rays drawn up to leaving that surface
+        if name is not None and self._gl._ray_paths:
+            n, tot = self._gl.rays_hitting(), len(self._gl._ray_paths)
+            self._sb.showMessage(f"{n} of {tot} traced rays hit {name}")
+
     def _on_ray_row_selected(self):
         rows = self._ray_tbl.selectionModel().selectedRows()
         rid = int(self._ray_tbl.item(rows[0].row(), 1).text()) if rows else None
         self._gl.set_selected_ray(rid)
 
     def _clear_rays(self):
-        self._gl.clear_ray_paths()
+        self._gl.clear_ray_paths()                # the chosen surface stays for the next trace
         self._btn_rays.setText("Trace rays")
         if getattr(self, "_ray_dock", None) is not None:
             self._ray_tbl.setRowCount(0)

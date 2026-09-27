@@ -338,7 +338,7 @@ int main(int argc, char *argv[]){
 			int Ndbg = (dump_nrays > 0) ? dump_nrays
 			         : ((conf_arr.size() > 14) ? std::max(1, (int)conf_arr[14]) : 200);
 			int Mdbg = (dump_order > 0) ? dump_order : 5;
-			rt_dump_paths(rtS, srcs, Ndbg, Mdbg, out_file("ray_paths.txt").c_str());
+			rt_dump_paths(rtS, srcs, Ndbg, Mdbg, out_file("ray_paths.txt").c_str(), &sc.group_names);
 			printf("\n[OK] dumped %d ray paths (max order %d) -> output/ray_paths.txt\n", Ndbg, Mdbg);
 			scene_free(&sc);
 			return 0;

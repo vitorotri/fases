@@ -39,6 +39,7 @@ decoupled from the material/impedance code.
 
 #include "parsing3D.h"
 #include <vector>
+#include <string>
 #include <cmath>
 #include <cfloat>
 #include <algorithm>
@@ -654,9 +655,15 @@ inline static void rt_trace_late(const RTScene& S,
 // one stub segment of the scene-diagonal length so the launch direction stays visible.
 // ============================================================
 inline static void rt_dump_paths(const RTScene& S, const std::vector<vec3>& srcs,
-                                 int Nrays, int max_order, const char* file){
+                                 int Nrays, int max_order, const char* file,
+                                 const std::vector<std::string>* group_names = nullptr){
     std::FILE* f = std::fopen(file, "w");
     if(!f) return;
+    // "# group <id> <name>" per surface, so the GUI can filter rays by the surface they hit; the
+    // 10th column of every segment line is the group id of the surface it ENDS on (-1 = escaped).
+    if(group_names)
+        for(size_t g = 0; g < group_names->size(); g++)
+            std::fprintf(f, "# group %d %s\n", (int)g, (*group_names)[g].c_str());
     if(S.nodes.empty() || srcs.empty()){ std::fclose(f); return; }
 
     // world <-> solver: solver = (world + shift)*scale ; world = solver/scale - shift
@@ -681,8 +688,9 @@ inline static void rt_dump_paths(const RTScene& S, const std::vector<vec3>& srcs
                 const vec3 p = hit ? add3(o, mul3(d, th)) : add3(o, mul3(d, stub));
                 const vec3 ow = to_world(o), pw = to_world(p);
                 const int seg_order = hit ? b : -1;   // -1 flags an escaped (leaked) stub
-                std::fprintf(f, "%d %d %.6g %.6g %.6g %.6g %.6g %.6g %d\n",
-                             (int)si, uid, ow.x,ow.y,ow.z, pw.x,pw.y,pw.z, seg_order);
+                const int seg_group = hit ? S.group[(size_t)tri] : -1;   // surface hit at the segment end
+                std::fprintf(f, "%d %d %.6g %.6g %.6g %.6g %.6g %.6g %d %d\n",
+                             (int)si, uid, ow.x,ow.y,ow.z, pw.x,pw.y,pw.z, seg_order, seg_group);
                 if(!hit) break;                       // escaped: stub drawn, stop
                 vec3 N = rt_tri_normal(S, tri);
                 vec3 ref; rt_compute_reflected(ref, d, N);
