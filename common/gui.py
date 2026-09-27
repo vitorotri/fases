@@ -6390,7 +6390,7 @@ class DraggableProgress(QWidget):
         self.setFixedSize(300, 46)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 4, 8, 5); lay.setSpacing(3)
-        self._lbl = QLabel("")                     # "Source 2 of 4 (name) - FVM 37%"
+        self._lbl = QLabel("")                     # "Source 2 of 4 (name) - FVM" (the bar shows the %)
         self._lbl.setStyleSheet(f"border:none;background:transparent;color:{PAL['text']};font-size:10px;")
         lay.addWidget(self._lbl)
         self._bar = QProgressBar()
@@ -9989,7 +9989,7 @@ class MainWindow(QMainWindow):
 
     def _on_solver_progress(self, pct):
         self._float_prog.setValue(pct)
-        self._float_prog.setText(f"{self._run_label()} - FVM {pct}%")
+        self._float_prog.setText(f"{self._run_label()} - FVM")
         t0 = getattr(self, "_t_start", None)
         if t0 and pct > 0:                             # live ETA: extrapolate from elapsed / percent
             import time
@@ -10013,7 +10013,7 @@ class MainWindow(QMainWindow):
     def _on_ga_progress(self, pct, eta):
         self._ga_phase_started()
         self._float_prog.setValue(pct)
-        self._float_prog.setText(f"{self._run_label()} - GA {pct}%")
+        self._float_prog.setText(f"{self._run_label()} - GA")
         self._show_eta("GA", pct, eta)
 
     def _stop_solver(self):

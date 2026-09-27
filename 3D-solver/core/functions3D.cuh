@@ -1393,9 +1393,9 @@ void print_progress(int n, int Nt, int bar_width) {
 }
 
 void print_progress_nobar(int n, int Nt) {
-    // Print JUST the integer percentage, one per line, at each 10% tick (and at the very end),
+    // Print JUST the integer percentage, one per line, at each 5% tick (and at the very end),
     // so the GUI can parse "NN%" and drive its progress bar. No bar, no '\r' -> clean log lines.
-    int step = Nt / 10; if (step < 1) step = 1;   // guard tiny Nt (avoid n % 0)
+    int step = Nt / 20; if (step < 1) step = 1;   // guard tiny Nt (avoid n % 0)
     if ((n % step) == 0 || n == Nt) {
         printf("%d%%\n", (int)(100.0 * n / Nt + 0.5));
         fflush(stdout);
