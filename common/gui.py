@@ -10290,7 +10290,13 @@ class MainWindow(QMainWindow):
         """Text above the progress bar: which source of the batch is running."""
         n = getattr(self, "_batch_n", 1)
         if n <= 1:
-            return "All sources" if len(self._src_tbl.active_rows()) > 1 else "Source"
+            act = self._src_tbl.active_rows()
+            if len(act) > 1:
+                return f"All {len(act)} sources"
+            names = self._src_tbl.get_names()
+            i = act[0] if act else 0
+            nm = names[i] if (i < len(names) and names[i]) else f"row {i}"
+            return f"Source {nm}"
         i = getattr(self, "_cur_src", None)
         names = getattr(self, "_run_names", [])
         nm = names[i] if (i is not None and i < len(names) and names[i]) else f"row {i}"
