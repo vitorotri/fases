@@ -8841,7 +8841,7 @@ class MainWindow(QMainWindow):
         rt_box = QGroupBox("☈ay-Tracing"); rtv = QVBoxLayout(rt_box); rtv.setSpacing(6)
         rt = QHBoxLayout(); rt.setSpacing(8); rtv.addLayout(rt)
         rt.addWidget(QLabel("Track rays ↯"))
-        self._dbg_rays = QSpinBox(); self._dbg_rays.setRange(1, 5000)
+        self._dbg_rays = QSpinBox(); self._dbg_rays.setRange(1, 50000)
         self._dbg_rays.setValue(64); self._dbg_rays.setMinimumWidth(70)
         rt.addWidget(self._dbg_rays)
         rt.addWidget(QLabel("Order"))
