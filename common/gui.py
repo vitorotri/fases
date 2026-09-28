@@ -971,6 +971,9 @@ class GLViewer(QOpenGLWidget):
         self._props_mode = False      # Draw mode: P/R/S transform props (and src/rec placement locked)
         self._xform     = None        # active modal transform: {mode,axis,idxs,bases,anchor}
         self._copy_arm  = False       # C pressed: next LMB drag draws a box to pick props to copy
+        self._group_arm = False       # G pressed: next LMB drag draws a box to pick a GROUP of props
+        self._rect_group = False      # the current rubber band is a group box (not copy / surface / points)
+        self._prop_group = []         # prop indices picked with G: M / R / S act on all of them
         self._rect      = None        # [QPointF start, QPointF cur] rubber-band box while selecting
         self._props_undo_stack = []   # pre-op snapshots (list of Prop dicts) for Ctrl+Z on prop ops
         self._ortho     = False       # orthographic top-down projection (plan view for placement)
@@ -2370,7 +2373,7 @@ class GLViewer(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE)
         for i, p in enumerate(self._props):
             verts, tris = p.world()
-            sel = (i == self._prop_sel)
+            sel = (i == self._prop_sel) or (i in self._prop_group)
             r, g, b = self._layer_color(p.layer)
             glColor4f(r, g, b, 1.0 if sel else 0.9)
             glBegin(GL_TRIANGLES)
@@ -2391,16 +2394,32 @@ class GLViewer(QOpenGLWidget):
             self._xform = None; self.update()
 
     def _find_nearest_prop(self, qpos, radius=60.0):
-        """Index of the prop whose center projects nearest the cursor (within radius px), else -1."""
+        """Index of the prop under the cursor: the nearest prop SURFACE hit by the pixel ray; else the prop
+        whose bounding-box centre projects nearest the cursor (within radius px); else -1. (p.pos is not
+        the centre for corner-anchored meshes like wedge/stairs/skyline, hence the bbox centre.)"""
         if not self._props:
             return -1
         self.makeCurrent()
         W, H = self.width(), self.height(); vp = [0, 0, int(W), int(H)]
+        worlds = [p.world() for p in self._props]
+        try:
+            ro, rd = ray_from_screen(qpos.x(), qpos.y(), W, H, self._mv, self._proj)
+            best_t, bi = None, -1
+            for i, (v, t) in enumerate(worlds):
+                if len(t):
+                    th = ray_group_hit(np.asarray(ro, np.float64), np.asarray(rd, np.float64),
+                                       np.asarray(v, np.float64), np.asarray(t))
+                    if th is not None and (best_t is None or th < best_t):
+                        best_t, bi = th, i
+            if bi >= 0:
+                return bi
+        except Exception:
+            pass
         best, bi = radius, -1
-        for i, p in enumerate(self._props):
+        for i, (v, _) in enumerate(worlds):
             try:
-                sx, sy, _ = gluProject(float(p.pos[0]), float(p.pos[1]), float(p.pos[2]),
-                                       self._mv, self._proj, vp)
+                va = np.asarray(v, np.float64); c = (va.min(0) + va.max(0)) / 2.0
+                sx, sy, _ = gluProject(float(c[0]), float(c[1]), float(c[2]), self._mv, self._proj, vp)
                 d = math.hypot(sx - qpos.x(), (H - sy) - qpos.y())
                 if d < best:
                     best, bi = d, i
@@ -2438,8 +2457,13 @@ class GLViewer(QOpenGLWidget):
         if not self._props:
             return False
         cpos = self.mapFromGlobal(QCursor.pos())
+        self._prop_group = [i for i in self._prop_group if 0 <= i < len(self._props)]
+        if idxs is None and self._prop_group:                    # a G-picked group: transform all of it
+            idxs = list(self._prop_group)
         if idxs is None:
-            idx = self._prop_sel if 0 <= self._prop_sel < len(self._props) else self._find_nearest_prop(cpos)
+            idx = self._find_nearest_prop(cpos)                  # the prop under/near the mouse first,
+            if idx < 0 and 0 <= self._prop_sel < len(self._props):   # else the selected one
+                idx = self._prop_sel
             if idx < 0:
                 return False
             idxs = [idx]; self._prop_sel = idx
@@ -2484,19 +2508,11 @@ class GLViewer(QOpenGLWidget):
         m = float(z.max()) if z.size else -np.inf
         return None if m == -np.inf else m
 
-    def _drop_prop(self, i, exclude=None):
-        """Rest prop i's bottom on the highest surface (stage/floor/other prop) directly beneath its
-        footprint; fall back to the domain floor. Sampled at the footprint centre + corners."""
-        if not (0 <= i < len(self._props)):
-            return
-        p = self._props[i]
-        v = np.asarray(p.world()[0], float)
-        amn, amx = v.min(0), v.max(0)
-        top = 0.0                                              # fallback: rest base at z=0 (room floor)
-        lift = PROP_LIFT.get(p.source) if p.kind == "primitive" else None
-        if lift is not None:                                   # lifted props measure from the ROOM floor,
-            exclude = set(range(len(self._props)))             # never from another prop (no diffuser on a table)
-        ABC = self._scene_tris_ABC(exclude if exclude is not None else {i})
+    def _surface_top(self, amn, amx, exclude):
+        """Highest surface z under the footprint [amn, amx] (centre + 4 inset corners) among the room
+        and the props not in `exclude`; 0.0 (domain floor) if nothing is below."""
+        top = 0.0
+        ABC = self._scene_tris_ABC(exclude)
         if ABC is not None:
             A, B, C = ABC
             ex = amn[0] + (amx[0] - amn[0]) * 0.02; ex1 = amx[0] - (amx[0] - amn[0]) * 0.02
@@ -2507,13 +2523,125 @@ class GLViewer(QOpenGLWidget):
             hits = [h for h in hits if h is not None]
             if hits:
                 top = max(hits)
-        if lift is None:
+        return top
+
+    def _drop_prop(self, i, exclude=None):
+        """Settle prop i on the surface directly beneath its footprint (stage/floor/other prop; the
+        domain floor if none). A height the USER set (p.lift, see _remember_prop_height) wins: the base
+        keeps that height above the room floor beneath, wherever the prop is moved. Otherwise PROP_LIFT
+        types (table, diffuser) sit at their default height, everything else rests on the surface."""
+        if not (0 <= i < len(self._props)):
+            return
+        p = self._props[i]
+        v = np.asarray(p.world()[0], float)
+        amn, amx = v.min(0), v.max(0)
+        user = getattr(p, "lift", None)
+        lift = None if user is not None else (PROP_LIFT.get(p.source) if p.kind == "primitive" else None)
+        if user is not None or lift is not None:               # measured from the ROOM floor, never from
+            exclude = set(range(len(self._props)))             # another prop (no diffuser on a table)
+        top = self._surface_top(amn, amx, exclude if exclude is not None else {i})
+        if user is not None:
+            top += float(user); z_at = amn[2]
+        elif lift is None:
             z_at = amn[2]                                      # base on the surface
         else:
             ref, h = lift                                      # base or centre `h` above the surface
             top += h
             z_at = amn[2] if ref == "bottom" else (amn[2] + amx[2]) / 2.0
         p.pos = [p.pos[0], p.pos[1], p.pos[2] + (top - z_at)]
+
+    # ── props stay INSIDE the room ─────────────────────────────────────────────
+    def _room_geom(self):
+        """Ray-parity geometry of the ROOM only (bounding box and prop layers left out: once props are
+        baked into the scene OBJ, a prop would otherwise sit 'inside a solid'). None = no scene -> no
+        constraint. If leaving the prop layers out would leave nothing, all layers are used."""
+        pl = self._prop_layers()
+        key = (id(self._groups), len(self._verts), frozenset(pl))
+        c = getattr(self, "_room_geom_cache", None)
+        if c is not None and c[0] == key:
+            return c[1]
+        V = np.asarray(self._verts, np.float64)
+        room = [g for g in self._groups if not g.get("is_bbox") and len(g["tris"])]
+        pick = [g for g in room if g["name"] not in pl] or room
+        geom = mesh_ray_geom(V, np.concatenate([np.asarray(g["tris"]) for g in pick], 0)) if (pick and len(V)) else None
+        self._room_geom_cache = (key, geom)
+        return geom
+
+    def _props_inside(self, idxs, quick=False):
+        """True if every prop in idxs lies inside the room: its bounding-box corners (pulled in ~1 cm so
+        it may touch a wall) and its centre. quick: centre + the 4 base corners (live dragging)."""
+        G = self._room_geom()
+        if G is None:
+            return True
+        pts = []
+        for i in idxs:
+            if not (0 <= i < len(self._props)):
+                continue
+            v = np.asarray(self._props[i].world()[0], np.float64)
+            mn, mx = v.min(0), v.max(0)
+            ins = np.minimum(0.01, 0.25 * (mx - mn))
+            a, b = mn + ins, mx - ins
+            zs = (a[2],) if quick else (a[2], b[2])
+            pts += [(x, y, z) for x in (a[0], b[0]) for y in (a[1], b[1]) for z in zs]
+            pts.append(tuple((mn + mx) / 2.0))
+        return bool(len(pts) == 0 or mesh_inside_vote(np.asarray(pts), G).all())
+
+    def _keep_inside(self, xf, settle):
+        """After a move/rotate/scale: if the result leaves the room but the start was inside, go back
+        toward the start (pose interpolated between the two, bisection) to the last pose that fits;
+        a transform that cannot fit at all is undone."""
+        idxs = xf["idxs"]
+        if self._props_inside(idxs):
+            return
+        final = [(list(self._props[i].pos), list(self._props[i].rot), list(self._props[i].scale)) for i in idxs]
+
+        def pose(f):
+            for i, b, (fp, fr, fs) in zip(idxs, xf["bases"], final):
+                p = self._props[i]
+                p.pos = [b["pos"][m] + f * (fp[m] - b["pos"][m]) for m in range(3)]
+                p.rot = [b["rot"][m] + f * (fr[m] - b["rot"][m]) for m in range(3)]
+                p.scale = [b["scale"][m] + f * (fs[m] - b["scale"][m]) for m in range(3)]
+                if settle:
+                    self._drop_prop(i, exclude=set(idxs))
+            return self._props_inside(idxs)
+        if not pose(0.0):
+            pose(1.0)                                   # started outside: no constraint (can be fixed)
+            return
+        lo, hi = 0.0, 1.0
+        for _ in range(10):
+            mid = 0.5 * (lo + hi)
+            if pose(mid):
+                lo = mid
+            else:
+                hi = mid
+        pose(lo)
+
+    def _place_inside(self, i, cx, cy):
+        """New prop i whose drop point is outside the room: the inside floor spot nearest (cx, cy),
+        searched on a 9 x 9 grid over the room's footprint."""
+        V = np.asarray(self._verts, np.float64)
+        if not len(V):
+            return
+        mn, mx = V.min(0), V.max(0)
+        p = self._props[i]
+        cand = sorted(((x, y) for x in np.linspace(mn[0], mx[0], 11)[1:-1] for y in np.linspace(mn[1], mx[1], 11)[1:-1]),
+                      key=lambda q: (q[0] - cx) ** 2 + (q[1] - cy) ** 2)
+        for x, y in cand:
+            v = np.asarray(p.world()[0], np.float64); lo, hi = v.min(0), v.max(0)
+            p.pos = [p.pos[0] + x - (lo[0] + hi[0]) / 2.0, p.pos[1] + y - (lo[1] + hi[1]) / 2.0, p.pos[2]]
+            self._drop_prop(i)
+            if self._props_inside([i]):
+                return
+
+    def _remember_prop_height(self, i):
+        """The user placed prop i at its current height on purpose (Z-locked move, or the z field):
+        store the base's height above the room floor beneath, so later settling keeps it."""
+        if not (0 <= i < len(self._props)):
+            return
+        p = self._props[i]
+        v = np.asarray(p.world()[0], float)
+        amn, amx = v.min(0), v.max(0)
+        p.lift = float(amn[2] - self._surface_top(amn, amx, set(range(len(self._props)))))
 
     def _xform_reanchor(self):
         """Re-snapshot the base transforms + mouse anchor to the CURRENT state, so toggling an axis
@@ -2534,10 +2662,15 @@ class GLViewer(QOpenGLWidget):
                 if 0 <= i < len(self._props):
                     p = self._props[i]
                     p.pos, p.rot, p.scale = list(b["pos"]), list(b["rot"]), list(b["scale"])
+        elif xf.get("z_moved"):                                    # height set by hand (Z-locked move):
+            for i in xf["idxs"]:                                   # keep it, and remember it
+                self._remember_prop_height(i)
+            self._keep_inside(xf, settle=False)
         else:                                                      # settle each prop onto the surface below
             ex = set(xf["idxs"])
             for i in xf["idxs"]:
                 self._drop_prop(i, exclude=ex)
+            self._keep_inside(xf, settle=True)
         self._xform = None
         self.propsChanged.emit(); self.update()
 
@@ -2572,12 +2705,25 @@ class GLViewer(QOpenGLWidget):
                         delta = axv * (float(np.dot([dx, dy], sdir / L)) * self._dist * 0.0015)
                 except Exception:
                     pass
-            for i, b in zip(xf["idxs"], xf["bases"]):
-                bp = b["pos"]; self._props[i].pos = [bp[0] + delta[0], bp[1] + delta[1], bp[2] + delta[2]]
-            if xf["axis"] != "Z":                    # ride the surface below LIVE (so you see where it lands);
-                ex = set(xf["idxs"])                 # skip when Z-locked so you can set height by hand
-                for i in xf["idxs"]:
-                    self._drop_prop(i, exclude=ex)
+            if xf["axis"] == "Z":                    # height set by hand: keep it at Enter (see _xform_end)
+                xf["z_moved"] = True
+            prev = [list(self._props[i].pos) for i in xf["idxs"]]
+            constrain = self._props_inside(xf["idxs"], quick=True)   # only while it IS inside (an outside
+            #                                                          prop can still be dragged back in)
+
+            def _place(dvec):
+                for i, b in zip(xf["idxs"], xf["bases"]):
+                    bp = b["pos"]; self._props[i].pos = [bp[0] + dvec[0], bp[1] + dvec[1], bp[2] + dvec[2]]
+                if xf["axis"] != "Z" and not xf.get("z_moved"):   # ride the surface below LIVE; skip when
+                    ex = set(xf["idxs"])                          # Z-locked so you can set height by hand
+                    for i in xf["idxs"]:
+                        self._drop_prop(i, exclude=ex)
+                return (not constrain) or self._props_inside(xf["idxs"], quick=True)
+            if not _place(delta):                    # would leave the room: slide along one free axis,
+                d0 = np.array(prev[0], float) - np.array(xf["bases"][0]["pos"], float)   # else stay put
+                if not any(_place([delta[m] if m == k else d0[m] for m in range(3)]) for k in range(3)):
+                    for i, pv in zip(xf["idxs"], prev):
+                        self._props[i].pos = list(pv)
         elif xf["mode"] == "r":
             axis = xf["axis"] or "Z"; k = ai[axis]; ang = dx * 0.5; piv = xf["pivot"]  # 0.5 deg/px
             for i, b in zip(xf["idxs"], xf["bases"]):
@@ -2629,6 +2775,7 @@ class GLViewer(QOpenGLWidget):
         if not new:
             return
         self._prop_sel = new[-1]
+        self._prop_group = list(new)                             # the copies stay a group (M/R/S again)
         self._xform_start("p", idxs=new)
         self.propsChanged.emit()
 
@@ -2646,7 +2793,7 @@ class GLViewer(QOpenGLWidget):
             return False
         import props3d
         self._props = [props3d.Prop.from_dict(d) for d in self._props_undo_stack.pop()]
-        self._prop_sel = -1; self._xform = None
+        self._prop_sel = -1; self._xform = None; self._prop_group = []
         self.propsChanged.emit(); self.update()
         return True
 
@@ -2674,11 +2821,14 @@ class GLViewer(QOpenGLWidget):
         prop.pos[1] += cy - (mn[1] + mx[1]) / 2.0
         self._props.append(prop); self._prop_sel = len(self._props) - 1
         self._drop_prop(self._prop_sel)                  # base rests on stage/floor there (fallback z=0)
+        if not self._props_inside([self._prop_sel]):     # view point outside the room: nearest inside spot
+            self._place_inside(self._prop_sel, cx, cy)
         self.propsChanged.emit(); self.update()          # refresh panel + 2D footprints live
 
     def remove_prop(self, i):
         if 0 <= i < len(self._props):
             del self._props[i]; self._prop_sel = min(self._prop_sel, len(self._props) - 1)
+            self._prop_group = []                                # indices shifted: drop the group
             self.propsChanged.emit(); self.update()
 
     def select_prop(self, i):
@@ -3061,14 +3211,15 @@ class GLViewer(QOpenGLWidget):
                             {gid for gid, name in self._ray_groups.items() if name in nm})
 
     def _ray_segs_shown(self, rid, segs):
-        """The segments of ray rid to draw under the current surface filter (None = hidden)."""
+        """The segments of ray rid to draw under the current surface filter (None = hidden): only rays
+        that go STRAIGHT from the source to the chosen surface (first segment ends on it), drawn as that
+        segment plus the immediate reflection off the surface."""
         if self._ray_filter is None:
             return segs
         g = self._ray_gid.get(rid) or []
-        k = next((i for i, v in enumerate(g) if v in self._ray_filter), None)
-        if k is None:
+        if not g or g[0] not in self._ray_filter:
             return None
-        return segs[:k + 2] if self._ray_trunc else segs
+        return segs[:2]
 
     def rays_hitting(self):
         """Number of traced rays that pass the current surface filter."""
@@ -3364,6 +3515,9 @@ class GLViewer(QOpenGLWidget):
         if self._surf_pick:                  return "SURFACE SELECT"
         if self._nav_mode:                   return "NAVIGATE"
         if self._grab_held:                  return "EDIT POINTS"
+        if self._group_arm:                  return "GROUP SELECT: drag a box"
+        if self._props_mode and self._prop_group:
+            return f"DRAW / PROPS: group of {len(self._prop_group)} (M / R / S, Esc clears)"
         if self._props_mode:                 return "DRAW / PROPS"
         if getattr(self, "_dollhouse", False):
             sec = self._dh_section()
@@ -3383,6 +3537,7 @@ class GLViewer(QOpenGLWidget):
         ("RESULTS mode", ["LMB on a receiver  select / deselect it for the plots"]),
         ("RECEIVER VIEW", ["LMB look · Ctrl+LMB roll · position fixed · RMB → Go back"]),
         ("PROPS (Draw mode)", ["M / R / S  move / rotate / scale · X/Y/Z lock · Enter confirm · Esc cancel",
+                               "G  group-select (drag a box), then M / R / S the whole group · Esc clears",
                                "C  copy-select · props auto-rest on the surface below (stage/floor)",
                                "Ctrl+Z  undo"]),
         ("DOLLHOUSE (RMB menu)", ["+ / -  (or PgUp / PgDn)  raise / lower the section plane (100 % = no cut)",
@@ -3438,6 +3593,10 @@ class GLViewer(QOpenGLWidget):
         # Surface rect-select armed (RMB menu): LMB starts the rubber-band box; consume so it doesn't orbit.
         if self._surf_pick and e.button() == Qt.MouseButton.LeftButton:
             self._rect = [e.position(), e.position()]; return
+        # Group-select armed (G): LMB starts the rubber-band box; consume so it doesn't orbit.
+        if self._group_arm and e.button() == Qt.MouseButton.LeftButton:
+            self._rect = [e.position(), e.position()]; self._group_arm = False; self._rect_group = True
+            return
         # Copy-select armed (C): LMB starts the rubber-band box; consume so it doesn't orbit.
         if self._copy_arm and e.button() == Qt.MouseButton.LeftButton:
             self._rect = [e.position(), e.position()]; self._copy_arm = False; return
@@ -3467,18 +3626,19 @@ class GLViewer(QOpenGLWidget):
         # ── grid group-move: mouse translates the new group (no button needed), eye/scene fixed ──
         if self._gxf is not None:
             self._gxf_apply(e.position()); self._last_pos = e.position(); return
+        # ── rubber-band box for copy-select: extend it, no orbit ──
+        if self._rect is not None:
+            self._rect[1] = e.position(); self.update(); return
+        # ── modal prop transform: mouse drives it, no button held (before free-look: in Draw mode with
+        #    navigation on, M/R/S still move the prop, not the view) ──
+        if self._xform is not None:
+            self._xform_apply(e.position()); self._last_pos = e.position(); return
         # ── fly steering: while moving forward/back (W/X held), the mouse guides the view direction ──
         if self._nav_mode and self._fpv is None:            # free-look: mouse turns the view in place (eye fixed)
             if self._last_pos is not None:
                 self._fly_steer(e.position().x() - self._last_pos.x(),
                                 e.position().y() - self._last_pos.y())
             self._last_pos = e.position(); self.update(); return
-        # ── rubber-band box for copy-select: extend it, no orbit ──
-        if self._rect is not None:
-            self._rect[1] = e.position(); self.update(); return
-        # ── modal prop transform: mouse drives it, no button held ──
-        if self._xform is not None:
-            self._xform_apply(e.position()); self._last_pos = e.position(); return
         # ── placement mode: mouse moves the cursor with NO button needed ──
         if self._mode != self.MODE_NONE:
             if self._axis_lock:
@@ -3590,6 +3750,14 @@ class GLViewer(QOpenGLWidget):
             self._rect = None
             self.update(); return
 
+        # Finish the group box: the props whose center is inside it become the group for M / R / S.
+        if self._rect is not None and self._rect_group and e.button() == Qt.MouseButton.LeftButton:
+            idxs = self._find_props_in_rect(self._rect); self._rect = None; self._rect_group = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._prop_group = list(idxs)
+            if idxs:
+                self._prop_sel = idxs[0]
+            self.propsChanged.emit(); self.update(); return
         # Finish the copy box: duplicate props whose center is inside it, then grab the copies (move).
         if self._rect is not None and e.button() == Qt.MouseButton.LeftButton:
             idxs = self._find_props_in_rect(self._rect); self._rect = None
@@ -3745,8 +3913,14 @@ class GLViewer(QOpenGLWidget):
             if self._xform is None and self._rect is None and e.matches(QKeySequence.StandardKey.Undo):
                 if self.props_undo():
                     e.accept(); return
-            if key == Qt.Key.Key_Escape and (self._copy_arm or self._rect is not None):
-                self._copy_arm = False; self._rect = None; self.update(); e.accept(); return
+            if key == Qt.Key.Key_Escape and (self._copy_arm or self._group_arm or self._rect is not None):
+                self._copy_arm = self._group_arm = self._rect_group = False; self._rect = None
+                self.setCursor(Qt.CursorShape.ArrowCursor); self.update(); e.accept(); return
+            if key == Qt.Key.Key_Escape and self._xform is None and self._prop_group:
+                self._prop_group = []; self.update(); e.accept(); return    # Esc clears the group
+            if self._xform is None and self._rect is None and key == Qt.Key.Key_G and self._props:
+                self._group_arm = True; self._copy_arm = False           # next LMB drag = group box
+                self.setCursor(Qt.CursorShape.CrossCursor); e.accept(); return
             if self._xform is None and self._rect is None and key == Qt.Key.Key_C and self._props:
                 self._copy_arm = True                                # next LMB drag = box-select to copy
                 self.setCursor(Qt.CursorShape.CrossCursor); e.accept(); return
@@ -3804,7 +3978,8 @@ class GLViewer(QOpenGLWidget):
             e.accept(); return
         # WAXD fly navigation (idle only) — hold to move; mouse steers while W/X held. X = back (S is source).
         if (self._nav_mode and self._fpv is None and self._mode == self.MODE_NONE and self._xform is None
-                and not self._props_mode and self._drag_kind is None
+                and self._rect is None and not self._copy_arm and not self._group_arm   # Draw mode too
+                and self._drag_kind is None
                 and key in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_X, Qt.Key.Key_D,
                             Qt.Key.Key_Q, Qt.Key.Key_Z)):
             if not e.isAutoRepeat():
@@ -10448,7 +10623,7 @@ class MainWindow(QMainWindow):
         self._gl.set_ray_filter(None if name is None else [name])   # rays drawn up to leaving that surface
         if name is not None and self._gl._ray_paths:
             n, tot = self._gl.rays_hitting(), len(self._gl._ray_paths)
-            self._sb.showMessage(f"{n} of {tot} traced rays hit {name}")
+            self._sb.showMessage(f"{n} of {tot} traced rays go straight from the source to {name}")
 
     def _on_ray_row_selected(self):
         rows = self._ray_tbl.selectionModel().selectedRows()
@@ -10740,9 +10915,18 @@ class PropsWindow(QWidget):
         if not (0 <= row < len(self.gl._props)):
             return
         p = self.gl._props[row]
+        z_old = p.pos[2]
+        was_in = self.gl._props_inside([row])
+        prev = (list(p.pos), list(p.rot), list(p.scale), p.lift)
         p.pos = [s.value() for s in self._pos]
         p.rot = [s.value() for s in self._rot]
         p.scale = [s.value() for s in self._scl]
+        if was_in and not self.gl._props_inside([row]):  # typed values would leave the room: refuse
+            p.pos, p.rot, p.scale, p.lift = prev
+            self._on_select(row)                        # put the fields back
+            return
+        if abs(p.pos[2] - z_old) > 1e-9:                # z typed by hand: keep that height from now on
+            self.gl._remember_prop_height(row)
         p.layer = self._layer.currentText().strip() or self.p3.DEFAULT_LAYER
         self._list.item(row).setText(f"{p.source}  [{p.layer}]")
         self.gl.update()

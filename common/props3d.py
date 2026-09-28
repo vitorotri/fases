@@ -478,7 +478,9 @@ def feature_edges(verts, tris, angle_thresh_deg=1.0):
 class Prop:
     """A placed object: a source mesh (primitive name or asset name) + transform + layer."""
     def __init__(self, kind, source="box", pos=(0, 0, 0), rot=(0, 0, 0), scale=(1, 1, 1),
-                 layer=DEFAULT_LAYER, params=None):
+                 layer=DEFAULT_LAYER, params=None, lift=None):
+        self.lift = lift                 # user-set height of the base above the floor beneath [m];
+        #                                  None = default settling (rest on it / PROP_LIFT in the GUI)
         self.kind = kind                 # "primitive" | "asset"
         self.source = source             # primitive key or asset name
         self.pos = list(pos); self.rot = list(rot); self.scale = list(scale)
@@ -522,12 +524,12 @@ class Prop:
 
     def to_dict(self):
         return {"kind": self.kind, "source": self.source, "pos": self.pos, "rot": self.rot,
-                "scale": self.scale, "layer": self.layer, "params": self.params}
+                "scale": self.scale, "layer": self.layer, "params": self.params, "lift": self.lift}
 
     @staticmethod
     def from_dict(d):
         return Prop(d["kind"], d["source"], d["pos"], d["rot"], d["scale"],
-                    d.get("layer", DEFAULT_LAYER), d.get("params"))
+                    d.get("layer", DEFAULT_LAYER), d.get("params"), d.get("lift"))
 
 
 # ── OBJ export, grouped BY LAYER (AutoCAD model: N props -> 1 `g <layer>` -> 1 .fit) ───────────
