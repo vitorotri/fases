@@ -214,6 +214,38 @@ OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 # that manifest points to a file that actually exists.
 SOLVER_BINARY = "/home/vitorotri/Documents/Github/fases/3D-solver/build/phases3D"
 
+# ── About window ───────────────────────────────────────────────────────────────
+APP_NAME, APP_FULLNAME = "F.A.S.E.S", "Faithful Acoustic Solver for Extended Spaces"
+APP_VERSION = "0.9-dev"
+ABOUT_AUTHOR = ""       # e.g. "Name Surname, Affiliation - email"   (shown only when filled in)
+ABOUT_CITATION = ""     # the paper / thesis to cite                  (shown with a Copy button)
+ABOUT_LICENSE = ""      # e.g. "GPL-3.0"; bundled data (HRTF sets, BRAS rooms) keep their own terms
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FASES_logo.png")
+
+
+def logo_pixmap(size, tint=None):
+    """The F.A.S.E.S logo at `size` px, or None if the file is missing. The PNG is a purple line drawing
+    on WHITE (no alpha): tint -> the lines recoloured to `tint` on a transparent background (alpha from
+    how dark each pixel is), so it reads on the dark GUI; no tint -> the original colours."""
+    if not os.path.isfile(LOGO_PATH):
+        return None
+    if tint is None:
+        pm = QPixmap(LOGO_PATH)
+    else:
+        from PySide6.QtGui import QImage
+        img = QImage(LOGO_PATH).convertToFormat(QImage.Format.Format_RGBA8888)
+        w, h, bpl = img.width(), img.height(), img.bytesPerLine()
+        arr = np.frombuffer(img.constBits(), np.uint8, count=bpl * h).reshape(h, bpl // 4, 4)[:, :w, :3]
+        dark = 255.0 - arr.astype(np.float32).mean(2)
+        a = np.clip(dark / max(float(dark.max()), 1.0), 0.0, 1.0)
+        c = QColor(tint)
+        out = np.empty((h, w, 4), np.uint8)
+        out[..., 0], out[..., 1], out[..., 2] = c.red(), c.green(), c.blue()
+        out[..., 3] = (a * 255.0).astype(np.uint8)
+        pm = QPixmap.fromImage(QImage(out.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy())
+    return pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+
 # Predefined absorption-material catalogue used by the material table RMB menu.
 # Expected line format inside the text file:
 #   material_name  a63  a125  a250  a500  a1000  a2000  a4000  a8000
@@ -7033,6 +7065,18 @@ class MainWindow(QMainWindow):
         self._sb.addPermanentWidget(self._mode_lbl)
         self._gl.modeLabelChanged.connect(
             lambda s: self._mode_lbl.setText(f"{s}   ·   ? Shortcuts"))
+        _lp = logo_pixmap(40, PAL["accent2"])          # About: the logo, tinted for the dark bar
+        if _lp is not None:
+            self._about_btn = QPushButton(); self._about_btn.setFlat(True)
+            self._about_btn.setIcon(QIcon(_lp)); self._about_btn.setIconSize(QSize(20, 20))
+            self._about_btn.setFixedSize(30, 24); self._about_btn.setToolTip(f"About {APP_NAME}")
+            self._about_btn.setStyleSheet("QPushButton{border:none;background:transparent;}"
+                                          f"QPushButton:hover{{background:{PAL['btn_hover']};border-radius:4px;}}")
+            self._about_btn.clicked.connect(self._show_about)
+            self._sb.addPermanentWidget(self._about_btn)
+            _wi = logo_pixmap(256)
+            if _wi is not None:
+                self.setWindowIcon(QIcon(_wi))
 
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._undo_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
@@ -9006,6 +9050,90 @@ class MainWindow(QMainWindow):
 
     # ── slots ────────────────────────────────────────────────
     # ── project: manifest helpers ────────────────────────────
+    def _about_sysinfo(self):
+        """Plain-text system report for bug reports (GPU, driver, CUDA, solver build, versions, project)."""
+        import platform, re as _re
+        L = [f"{APP_NAME} {APP_VERSION}", f"OS: {platform.platform()}",
+             f"Python {sys.version.split()[0]}"]
+        try:
+            import PySide6
+            from PySide6.QtCore import qVersion
+            L.append(f"PySide6 {PySide6.__version__} (Qt {qVersion()})")
+        except Exception:
+            pass
+        L.append(f"NumPy {np.__version__}")
+        try:
+            q = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+                                "--format=csv,noheader"], capture_output=True, text=True, timeout=3)
+            for ln in q.stdout.strip().splitlines():
+                L.append(f"GPU: {ln.strip()}")
+            m = _re.search(r"CUDA Version:\s*([\d.]+)",
+                           subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=3).stdout)
+            if m:
+                L.append(f"CUDA (driver): {m.group(1)}")
+        except Exception:
+            L.append("GPU: nvidia-smi not available")
+        b = self._bin_le.text() if hasattr(self, "_bin_le") else ""
+        if b and not os.path.isabs(b) and self._proj_root:
+            b = os.path.join(self._proj_root, b)
+        if b:
+            when = (datetime.fromtimestamp(os.path.getmtime(b)).strftime("%Y-%m-%d %H:%M")
+                    if os.path.isfile(b) else "NOT FOUND")
+            L.append(f"Solver: {b} (built {when})")
+        L.append(f"Project: {self._proj_root or '(none)'}")
+        return "\n".join(L)
+
+    def _show_about(self):
+        """About window: logo, name, version, what it does, author / citation / license (when filled in
+        at the top of gui.py), credits, and a copyable system report."""
+        dlg = QDialog(self); dlg.setWindowTitle(f"About {APP_NAME}"); dlg.setMinimumWidth(520)
+        dlg.setStyleSheet(f"QDialog{{background:{PAL['bg']};color:{PAL['text']};}}"
+                          f"QLabel{{color:{PAL['text']};}}")
+        v = QVBoxLayout(dlg); v.setSpacing(10); v.setContentsMargins(18, 16, 18, 14)
+        top = QHBoxLayout(); top.setSpacing(16)
+        pm = logo_pixmap(96)
+        if pm is not None:
+            lg = QLabel(); lg.setPixmap(pm); lg.setFixedSize(112, 112)
+            lg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lg.setStyleSheet("background:#ffffff;border-radius:14px;")      # original colours on a light card
+            top.addWidget(lg)
+        head = QLabel(f"<div style='font-size:20px;font-weight:bold;color:{PAL['accent2']}'>{APP_NAME}</div>"
+                      f"<div style='font-size:12px'>{APP_FULLNAME}</div>"
+                      f"<div style='font-size:11px;color:{PAL['subtext']}'>version {APP_VERSION}</div>")
+        top.addWidget(head, 1); v.addLayout(top)
+        desc = QLabel("F.A.S.E.S is a hybrid 3D acoustic solver for enclosed and small open sopaces, "
+                      "using the Finite Volume Method for lower frequencies where wave-based phenomena "
+                      "dominate, and geometrical acoustics methods such as Ray-Tracing and Diffuse Rain "
+                      "for higher frequencies, where sound can be described as rays, showing results of "
+                      "simulated impulse responses and spatial parameters, as well as giving the user "
+                      "possibility to do auralizations on selected receiver positions.")
+        desc.setWordWrap(True); v.addWidget(desc)
+        for lbl, val in (("Author", ABOUT_AUTHOR), ("License", ABOUT_LICENSE)):
+            if val:
+                q = QLabel(f"<b>{lbl}:</b> {val}"); q.setWordWrap(True); v.addWidget(q)
+        if ABOUT_CITATION:
+            cr = QHBoxLayout()
+            q = QLabel(f"<b>Please cite:</b> {ABOUT_CITATION}"); q.setWordWrap(True)
+            q.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            cb = QPushButton("Copy"); cb.setFixedWidth(60)
+            cb.clicked.connect(lambda: QApplication.clipboard().setText(ABOUT_CITATION))
+            cr.addWidget(q, 1); cr.addWidget(cb); v.addLayout(cr)
+        cred = QLabel("Built with PySide6 / Qt, PyOpenGL, NumPy, SciPy, pyfar, pyrato, sounddevice and "
+                      "CUDA. Bundled data such as HRTF sets and example rooms keep their own licenses.")
+        cred.setWordWrap(True); cred.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
+        v.addWidget(cred)
+        v.addWidget(QLabel("<b>System information</b>"))
+        info = QTextEdit(); info.setReadOnly(True); info.setFont(QFont("Monospace", 9))
+        info.setPlainText(self._about_sysinfo()); info.setFixedHeight(130)
+        info.setStyleSheet(f"background:#000000;color:{PAL['text']};border:1px solid {PAL['border']};")
+        v.addWidget(info)
+        br = QHBoxLayout()
+        cp = QPushButton("Copy system information")
+        cp.clicked.connect(lambda: QApplication.clipboard().setText(info.toPlainText()))
+        cl = QPushButton("Close"); cl.clicked.connect(dlg.accept)
+        br.addWidget(cp); br.addStretch(1); br.addWidget(cl); v.addLayout(br)
+        dlg.exec()
+
     def _manifest_path(self, root=None):
         return os.path.join(root or self._proj_root, MANIFEST_NAME)
 
