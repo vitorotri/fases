@@ -9101,7 +9101,7 @@ class MainWindow(QMainWindow):
                       f"<div style='font-size:12px'>{APP_FULLNAME}</div>"
                       f"<div style='font-size:11px;color:{PAL['subtext']}'>version {APP_VERSION}</div>")
         top.addWidget(head, 1); v.addLayout(top)
-        desc = QLabel("F.A.S.E.S is a hybrid 3D acoustic solver for enclosed and small open sopaces, "
+        desc = QLabel("F.A.S.E.S is a hybrid 3D acoustic solver for enclosed and small open spaces, "
                       "using the Finite Volume Method for lower frequencies where wave-based phenomena "
                       "dominate, and geometrical acoustics methods such as Ray-Tracing and Diffuse Rain "
                       "for higher frequencies, where sound can be described as rays, showing results of "
