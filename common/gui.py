@@ -219,8 +219,38 @@ APP_NAME, APP_FULLNAME = "F.A.S.E.S", "Faithful Acoustic Solver for Extended Spa
 APP_VERSION = "0.9-dev"
 ABOUT_AUTHOR = ""       # e.g. "Name Surname, Affiliation - email"   (shown only when filled in)
 ABOUT_CITATION = ""     # the paper / thesis to cite                  (shown with a Copy button)
-ABOUT_LICENSE = ""      # e.g. "GPL-3.0"; bundled data (HRTF sets, BRAS rooms) keep their own terms
+_GUI_DIR = os.path.dirname(os.path.abspath(__file__))
+LICENSE_PATH = next((f for f in (os.path.join(_GUI_DIR, "LICENSE.md"),                 # next to gui.py,
+                                 os.path.join(os.path.dirname(_GUI_DIR), "LICENSE.md"))  # or the repo root above
+                     if os.path.isfile(f)), os.path.join(_GUI_DIR, "LICENSE.md"))
+
+
+def license_markdown():
+    """LICENSE.md (next to gui.py or one folder up, the repository root) for the About window: the full terms + the 'Required Notice' line, which
+    the PolyForm Perimeter license says must travel with every copy. In-document links
+    '[text](#anchor)' become plain text (they are dead clicks in a read-only box). If the file is
+    missing: the notice and the license name + URL, which the license accepts in place of the text."""
+    import re
+    try:
+        md = open(LICENSE_PATH, encoding="utf-8").read()
+    except OSError:
+        return ("Required Notice: Copyright (c) Vito Romanelli Tricanico (vitorotri@protonmail.ch)\n\n"
+                "**PolyForm Perimeter License 1.0.1**\n\n<https://polyformproject.org/licenses/perimeter/1.0.1>")
+    return re.sub(r"\[([^\]]+)\]\(#[^)]*\)", r"\1", md)
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FASES_logo.png")
+
+
+def app_icon():
+    """Window / app icon: the square, transparent icon set icons/fases_<n>.png next to gui.py (white
+    rounded tile + purple face, built from FASES_logo.png), every size registered so the desktop picks
+    a sharp one instead of squashing the non-square logo. Empty icon if the folder is missing."""
+    ic = QIcon()
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
+    for n in (16, 24, 32, 48, 64, 128, 256, 512):
+        f = os.path.join(d, f"fases_{n}.png")
+        if os.path.isfile(f):
+            ic.addFile(f, QSize(n, n))
+    return ic
 
 
 def logo_pixmap(size, tint=None):
@@ -7065,18 +7095,16 @@ class MainWindow(QMainWindow):
         self._sb.addPermanentWidget(self._mode_lbl)
         self._gl.modeLabelChanged.connect(
             lambda s: self._mode_lbl.setText(f"{s}   ·   ? Shortcuts"))
-        _lp = logo_pixmap(40, PAL["accent2"])          # About: the logo, tinted for the dark bar
+        _lp = logo_pixmap(64, PAL["accent2"])          # About: the logo, tinted for the dark bar
         if _lp is not None:
             self._about_btn = QPushButton(); self._about_btn.setFlat(True)
-            self._about_btn.setIcon(QIcon(_lp)); self._about_btn.setIconSize(QSize(20, 20))
-            self._about_btn.setFixedSize(30, 24); self._about_btn.setToolTip(f"About {APP_NAME}")
+            self._about_btn.setIcon(QIcon(_lp)); self._about_btn.setIconSize(QSize(28, 28))
+            self._about_btn.setFixedSize(38, 32); self._about_btn.setToolTip(f"About {APP_NAME}")
             self._about_btn.setStyleSheet("QPushButton{border:none;background:transparent;}"
                                           f"QPushButton:hover{{background:{PAL['btn_hover']};border-radius:4px;}}")
             self._about_btn.clicked.connect(self._show_about)
             self._sb.addPermanentWidget(self._about_btn)
-            _wi = logo_pixmap(256)
-            if _wi is not None:
-                self.setWindowIcon(QIcon(_wi))
+            self.setWindowIcon(app_icon())
 
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._undo_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
@@ -9050,42 +9078,9 @@ class MainWindow(QMainWindow):
 
     # ── slots ────────────────────────────────────────────────
     # ── project: manifest helpers ────────────────────────────
-    def _about_sysinfo(self):
-        """Plain-text system report for bug reports (GPU, driver, CUDA, solver build, versions, project)."""
-        import platform, re as _re
-        L = [f"{APP_NAME} {APP_VERSION}", f"OS: {platform.platform()}",
-             f"Python {sys.version.split()[0]}"]
-        try:
-            import PySide6
-            from PySide6.QtCore import qVersion
-            L.append(f"PySide6 {PySide6.__version__} (Qt {qVersion()})")
-        except Exception:
-            pass
-        L.append(f"NumPy {np.__version__}")
-        try:
-            q = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
-                                "--format=csv,noheader"], capture_output=True, text=True, timeout=3)
-            for ln in q.stdout.strip().splitlines():
-                L.append(f"GPU: {ln.strip()}")
-            m = _re.search(r"CUDA Version:\s*([\d.]+)",
-                           subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=3).stdout)
-            if m:
-                L.append(f"CUDA (driver): {m.group(1)}")
-        except Exception:
-            L.append("GPU: nvidia-smi not available")
-        b = self._bin_le.text() if hasattr(self, "_bin_le") else ""
-        if b and not os.path.isabs(b) and self._proj_root:
-            b = os.path.join(self._proj_root, b)
-        if b:
-            when = (datetime.fromtimestamp(os.path.getmtime(b)).strftime("%Y-%m-%d %H:%M")
-                    if os.path.isfile(b) else "NOT FOUND")
-            L.append(f"Solver: {b} (built {when})")
-        L.append(f"Project: {self._proj_root or '(none)'}")
-        return "\n".join(L)
-
     def _show_about(self):
-        """About window: logo, name, version, what it does, author / citation / license (when filled in
-        at the top of gui.py), credits, and a copyable system report."""
+        """About window: logo, name, version, what it does, author / citation (when filled in at the top
+        of gui.py), credits, and the copyright and license text."""
         dlg = QDialog(self); dlg.setWindowTitle(f"About {APP_NAME}"); dlg.setMinimumWidth(520)
         dlg.setStyleSheet(f"QDialog{{background:{PAL['bg']};color:{PAL['text']};}}"
                           f"QLabel{{color:{PAL['text']};}}")
@@ -9108,9 +9103,8 @@ class MainWindow(QMainWindow):
                       "simulated impulse responses and spatial parameters, as well as giving the user "
                       "possibility to do auralizations on selected receiver positions.")
         desc.setWordWrap(True); v.addWidget(desc)
-        for lbl, val in (("Author", ABOUT_AUTHOR), ("License", ABOUT_LICENSE)):
-            if val:
-                q = QLabel(f"<b>{lbl}:</b> {val}"); q.setWordWrap(True); v.addWidget(q)
+        if ABOUT_AUTHOR:
+            q = QLabel(f"<b>Author:</b> {ABOUT_AUTHOR}"); q.setWordWrap(True); v.addWidget(q)
         if ABOUT_CITATION:
             cr = QHBoxLayout()
             q = QLabel(f"<b>Please cite:</b> {ABOUT_CITATION}"); q.setWordWrap(True)
@@ -9122,16 +9116,15 @@ class MainWindow(QMainWindow):
                       "CUDA. Bundled data such as HRTF sets and example rooms keep their own licenses.")
         cred.setWordWrap(True); cred.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;")
         v.addWidget(cred)
-        v.addWidget(QLabel("<b>System information</b>"))
-        info = QTextEdit(); info.setReadOnly(True); info.setFont(QFont("Monospace", 9))
-        info.setPlainText(self._about_sysinfo()); info.setFixedHeight(130)
-        info.setStyleSheet(f"background:#000000;color:{PAL['text']};border:1px solid {PAL['border']};")
-        v.addWidget(info)
+        v.addWidget(QLabel("<b>Copyright and license</b>"))
+        lic = QTextEdit(); lic.setReadOnly(True); lic.setFixedHeight(200)
+        lic.setMarkdown(license_markdown())                   # LICENSE.md, rendered (headings, bold, quote)
+        lic.setStyleSheet(f"background:#000000;color:{PAL['text']};border:1px solid {PAL['border']};"
+                          "font-size:11px;")
+        v.addWidget(lic)
         br = QHBoxLayout()
-        cp = QPushButton("Copy system information")
-        cp.clicked.connect(lambda: QApplication.clipboard().setText(info.toPlainText()))
         cl = QPushButton("Close"); cl.clicked.connect(dlg.accept)
-        br.addWidget(cp); br.addStretch(1); br.addWidget(cl); v.addLayout(br)
+        br.addStretch(1); br.addWidget(cl); v.addLayout(br)
         dlg.exec()
 
     def _manifest_path(self, root=None):
@@ -11106,6 +11099,7 @@ def main():
     QSurfaceFormat.setDefaultFormat(fmt)
     app = QApplication(sys.argv)
     app.setApplicationName("FASES GUI")
+    app.setWindowIcon(app_icon())
     app.setFont(QFont("Segoe UI",10) if sys.platform=="win32" else
                 QFont("SF Pro Text",10) if sys.platform=="darwin" else
                 QFont("Ubuntu",10))
