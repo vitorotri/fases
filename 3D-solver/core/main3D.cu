@@ -1649,24 +1649,28 @@ int main(int argc, char *argv[]){
 	
 	int t_cross = rt_t_cross(V, A_tot, c, fs, max_order); // index for t_cross, not value in seconds
 	if (t_cross < 1)        t_cross = 1;
-	// The DIRECT sound is always the ISM's: deterministic, positive, sub-sample (deposit) in EVERY band.
-	// If t_cross fell before it (low ISM order / short mean free path, e.g. BRAS RS1 at order 1), the
-	// direct was handed to the RT e_spec -- one sample with a random sign per band -> two octaves with
-	// opposite-sign directs cancelled at their shared edge in allIRs (-11 dB notch at 5657 Hz).
-	{
-		int t_dir_max = 0;
-		for (int s = 0; s < Q.Ns; s++)
-			for (int r = 0; r < Q.Nr; r++){
-				const float d_0 = Q.direct_at(s, r);
-				if (d_0 > 0.0f) t_dir_max = std::max(t_dir_max, (int)(fs * d_0 / c));
-			}
-		if (t_dir_max > 0 && t_cross < t_dir_max + Nw){
-			printf("\n[OK] t_cross raised from %f ms to %f ms (latest direct sound + filter length)\n",
-			       (float)t_cross * 1000.0f / fs, (float)(t_dir_max + Nw) * 1000.0f / fs);
-			t_cross = t_dir_max + Nw;
+	if (t_cross >= (int)Nt) t_cross = (int)Nt - 1;
+	// PER-RECEIVER crossing tc_r[r] = max(t_cross, latest direct to r + Nw): the DIRECT sound is always the
+	// ISM's (deterministic, positive, sub-sample deposit, in EVERY band). If t_cross fell before it (low ISM
+	// order / short mean free path, e.g. BRAS RS1 at order 1) the direct went to the RT e_spec: one sample
+	// with a random sign per band -> opposite-sign directs cancelled at an octave edge in allIRs (-11 dB at
+	// 5657 Hz). Per receiver, NOT one global max: raising the shared t_cross to the farthest receiver's
+	// direct would gate the RT specular OFF for near receivers over a span the ISM (max_order) does not
+	// cover. Here each receiver loses RT specular only in [its direct, its direct + Nw] (0.7 ms).
+	// (Multiple sources in one run share e_spec, so the latest direct over sources is used per receiver.)
+	std::vector<int> tc_r((size_t)Q.Nr, t_cross);
+	for (int r = 0; r < Q.Nr; r++){
+		int t_dir = 0;
+		for (int s = 0; s < Q.Ns; s++){
+			const float d_0 = Q.direct_at(s, r);
+			if (d_0 > 0.0f) t_dir = std::max(t_dir, (int)(fs * d_0 / c));
+		}
+		if (t_dir > 0 && tc_r[(size_t)r] < t_dir + Nw){
+			tc_r[(size_t)r] = std::min(t_dir + Nw, (int)Nt - 1);
+			printf("\n[OK] rec%d: crossing raised from %f ms to %f ms (its direct sound + filter length)\n",
+			       r, (float)t_cross * 1000.0f / fs, (float)tc_r[(size_t)r] * 1000.0f / fs);
 		}
 	}
-	if (t_cross >= (int)Nt) t_cross = (int)Nt - 1;
 	
 	printf("\n[OK] t_cross = %f ms\n", (float)t_cross * 1000.0f / fs);
 
@@ -1736,7 +1740,7 @@ int main(int argc, char *argv[]){
     			// direct ray
     			if (d_0 > 0.0f){
         			float tau_0 = fs * d_0 / c; int t_0 = (int)tau_0;
-        			if (t_0 < Nt && t_0 <= t_cross){
+        			if (t_0 < Nt && t_0 <= tc_r[(size_t)r]){
         				// comment exp term below for amplitude validation
         				/*
         				p(r) = ρ·Q̇ / (4π r)          [exact free-field monopole magnitude]
@@ -1766,7 +1770,7 @@ int main(int argc, char *argv[]){
 				// image sources loop
 				for (const ISMImagePath& iS : Q.images_at(s, r)){
 					float d = iS.distance; float tau = fs * d / c; int t = (int)tau;
-					if (t >= Nt || t > t_cross) continue; // out of range, or handed to the RT
+					if (t >= Nt || t > tc_r[(size_t)r]) continue; // out of range, or handed to the RT
 					float P = 1.0; // iterated product of per-surface reflection coefficients
 					for(int k = 0; k < iS.angle_rad.size(); k++){
 						float theta = iS.angle_rad[k];
@@ -1817,7 +1821,7 @@ int main(int argc, char *argv[]){
 				float e = 0.0;
 				//if (t > t_cross)
 				e += e_diff[((size_t)b*Q.Nr + r)*Nt + t];
-				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
+				if (t > tc_r[(size_t)r]) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;
 				//p_hf[flat(t, r, Nt)] += (float)std::sqrt(e); // amplitude validation
 				p_hf[flat(t, r, Nt)] += 4.0*M_PI * asign((unsigned)t) * (float)std::sqrt(e); // tied to Lp,1m
@@ -1857,7 +1861,7 @@ int main(int argc, char *argv[]){
 			float d_0 = Q.direct_at(s, r);
 			if (d_0 > 0.0f){
 				int t_0 = (int)(fs * d_0 / c);
-				if (t_0 < (int)Nt && t_0 <= t_cross){
+				if (t_0 < (int)Nt && t_0 <= tc_r[(size_t)r]){
 					float dir[3] = { src_arr[(size_t)(3*s+0)]-rx, src_arr[(size_t)(3*s+1)]-ry, src_arr[(size_t)(3*s+2)]-rz };
 					float nrm = std::sqrt(dir[0]*dir[0]+dir[1]*dir[1]+dir[2]*dir[2]);
 					if (nrm>1e-12f){ dir[0]/=nrm; dir[1]/=nrm; dir[2]/=nrm; }
@@ -1868,7 +1872,7 @@ int main(int argc, char *argv[]){
 			// image sources: DOA carried on iS.doa (receiver->image), gains mirror the deposit
 			for (const ISMImagePath& iS : Q.images_at(s, r)){
 				float d = iS.distance; int t = (int)(fs * d / c);
-				if (t >= (int)Nt || t > t_cross) continue;
+				if (t >= (int)Nt || t > tc_r[(size_t)r]) continue;
 				float g[8];
 				for (int b=0;b<8;b++){
 					float P = 1.0f;
