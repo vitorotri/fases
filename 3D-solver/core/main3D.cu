@@ -1649,6 +1649,23 @@ int main(int argc, char *argv[]){
 	
 	int t_cross = rt_t_cross(V, A_tot, c, fs, max_order); // index for t_cross, not value in seconds
 	if (t_cross < 1)        t_cross = 1;
+	// The DIRECT sound is always the ISM's: deterministic, positive, sub-sample (deposit) in EVERY band.
+	// If t_cross fell before it (low ISM order / short mean free path, e.g. BRAS RS1 at order 1), the
+	// direct was handed to the RT e_spec -- one sample with a random sign per band -> two octaves with
+	// opposite-sign directs cancelled at their shared edge in allIRs (-11 dB notch at 5657 Hz).
+	{
+		int t_dir_max = 0;
+		for (int s = 0; s < Q.Ns; s++)
+			for (int r = 0; r < Q.Nr; r++){
+				const float d_0 = Q.direct_at(s, r);
+				if (d_0 > 0.0f) t_dir_max = std::max(t_dir_max, (int)(fs * d_0 / c));
+			}
+		if (t_dir_max > 0 && t_cross < t_dir_max + Nw){
+			printf("\n[OK] t_cross raised from %f ms to %f ms (latest direct sound + filter length)\n",
+			       (float)t_cross * 1000.0f / fs, (float)(t_dir_max + Nw) * 1000.0f / fs);
+			t_cross = t_dir_max + Nw;
+		}
+	}
 	if (t_cross >= (int)Nt) t_cross = (int)Nt - 1;
 	
 	printf("\n[OK] t_cross = %f ms\n", (float)t_cross * 1000.0f / fs);
@@ -1704,8 +1721,13 @@ int main(int argc, char *argv[]){
 			// +s,-s,+s',-s' sequence = a first difference, power 4 sin^2(pi f/fs): -32 dB at 250 Hz,
 			// -20 dB at 1 kHz, -8 dB at 4 kHz relative to white, while the sparse early part was
 			// untouched -> EDT/T20 short in every GA band, worst at the lowest (the 250 Hz valley).
+			// SHARED across bands (no band term, keyed on the time sample): the octaves carry the same
+			// arrivals, and allIRs combines them amplitude-complementary, which assumes they are
+			// COHERENT. A per-band sign made them incoherent: -3 dB at every octave edge in the tail,
+			// and a full cancellation where two bands drew opposite signs for a strong arrival.
 			auto asign = [&](unsigned k){
-				return rt_sign(k*2654435761u + (unsigned)r*40503u + (unsigned)b*97u);
+				return rt_sign(k*2654435761u + (unsigned)r*40503u);
+				//return rt_sign(k*2654435761u + (unsigned)r*40503u + (unsigned)b*97u); // old: independent per band
 			};
 			// for each source
 			for (int s = 0; s < Q.Ns; s++){
@@ -1790,7 +1812,6 @@ int main(int argc, char *argv[]){
 			// the incoherent rir_ism.py. Random sign for the audible IR (comment for
 			// amplitude validation).
 			
-			unsigned rid = 0; // antithetic pairing over non-zero bins: caps same-sign runs at 2, independent of t_cross/order
 			for (int t = 1; t < (int)Nt; t++){
 				//float e = e_ism[t]; // amplitude validation (comment below)
 				float e = 0.0;
@@ -1799,7 +1820,9 @@ int main(int argc, char *argv[]){
 				if (t > t_cross) e += e_spec[((size_t)b*Q.Nr + r)*Nt + t];
 				if (e <= 0.0) continue;
 				//p_hf[flat(t, r, Nt)] += (float)std::sqrt(e); // amplitude validation
-				p_hf[flat(t, r, Nt)] += 4.0*M_PI * asign(rid++) * (float)std::sqrt(e); // tied to Lp,1m
+				p_hf[flat(t, r, Nt)] += 4.0*M_PI * asign((unsigned)t) * (float)std::sqrt(e); // tied to Lp,1m
+				// sign keyed on t (not a count of non-zero bins, which differs per band) -> same sign for
+				// the same sample in every octave
 			}
 
 			// this receiver is done for this band -> write its slice to associated binary file
