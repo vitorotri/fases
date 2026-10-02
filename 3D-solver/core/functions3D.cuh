@@ -21,8 +21,8 @@ __host__ float frO(float p_a, float h){
 // Computes relaxation frequency for Nitrogen in air
 __host__ float frN(float p_a, float h, float T){
 	float A, B;
-	A = p_a*std::sqrt(T/T_0)/P_0;
-	B = 9.0 + 180.0*h*std::exp(-4.17*(std::pow(T/T_0,-1.0/3.0) - 1.0));
+	A = p_a*std::sqrt(T_0/T)/P_0;
+	B = 9.0 + 280.0*h*std::exp(-4.17*(std::pow(T/T_0,-1.0/3.0) - 1.0));
 	return A*B;
 }
 
