@@ -4914,6 +4914,9 @@ class _CellDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
 
+LAYER_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1   # Layer cell: real layer name (UserRole holds the soft flag)
+
+
 class MaterialPanel(QWidget):
     """
     Single panel for ALL material layers:
@@ -4925,6 +4928,8 @@ class MaterialPanel(QWidget):
     """
     rowSelected = Signal(str)   # emitted with layer name when a row is selected
     layerActiveChanged = Signal(str, bool)   # Layer-cell check box toggled: (layer name, active)
+    layerDeleteRequested = Signal(list)      # RMB "Delete layer" / Delete key on the Layer cell: [names]
+    layerRenameRequested = Signal(str, str)  # Layer name edited in place (double-click): (old, new)
     fitBegan = Signal(str)      # a fit run started; payload = command header line
     fitLog   = Signal(str)      # one line of fitter output -> Run tab Output log
     fitAllDone = Signal(int)    # fit-all finished; payload = return code
@@ -5073,6 +5078,9 @@ class MaterialPanel(QWidget):
             QMenu::item:selected {{ background:{PAL['accent']}; color:{PAL['bg']}; }}
         """)
         choose = menu.addAction("\u26C1  Choose material from predefined list…")
+        menu.addSeparator()
+        ren = menu.addAction("Rename layer…")
+        dele = menu.addAction("Delete layer…")
 
         # Fill actions on a numeric cell: copy this value across rows / bands.
         col = item.column()
@@ -5087,7 +5095,12 @@ class MaterialPanel(QWidget):
                 fills["cols_after"]  = menu.addAction("Apply value to columns after")
 
         chosen = menu.exec(self._tbl.viewport().mapToGlobal(pos))
-        if chosen == choose:
+        if chosen == ren:
+            self._tbl.editItem(self._tbl.item(row, 0))          # same in-place edit as a double-click
+        elif chosen == dele:
+            names = self._selected_layer_names() or [self._tbl.item(row, 0).data(LAYER_NAME_ROLE)]
+            self.layerDeleteRequested.emit(names)
+        elif chosen == choose:
             self._select_material_from_ref(row)
         else:
             for mode, act in fills.items():
@@ -5280,8 +5293,9 @@ class MaterialPanel(QWidget):
             r = self._tbl.rowCount(); self._tbl.insertRow(r)
             name_item = QTableWidgetItem(name)
             name_item.setToolTip(name)   # full name on hover (cell may be elided)
-            name_item.setFlags((name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            name_item.setFlags(name_item.flags() | Qt.ItemFlag.ItemIsEditable  # double-click = rename
                                | Qt.ItemFlag.ItemIsUserCheckable)          # check box = layer active
+            name_item.setData(LAYER_NAME_ROLE, name)          # the real (OBJ group) name; UserRole = soft flag
             name_item.setCheckState(Qt.CheckState.Checked)
             self._tbl.setItem(r, 0, name_item)
             for c, v in enumerate(vals):
@@ -5500,6 +5514,14 @@ class MaterialPanel(QWidget):
         # Layer-cell check box: a pure activation toggle -- no undo entry, no .mat save.
         # Detected by the check state actually changing, so the soft/hard styling of the same cell
         # (setData/setForeground, which also emits itemChanged) keeps its old path below.
+        if item is not None and item.column() == 0:
+            old = item.data(LAYER_NAME_ROLE)
+            if old is not None and item.text() != old:            # Layer name edited -> rename request
+                new = item.text().strip()
+                self._tbl.blockSignals(True); item.setText(old); self._tbl.blockSignals(False)
+                if new and new != old:
+                    self.layerRenameRequested.emit(old, new)
+                return
         if item is not None and item.column() == 0 and (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
             st = item.checkState() == Qt.CheckState.Checked
             if getattr(self, "_active_state", {}).get(item.text(), True) != st:
@@ -5599,7 +5621,17 @@ class MaterialPanel(QWidget):
         if e.matches(QKeySequence.StandardKey.Undo):
             self._undo()
             e.accept(); return
+        if e.key() == Qt.Key.Key_Delete and self._tbl.currentColumn() == 0:   # only from the Layer cell
+            names = self._selected_layer_names()
+            if names:
+                self.layerDeleteRequested.emit(names)
+            e.accept(); return
         super().keyPressEvent(e)
+
+    def _selected_layer_names(self):
+        rows = sorted({ix.row() for ix in self._tbl.selectedIndexes()} or
+                      ({self._tbl.currentRow()} if self._tbl.currentRow() >= 0 else set()))
+        return [self._tbl.item(r, 0).data(LAYER_NAME_ROLE) for r in rows if self._tbl.item(r, 0)]
 
     def _copy_selection(self):
         _tsv_copy_selection(self._tbl)
@@ -8331,6 +8363,8 @@ class MainWindow(QMainWindow):
         self._mat_panel.status.connect(lambda t: self._sb.showMessage(t))   # shared status bar
         self._mat_panel.rowSelected.connect(self._on_material_row_selected)
         self._mat_panel.layerActiveChanged.connect(self._on_layer_active_changed)
+        self._mat_panel.layerDeleteRequested.connect(self._on_layer_delete)
+        self._mat_panel.layerRenameRequested.connect(self._on_layer_rename)
         self._mat_panel.fitBegan.connect(self._begin_fit_log)
         self._mat_panel.fitLog.connect(self._append_fit_log)
         self._mat_panel.fitAllDone.connect(self._on_fit_all_finished)
@@ -9992,6 +10026,132 @@ class MainWindow(QMainWindow):
         self._gl.set_layer_visible(name, bool(active))
         self._mark_dirty()
         self._sb.showMessage(f"Layer {name}: {'active' if active else 'DEACTIVATED (not simulated)'}")
+
+    def _layer_files(self, name):
+        """Every project file named after a layer: input/mat/<n>.mat, input/fit/<n>.fit and <n>.imp (written
+        by fminconFIT), input/imp/<n>.imp (read by main3D's ISM), input/sctr/<n>.sctr. Existing ones only."""
+        if not self._proj_root:
+            return []
+        inp = os.path.join(self._proj_root, "input")
+        cand = [os.path.join(inp, "mat", name + ".mat"), os.path.join(inp, "fit", name + ".fit"),
+                os.path.join(inp, "fit", name + ".imp"), os.path.join(inp, "imp", name + ".imp"),
+                os.path.join(inp, "sctr", name + ".sctr")]
+        return [f for f in cand if os.path.isfile(f)]
+
+    def _edit_allmat(self, drop=(), rename=None):
+        """ALL.mat (hard/soft registry): remove the entries in `drop`; rename=(old, new) renames one."""
+        allp = self._mat_panel._allmat_path()
+        if not (allp and os.path.isfile(allp)):
+            return
+        out = []
+        for l in open(allp).read().split("\n"):
+            t = l.split()
+            if t and t[0] in drop:
+                continue
+            if t and rename and t[0] == rename[0]:
+                l = rename[1] + l[len(rename[0]):]
+            out.append(l)
+        open(allp, "w").write("\n".join(out))
+
+    def _on_layer_delete(self, names):
+        """Delete layers (always confirmed): their faces leave the scene AND their material files
+        (.mat/.fit/.imp/.sctr + ALL.mat entry) are deleted. The bounding box and every other layer stay.
+        Goes through _rewrite_scene (derived <base>_grouped.obj from the current geometry, reloaded) like
+        Group/Explode/Cleanse, so src/rec keep their frame. The previous scene file is kept as <file>.bak."""
+        if not self._obj_path or not names:
+            return
+        pl = self._gl._prop_layers()
+        blocked = [n for n in names if n in pl]
+        if blocked:
+            QMessageBox.information(self, "Delete layer",
+                "These layers belong to placed props and are rebuilt from them:\n  " + ", ".join(blocked)
+                + "\n\nRemove the props in Draw mode instead.")
+            names = [n for n in names if n not in pl]
+            if not names:
+                return
+        keep = [g for g in self._gl._groups if g["name"] not in names]
+        if not any(not g["is_bbox"] and len(g["tris"]) for g in keep):
+            QMessageBox.warning(self, "Delete layer", "That would leave the scene without any surface."); return
+        txt = (f"Delete layer '{names[0]}'?" if len(names) == 1 else
+               f"Delete these {len(names)} layers?\n  " + ", ".join(names))
+        if QMessageBox.question(self, "Delete layer",
+                txt + "\n\nIts surfaces are removed from the scene and its material files (.mat, .fit, "
+                ".imp, .sctr) are deleted. The previous scene file is kept as a .bak copy.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            import shutil
+            shutil.copy2(self._obj_path, self._obj_path + ".bak")
+        except OSError:
+            pass
+        self._mat_panel.save_all()                       # keep the OTHER layers' current values
+        removed = 0
+        for n in names:
+            getattr(self, "_inactive_layers", set()).discard(n)
+            for f in self._layer_files(n):
+                try:
+                    os.remove(f); removed += 1
+                except OSError:
+                    pass
+        self._edit_allmat(drop=set(names))
+        self._rewrite_scene([{"name": g["name"], "tris": g["tris"]} for g in keep],
+                            f"Deleted layer(s): {', '.join(names)} and {removed} material file(s)  "
+                            f"(scene backup: {os.path.basename(self._obj_path)}.bak)")
+        self._mark_dirty()
+
+    def _on_layer_rename(self, old, new):
+        """Rename a layer (edited in place in the materials table). Renames the OBJ group (scene rewrite,
+        like delete) and everything named after it: input/mat|fit|imp|sctr files, the ALL.mat entry, the
+        deactivated flag and the props using it -- nothing to set or fit again (a .fit's signature depends
+        on the absorption values, not the name). Renaming to an EXISTING layer MERGES into it (confirmed):
+        the faces join that layer, its material is kept, the renamed layer's own material files go."""
+        import re, shutil
+        if not self._obj_path:
+            return
+        names = {g["name"] for g in self._gl._groups}
+        why = ("may not contain spaces or slashes" if re.search(r"[\s/\\]", new) else
+               "is reserved for the domain box" if _is_bbox(new) else "")
+        if why:
+            QMessageBox.warning(self, "Rename layer", f"'{new}' {why}."); return
+        merge = new in names
+        if merge and QMessageBox.warning(self, "Merge layers",
+                f"A layer '{new}' already exists: renaming '{old}' to '{new}' MERGES the two layers.\n\n"
+                f"The surfaces of '{old}' join '{new}' and take its material; the material files of '{old}' "
+                f"(.mat, .fit, .imp, .sctr) are deleted.\n\nThe merged layer can be split again later: "
+                f"RMB in the scene -> Select surfaces, pick them, then RMB -> Explode.\n\nMerge?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self._mat_panel.save_all()                      # current values -> files + ALL.mat first
+        for f in self._layer_files(old):
+            try:
+                if merge:
+                    os.remove(f)                        # the target's material wins
+                else:
+                    d, base = os.path.split(f)
+                    shutil.move(f, os.path.join(d, new + base[len(old):]))
+            except OSError as ex:
+                QMessageBox.warning(self, "Rename layer", f"Could not update {f}: {ex}"); return
+        self._edit_allmat(drop={old} if merge else (), rename=None if merge else (old, new))
+        inact = getattr(self, "_inactive_layers", set())
+        if old in inact:
+            inact.discard(old)
+            if not merge:
+                inact.add(new)                          # merging keeps the target layer's own state
+        if any(p.layer == old for p in self._gl._props):  # props baked under that layer follow it
+            for p in self._gl._props:
+                if p.layer == old:
+                    p.layer = new
+            self._save_props_json()
+        out = {}                                        # one group per name: a merge must not leave two
+        for g in self._gl._groups:                      # 'new' groups (two table rows of the same name)
+            nm = new if g["name"] == old else g["name"]
+            t = np.asarray(g["tris"]).reshape(-1, 3)
+            out[nm] = np.vstack([out[nm], t]) if nm in out else t
+        self._rewrite_scene([{"name": nm, "tris": t} for nm, t in out.items()],
+                            f"Layer '{old}' merged into '{new}'." if merge else f"Layer '{old}' renamed to '{new}'.")
+        self._mark_dirty()
 
     def _refresh_gl_points(self):
         self._gl.set_sources(  [(p[0],p[1],p[2]) + ((p[3],) if len(p) > 3 else ())
