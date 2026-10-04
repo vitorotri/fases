@@ -62,17 +62,21 @@ def _c_sound():
 def _rir_parts(rec, src):
     """Pieces shared by foa_rir and hoa_rir, at FS, world frame, or None if the pair has no data:
     (N, LIRp, XYZl (3,N) low-band -Z0*v or None, arrivals [(start, kernel, unit doa)], a, tail,
-    t_cross, e_hip = energy of HIRp[:t_cross], has_rt).
-    has_rt (HRT files present, allIRs.rt_only_ir): a = 1 (the ARR gains ARE the deposited pressures) and
-    tail = the RT-only stream at ALL times -- nothing counted twice. Otherwise (older runs) the previous
-    method: `a` rescales the arrivals to HIRp's early energy and the tail is HIRp after the last arrival."""
+    t_cross, e_hip, has_rt) -- the last three are always (0, 0.0, True) now.
+    Needs the HRT files (allIRs.rt_only_ir): a = 1 (the ARR gains ARE the deposited pressures) and
+    tail = the RT-only stream at ALL times -- nothing counted twice. Runs older than the HRT split are
+    refused (None): their RT share cannot be separated from HIRp."""
     res = allIRs.broadband_ir(rec, src)
     if res is None:
         return None
     _, LIRp, HIRp = res
     RTp = allIRs.rt_only_ir(rec, src)                          # None for runs without HRT files
-    fx = allIRs.f_cutoff                                       # the crossover broadband_ir settled on
-    N = max(LIRp.size, HIRp.size, RTp.size if RTp is not None else 0) + 512
+    if RTp is None:
+        print(f"[ambisonic] !! rec{rec} src{src}: no HRT files (run older than the HRT split) -> skipped. "
+              "Re-run the GA (GA-only reuses the FVM) to auralize it.")
+        return None
+    fx = allIRs.f_cutoff                                      # the crossover broadband_ir settled on
+    N = max(LIRp.size, HIRp.size, RTp.size) + 512
     XYZl = None
     vf = f"VEL{rec}_{src}.bin"
     if LIRp.any() and allIRs.fs_fv is not None and os.path.isfile(vf):
@@ -87,28 +91,14 @@ def _rir_parts(rec, src):
     af = f"ARR{rec}_{src}.bin"
     delay, doa, g = read_arrivals(af) if os.path.isfile(af) else (np.zeros(0), np.zeros((0, 3)), np.zeros((0, 8)))
     band_w = _band_weights(np.fft.rfftfreq(KLEN, 1 / FS))
-    arr, eW = [], np.zeros(N)
+    arr = []
     for k in range(delay.size):
         ker = arrival_kernel(g[k], band_w)
         s0 = int(round(delay[k] * FS)) - KLEN // 2             # compensate kernel group delay
         arr.append((s0, ker, doa[k] / (np.linalg.norm(doa[k]) or 1.0)))
-        _place(eW, ker, s0)
-    if RTp is not None:                                        # exact arrivals + RT-only tail at all times
-        tail = np.zeros(N)
-        tail[:RTp.size] = RTp
-        return N, LIRp, XYZl, arr, 1.0, tail, 0, 0.0, True
-    print(f"[ambisonic] rec{rec} src{src}: no HRT files (older main3D) -> previous method (rescaled arrivals, "
-          "tail after the last arrival)")
-    t_cross = int(round((delay.max() if delay.size else 0) * FS)) + KLEN
-    e_arr = np.dot(eW[:t_cross], eW[:t_cross])
-    hi = HIRp[:min(t_cross, HIRp.size)]
-    e_hip = np.dot(hi, hi)
-    a = np.sqrt(e_hip / e_arr) if (e_arr > 0 and e_hip > 0) else 1.0
-
-    tail = np.zeros(N)
-    if HIRp.size > t_cross:
-        tail[t_cross:HIRp.size] = HIRp[t_cross:]
-    return N, LIRp, XYZl, arr, a, tail, t_cross, e_hip, False
+    tail = np.zeros(N)                                         # exact arrivals + RT-only tail at all times
+    tail[:RTp.size] = RTp
+    return N, LIRp, XYZl, arr, 1.0, tail, 0, 0.0, True
 
 
 def foa_rir(rec, src):
@@ -204,17 +194,6 @@ def hoa_rir(rec, src, order=3, g=None, pose=(0.0, 0.0, 0.0)):
         g_df = float(np.sum(np.asarray(g, float) ** 2)) / (8.0 * np.pi)
         if g_df > 0:
             Se /= np.sqrt(g_df)
-    elif g is not None and e_hip > 0 and t_cross > 0:
-        # Calibrate AFTER the HRTF, exactly as binauralize.brir: the decoded early field (both ears,
-        # [:t_cross]) must carry 2 x HIRp's early energy. Calibrating before the decode (the `a` above)
-        # left the HRTF set's own gain (pinna/ear-canal boost, several dB) on the direct sound + early
-        # reflections but not on the diffuse tail -> too high a direct-to-reverberant ratio, "dead".
-        n_e = min(N, t_cross)
-        seg = np.pad(Se[:, :n_e], ((0, 0), (0, g.shape[-1])))
-        dec = hoa_decode(seg, np.zeros((2, seg.shape[1])), g, pose, order)
-        e_bin = float((dec[:, :n_e] ** 2).sum())
-        if e_bin > 0:
-            Se *= np.sqrt(2.0 * e_hip / e_bin)
     return S + Se, tail
 
 

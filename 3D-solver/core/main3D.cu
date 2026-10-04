@@ -1664,9 +1664,7 @@ int main(int argc, char *argv[]){
 	//int t_cross = (int)Nt; // ISM amplitude validation
 	//int t_cross = 0; // RT amplitude validation
 	
-	int t_cross = rt_t_cross(V, A_tot, c, fs, max_order); // index for t_cross, not value in seconds
-	if (t_cross < 1)        t_cross = 1;
-	if (t_cross >= (int)Nt) t_cross = (int)Nt - 1;
+	int t_cross = rt_t_cross(V, A_tot, c, fs, Q.order_used); // index for t_cross, not value in seconds; the order the ISM really computed
 	// t_cross no longer gates anything (handover is by reflection order, see rt_trace_late above); it is kept
 	// as the statistical estimate of when the ISM order is "complete" (information only).
 

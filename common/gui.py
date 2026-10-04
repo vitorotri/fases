@@ -61,9 +61,11 @@ try:
     try:
         matplotlib.use("QtAgg")
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
     except Exception:
         matplotlib.use("Qt5Agg")
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavToolbar
     _HAS_MPL = True
 except Exception:
     _HAS_MPL = False
@@ -6547,6 +6549,16 @@ class SolverThread(QThread):
                              "The GPU context will not free until reboot.")
 
 
+def _tight_on_resize(fig, rect=None):
+    """Tight layout that re-runs on every redraw/resize of a live canvas (matplotlib >= 3.6: layout engine;
+    older: the equivalent set_tight_layout flag). rect = (left, bottom, right, top) area to fit into."""
+    kw = {} if rect is None else {"rect": rect}
+    try:
+        fig.set_layout_engine("tight", **kw)
+    except AttributeError:
+        fig.set_tight_layout(kw or True)
+
+
 class ResultsView(QWidget):
     """Floating plot window: a metric selector on top (IR+Spectrum, or an ISO-3382 param per band)
     and the rendered PNG below. Image-based on purpose: setPixmap always repaints."""
@@ -6585,6 +6597,13 @@ class ResultsView(QWidget):
         self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)  # window min after maximize
         self._label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         lay.addWidget(self._label, 1)
+        # Interactive view (every Results plot): a live matplotlib canvas + its toolbar (zoom box,
+        # pan, home/back/forward, save, cursor readout). Hidden while a text hint / PNG is shown.
+        self._fig_box = QWidget(); self._fig_lay = QVBoxLayout(self._fig_box)
+        self._fig_lay.setContentsMargins(0, 0, 0, 0); self._fig_lay.setSpacing(2)
+        self._canvas = self._toolbar = None
+        self._fig_box.hide()
+        lay.addWidget(self._fig_box, 1)
         from PySide6.QtGui import QShortcut, QKeySequence   # Ctrl+C works even when the combo has focus
         QShortcut(QKeySequence.StandardKey.Copy, self, activated=self._copy_csv)
 
@@ -6675,8 +6694,36 @@ class ResultsView(QWidget):
     def set_project(self, root):
         self._proj_root = root
 
+    def show_figure(self, fig):
+        """Interactive view: show matplotlib Figure `fig` in a live canvas with the standard toolbar (drag a
+        box to zoom, pan, Home/Back/Forward, save PNG/SVG/PDF, cursor coordinates). Replaces any previous
+        canvas; a fresh canvas + toolbar per figure keeps the toolbar's view history tied to that figure."""
+        if not _HAS_MPL:
+            return
+        for w in (self._toolbar, self._canvas):
+            if w is not None:
+                self._fig_lay.removeWidget(w); w.deleteLater()
+        self._canvas = FigureCanvas(fig)
+        # Param/Summary views (export table or compare actions): RMB goes up to contextMenuEvent below.
+        # IR/h² views: no menu, so RMB-drag in zoom mode = zoom out.
+        menu = bool(self._export) or self.current_metric() == "Summary (avg)"
+        self._canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu if menu
+                                          else Qt.ContextMenuPolicy.PreventContextMenu)
+        self._toolbar = NavToolbar(self._canvas, self._fig_box)
+        self._toolbar.setStyleSheet(f"QToolBar{{background:{PAL['panel']};border:none;}}"
+                                    f"QLabel{{color:{PAL['text']};}}")
+        self._fig_lay.addWidget(self._toolbar); self._fig_lay.addWidget(self._canvas, 1)
+        self._pix = None
+        self._label.hide(); self._fig_box.show()
+        self._canvas.draw_idle()
+
+    def _show_image_mode(self):
+        """PNG views (parameter plots, hints): hide the interactive canvas, show the picture label."""
+        self._fig_box.hide(); self._label.show()
+
     def show_receiver(self, rec):
         from PySide6.QtGui import QPixmap
+        self._show_image_mode()
         if self._proj_root is None or rec is None or rec < 0:
             return
         path = os.path.join(self._proj_root, "output", f"IR_rec{rec}.png")
@@ -6690,6 +6737,7 @@ class ResultsView(QWidget):
     def show_png(self, path):
         """Show an arbitrary PNG (e.g. the on-the-fly receiver-overlay plot)."""
         from PySide6.QtGui import QPixmap
+        self._show_image_mode()
         if not path or not os.path.isfile(path):
             self._pix = None; self._label.setText("No overlay plot."); return
         self._pix = QPixmap(path); self._rescale()
@@ -7524,7 +7572,7 @@ class MainWindow(QMainWindow):
         if script is None:
             self._sb.showMessage("allIRs.py not found next to gui.py."); return
         if self._broadband_fresh(out, script):                # same simulation, already processed
-            self._sb.showMessage("Broadband IRs up to date — reusing them.")
+            self._sb.showMessage("Broadband IRs up to date - reusing them.")
             if not self._params_fresh(out):
                 self._run_acouparams()
             self._show_results_now()
@@ -7549,6 +7597,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "_view_mode", None) == "results":
             if self._results_sel:                          # honour the current multi-selection
                 self._apply_results_selection(mirror_table=True)
+            elif self._results.current_metric() == "IR + Spectrum" and self._current_receiver_row() >= 0:
+                self._render_overlay([self._current_receiver_row()])   # live, zoomable
             else:
                 self._results.show_receiver(self._current_receiver_row())
 
@@ -7924,7 +7974,7 @@ class MainWindow(QMainWindow):
             self._results.show_png(None); return
         if metric == "IR + Spectrum":
             self._results.set_export(None)             # no tabular export for IR/Spectrum
-            self._render_overlay(recs) if len(recs) > 1 else self._results.show_receiver(recs[0])
+            self._render_overlay(recs)                 # 1 receiver too: live, zoomable (was allIRs' static PNG)
         elif metric == "h² normalized (dB)":
             self._results.set_export(None)
             self._render_h2(recs)
@@ -7935,8 +7985,6 @@ class MainWindow(QMainWindow):
         """Overlay IR + frequency response of several receivers from the saved IR_broad_*.npy (no
         re-run). One column per source (rows: IR, spectrum), one colour per receiver, GUI-themed."""
         import glob, re
-        import matplotlib; matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         out = os.path.join(self._proj_root, "output")
         fs = 44100                                     # allIRs saves broadband IRs at this rate
         FG, BG = PAL['text'], PAL['bg']
@@ -7950,7 +7998,8 @@ class MainWindow(QMainWindow):
         if not irs:
             self._results.show_png(None); return
         srcs = sorted({src for _, src in irs})
-        fig, axes = plt.subplots(2, len(srcs), figsize=(6 + 3 * len(srcs), 7), squeeze=False)
+        fig = Figure(figsize=(6 + 3 * len(srcs), 7))   # live figure for the interactive canvas (no pyplot)
+        axes = fig.subplots(2, len(srcs), squeeze=False)
         for c, src in enumerate(srcs):
             ax_t, ax_f = axes[0, c], axes[1, c]
             for i, rec in enumerate(recs):
@@ -7964,7 +8013,11 @@ class MainWindow(QMainWindow):
                 ax_f.semilogx(fr[1:], 20 * np.log10(H[1:] / 2e-5 + 1e-12), lw=0.8, color=col, label=name)   # IR in Pa: direct sound at 1 m reads Lp,1m
             snames = self._src_tbl.get_names()
             sname = snames[src] if 0 <= src < len(snames) and snames[src] else f"source {src}"
-            tag = f"{sname} - " if len(srcs) > 1 else "Receiver comparison - "
+            if len(recs) == 1:                         # one receiver: "receiver ← source - ..."
+                rn = names[recs[0]] if recs[0] < len(names) and names[recs[0]] else f"receiver {recs[0]}"
+                tag = f"{rn} ← {sname} - "
+            else:
+                tag = f"{sname} - " if len(srcs) > 1 else "Receiver comparison - "
             ax_t.set_title(f"{tag}impulse response")
             ax_t.set_xlabel("Time [s]"); ax_t.set_ylabel("Amplitude")
             ax_f.set_title(f"{tag}frequency response")
@@ -7979,10 +8032,8 @@ class MainWindow(QMainWindow):
             leg = ax.legend(fontsize=8)
             leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
             for t in leg.get_texts(): t.set_color(FG)
-        fig.tight_layout()
-        path = os.path.join(out, "IR_overlay.png")
-        fig.savefig(path, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
-        self._results.show_png(path)
+        _tight_on_resize(fig)
+        self._results.show_figure(fig)
 
     def _render_h2(self, recs, floor_db=-40.0, pre=0.02):
         """Squared impulse responses normalized by their own maximum, in dB: 10 log10(h^2 / max h^2),
@@ -7990,8 +8041,6 @@ class MainWindow(QMainWindow):
         (columns); all panels share one time window, from `pre` s before the earliest direct sound
         (the maximum of each normalized IR) to the end of the longest IR, and a floor at `floor_db`."""
         import glob, re
-        import matplotlib; matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         out = os.path.join(self._proj_root, "output")
         fs = 44100                                     # allIRs saves broadband IRs at this rate
         FG, BG = PAL['text'], PAL['bg']
@@ -8011,8 +8060,8 @@ class MainWindow(QMainWindow):
         t_dir = min(int(np.argmax(np.abs(v))) for v in irs.values()) / fs
         t0 = max(0.0, t_dir - pre)
         t1 = max(v.size for v in irs.values()) / fs      # up to the IRs' own maximum time
-        fig, axes = plt.subplots(len(rows), len(cols), figsize=(4.2 * len(cols) + 1.5, 2.2 * len(rows) + 0.8),
-                                 sharex=True, sharey=True, squeeze=False)
+        fig = Figure(figsize=(4.2 * len(cols) + 1.5, 2.2 * len(rows) + 0.8))   # live figure (no pyplot)
+        axes = fig.subplots(len(rows), len(cols), sharex=True, sharey=True, squeeze=False)
         for i, rec in enumerate(rows):
             for j, src in enumerate(cols):
                 ax = axes[i, j]
@@ -8036,23 +8085,20 @@ class MainWindow(QMainWindow):
             ax.tick_params(colors=FG, which='both')
             ax.xaxis.label.set_color(FG); ax.yaxis.label.set_color(FG); ax.title.set_color(FG)
             ax.grid(True, which='both', color=PAL['border'], alpha=0.6)
-        fig.tight_layout()
-        path = os.path.join(out, "IR_h2_normalized.png")
-        fig.savefig(path, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
-        self._results.show_png(path)
+        _tight_on_resize(fig)
+        self._results.show_figure(fig)
 
     def _render_params(self, recs, param):
         """Plot one ISO-3382 parameter vs octave band, one line per receiver, from params.json
         (acouparams.py). Nulls (undefined bands) are dropped. GUI-themed."""
         self._results.set_export(None)                 # cleared until a table is successfully built
         import json
-        import matplotlib; matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         from PySide6.QtGui import QPixmap
         out = os.path.join(self._proj_root, "output")
         frac = self._results.bands_fraction()
         pj = os.path.join(out, "params3.json" if frac == 3 else "params.json")
         if not os.path.isfile(pj):
+            self._results._show_image_mode()
             self._results._label.setPixmap(QPixmap())
             self._results._label.setText(f"Computing 1/{frac}-octave parameters… (acouparams.py)")
             self._run_acouparams(frac); return
@@ -8068,7 +8114,8 @@ class MainWindow(QMainWindow):
         snames = self._src_tbl.get_names()             # user's source names (table order == source index)
         sname = lambda i: snames[i] if 0 <= i < len(snames) and snames[i] else f"source {i}"
         panels = [(sname(int(sv)), data["sources"][sv]) for sv in srcs] if len(srcs) > 1 else [(None, data)]
-        fig, axes = plt.subplots(len(panels), 1, figsize=(8, 4.2 * len(panels)), sharex=True, squeeze=False)
+        fig = Figure(figsize=(8, 4.2 * len(panels)))
+        axes = fig.subplots(len(panels), 1, sharex=True, squeeze=False)
         export_cols, export_rows, ref_bands, any_drawn = [], None, None, False
         for ax, (ptitle, pdata) in zip(axes[:, 0], panels):
             drawn = [(rec, pdata.get(str(rec))) for rec in recs
@@ -8112,7 +8159,7 @@ class MainWindow(QMainWindow):
             cols = [[_cell(d[param][j]) for _, d in drawn] + [_cell(avg[j])] for j in range(len(ref_bands))]
             export_rows = cols if export_rows is None else [r0 + r1 for r0, r1 in zip(export_rows, cols)]
         if not any_drawn:
-            plt.close(fig)
+            self._results._show_image_mode()
             self._results._label.setPixmap(QPixmap())
             self._results._label.setText(f"No {param} values for the selected receiver(s)."); return
         self._results.set_export({
@@ -8120,10 +8167,8 @@ class MainWindow(QMainWindow):
             "rows": [(str(bnd), export_rows[j]) for j, bnd in enumerate(ref_bands)]})
         axes[-1, 0].set_xlabel("Octave band [Hz]"); axes[-1, 0].xaxis.label.set_color(FG)
         fig.patch.set_facecolor(BG)
-        fig.tight_layout()
-        p = os.path.join(out, "IR_params.png")
-        fig.savefig(p, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
-        self._results.show_png(p)
+        _tight_on_resize(fig)
+        self._results.show_figure(fig)
 
     # ── Summary: single-number ratings, room-average, cross-simulation compare ──
     _SUMMARY = {"T20": ([500, 1000], "T20 mid", "s"), "T30": ([500, 1000], "T30 mid", "s"),
@@ -8169,13 +8214,12 @@ class MainWindow(QMainWindow):
     def _render_summary(self):
         """2x3 grid of single-number ratings, one bar per simulation (current + compared), by folder."""
         import json
-        import matplotlib; matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         from matplotlib.patches import Patch
         from PySide6.QtGui import QPixmap
         out = os.path.join(self._proj_root, "output")
         pj = os.path.join(out, "params.json")
         if not os.path.isfile(pj):
+            self._results._show_image_mode()
             self._results._label.setPixmap(QPixmap())
             self._results._label.setText("Computing parameters… (acouparams.py)")
             self._run_acouparams(); return
@@ -8189,7 +8233,8 @@ class MainWindow(QMainWindow):
                 b, a = self._room_avg(data, p)
                 vals.append(self._single_number(p, b, a) if b is not None else None)
             table[p] = vals
-        fig, axes = plt.subplots(2, 3, figsize=(10, 6))
+        fig = Figure(figsize=(10, 6))
+        axes = fig.subplots(2, 3)
         for ax, p in zip(axes.ravel(), params):
             ys = [v if v is not None else np.nan for v in table[p]]
             ax.bar(range(len(series)), ys, width=0.35, color=[_plot_color(i) for i in range(len(series))])
@@ -8206,10 +8251,7 @@ class MainWindow(QMainWindow):
         leg.get_frame().set_facecolor(PAL['panel']); leg.get_frame().set_edgecolor(PAL['border'])
         for t in leg.get_texts(): t.set_color(FG)
         fig.suptitle("Single-number ratings - simulation comparison", color=FG)
-        fig.tight_layout(rect=[0, 0.06, 1, 0.96])
-        p = os.path.join(out, "IR_summary.png")
-        fig.savefig(p, dpi=120, facecolor=fig.get_facecolor()); plt.close(fig)
-        self._results.show_png(p)
+        _tight_on_resize(fig, rect=[0, 0.06, 1, 0.96])
         # export: rows = parameters, columns = simulations
         def _c(v): return None if v is None or not np.isfinite(v) else float(v)
         self._results.set_export({
@@ -8217,6 +8259,7 @@ class MainWindow(QMainWindow):
             "columns": [lbl for lbl, _ in series],
             "rows": [(f"{self._SUMMARY[p][1]} [{self._SUMMARY[p][2]}]".strip(" []"),
                       [_c(v) for v in table[p]]) for p in params]})
+        self._results.show_figure(fig)
 
     def _on_point_hovered(self, kind, idx):
         """G-mode hover over a point -> select its row in the matching table
@@ -8418,8 +8461,13 @@ class MainWindow(QMainWindow):
         lay.addRow("ADE poles", self._npoles)
 
         # Max reflection order for the ISM (line 13 of config.txt; main3D reads v[12])
-        self._ism_order = QSpinBox(); self._ism_order.setRange(0, 20)
+        # Max 10: the image tree grows x(planes-1) per order (shoebox order 10 = 15M images); main3D also
+        # lowers the order at runtime if the tree cannot fit in half the free RAM (printed with [!]).
+        self._ism_order = QSpinBox(); self._ism_order.setRange(0, 10)
         self._ism_order.setValue(3); self._ism_order.setMinimumWidth(130)
+        self._ism_order.setToolTip("Highest reflection order computed by the image-source method (max 10). "
+                                   "Higher orders are covered by the ray tracer. If the image tree does not fit "
+                                   "in half the free RAM, the solver lowers the order and says so in the log.")
         lay.addRow("ISM max order", self._ism_order)
 
         # Number of rays for the ray-traced late tail (line 15 of config.txt; main3D

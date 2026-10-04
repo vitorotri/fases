@@ -502,6 +502,20 @@ inline static bool ism_validate_path(const Scene3D& Sc,const std::vector<Reflect
     return true;
 }
 
+// Free physical RAM [bytes] the ISM may plan with; 0 = unknown. Linux: MemAvailable (counts reclaimable
+// page cache; sysconf's AVPHYS_PAGES does not and would understate it badly). Windows: ullAvailPhys.
+inline static double ism_free_ram_bytes(){
+#if defined(_WIN32)
+    MEMORYSTATUSEX m; m.dwLength = sizeof(m);
+    return GlobalMemoryStatusEx(&m) ? (double)m.ullAvailPhys : 0.0;
+#else
+    std::ifstream f("/proc/meminfo"); std::string key; double kb;
+    while(f >> key >> kb){ if(key == "MemAvailable:") return kb*1024.0; f.ignore(256, '\n'); }
+    const long pg = sysconf(_SC_AVPHYS_PAGES), ps = sysconf(_SC_PAGE_SIZE);
+    return (pg > 0 && ps > 0) ? (double)pg*(double)ps : 0.0;
+#endif
+}
+
 // ============================================================
 // Top-level: paths for every (source, receiver) pair
 // ============================================================
@@ -523,11 +537,14 @@ inline static void ism_paths_for_pairs(
     std::vector<Reflector> planes; std::vector<int> tri2plane; std::vector<uint8_t> curvedflag;
     ism_build_reflectors(Sc,cfg,planes,tri2plane,curvedflag);
 
-    // Clamp order so the image tree (~P*(P-1)^(order-1) nodes) cannot exhaust RAM:
-    // find the deepest order whose predicted node count stays under the cap.
-    // ponytail: hard cap of 2e6 images (~56 MB tree); raise if you truly need deeper trees
+    // The user's order is used whenever its image tree (~P*(P-1)^(order-1) nodes) fits in RAM; only if it
+    // cannot fit, take the deepest order that does (else bad_alloc AFTER the FVM has run). Budget = half the
+    // free RAM; a node costs sizeof(ISMImageNode) x 3 (std::vector growth: old + doubled buffer at the last
+    // reallocation). The GUI already limits the order to 10 (shoebox: 15M images, ~1.2 GB with that factor).
     {
-        const double cap = 2e6, P = (double)planes.size();
+        const double ram = ism_free_ram_bytes();
+        const double cap = (ram > 0.0) ? 0.5*ram / (3.0*(double)sizeof(ISMImageNode)) : DBL_MAX;   // unknown -> no limit
+        const double P = (double)planes.size();
         double total = 1.0, level = 1.0; int ord = 0;
         while(ord < cfg.max_order){
             level *= (ord == 0) ? P : std::max(P - 1.0, 0.0);
@@ -535,8 +552,10 @@ inline static void ism_paths_for_pairs(
             total += level; ++ord;
         }
         if(ord < cfg.max_order){
-            std::fprintf(stderr,"[ISM] max_order %d with %d reflectors exceeds %.0f images; clamped to order %d.\n",
-                         cfg.max_order,(int)planes.size(),cap,ord);
+            std::fprintf(stderr,"\n[!] [ISM] max_order %d with %d reflectors needs more than half the free RAM "
+                         "(%.1f GB free, budget %.3g images); REDUCED to order %d. The RT covers orders > %d.\n",
+                         cfg.max_order,(int)planes.size(),ram/1e9,cap,ord,ord);
+            std::printf("\n[!] ISM order REDUCED %d -> %d (not enough free RAM for the image tree)\n",cfg.max_order,ord);
             cfg.max_order = ord;
         }
     }

@@ -10,10 +10,10 @@ hrtf-auralization-design):
     the binaural cue is basically ITD, so convolving the whole low IR with the direct-DOA HRIR pair is
     faithful. ponytail: single direction over-localizes low reverb to the source; DirAC per-sample DOA
     from the exported VEL (p*v intensity) is the named upgrade.
-  * ISM early reflections (ARR file, <= t_cross): discrete arrivals, one HRIR per image-source DOA,
-    octave-gain-shaped, placed at its delay. The spatial meat.
-  * Diffuse late tail (HIRp beyond the last arrival): isotropic -> decorrelated L/R (freq-dependent
-    interaural coherence), NOT HRTF'd per ray.
+  * ISM reflections (ARR file, every order <= the ISM order used): discrete arrivals, one HRIR per
+    image-source DOA, octave-gain-shaped, placed at its delay. The spatial meat.
+  * RT part (HRT files, all times: scattered + specular above the ISM order): isotropic -> decorrelated
+    L/R (freq-dependent interaural coherence), NOT HRTF'd per ray. Runs without HRT files are refused.
 
 Reuses allIRs.broadband_ir for the calibrated LIRp/HIRp (deconvolution + FVM<->GA crossover + spectral
 match) so the binaural streams band-split IDENTICALLY to the mono broadband IR. Only direction is added.
@@ -192,13 +192,16 @@ def _place(dst, ir, start):
 def brir(LIRp, HIRp, arrivals, hrtf, head_pose, band_w=None, RTp=None):
     """Stereo BRIR (2, N) from the calibrated mono streams + ISM arrivals + head pose (az,el,roll rad).
     LIRp = FVM low band, HIRp = GA high band (early+diffuse mixed), arrivals = (delay_s, doa, g8).
-    RTp = RT-only GA stream (allIRs.rt_only_ir): if given, the ISM arrivals are rendered EXACTLY (their ARR
+    RTp = RT-only GA stream (allIRs.rt_only_ir), REQUIRED: the ISM arrivals are rendered EXACTLY (their ARR
     gains are the deposited pressures) scaled only by the HRTF set's diffuse-field gain, and RTp is the
-    whole diffuse tail at ALL times -- each part counted once. None (older runs) -> previous window rescale."""
+    whole diffuse tail at ALL times -- each part counted once. Without it (runs older than the HRT files)
+    the RT share cannot be separated from HIRp, so there is no correct BRIR -> ValueError."""
+    if RTp is None:
+        raise ValueError("no HRT files: re-run the GA (GA-only reuses the FVM) to auralize this run")
     basis = head_basis(*head_pose)
     band_w = _band_weights(np.fft.rfftfreq(KLEN, 1 / FS)) if band_w is None else band_w
     delay, doa, g = arrivals
-    N = max(LIRp.size, HIRp.size, RTp.size if RTp is not None else 0) + 512
+    N = max(LIRp.size, HIRp.size, RTp.size) + 512
     bl, br = np.zeros(N), np.zeros(N)
 
     # --- FVM low band: convolve with the direct-DOA HRIR (earliest arrival = direct) ---
@@ -221,37 +224,13 @@ def brir(LIRp, HIRp, arrivals, hrtf, head_pose, band_w=None, RTp=None):
         _place(early_l, fftconvolve(hL, ker), s)
         _place(early_r, fftconvolve(hR, ker), s)
 
-    if RTp is not None:
-        # ISM arrivals as they are, minus the HRTF set's own (diffuse-field) gain; the tail is the RT's share
-        # of the GA bands at all times (scattered + specular above the ISM order), decorrelated per ear.
-        s = 1.0 / np.sqrt(hrtf_diffuse_gain(hrtf))
-        bl += s * early_l
-        br += s * early_r
-        _place(bl, decorrelate(RTp, 1), 0)
-        _place(br, decorrelate(RTp, 2), 0)
-        return np.stack([bl, br])
-
-    # FALLBACK (no HRT files, older main3D): calibrate the ARR-built early field to HIRp's early energy
-    # (ARR carries the RAW deposit gains; allIRs re-scaled HIRp by its FVM<->GA spectral match -> one
-    # broadband scalar reconciles them).
-    t_cross = int(round((delay.max() if delay.size else 0) * FS)) + KLEN
-    e_arr = early_l[:t_cross] @ early_l[:t_cross] + early_r[:t_cross] @ early_r[:t_cross]
-    hi_early = HIRp[:min(t_cross, HIRp.size)]
-    e_hip = 2.0 * (hi_early @ hi_early)                           # mono energy split over two ears
-    if e_arr > 0 and e_hip > 0:
-        a = np.sqrt(e_hip / e_arr)
-        early_l *= a
-        early_r *= a
-    bl += early_l
-    br += early_r
-
-    # --- diffuse late tail: HIRp beyond t_cross, decorrelated into two incoherent ears ---
-    if HIRp.size > t_cross:
-        tail = np.zeros(HIRp.size)
-        tail[t_cross:] = HIRp[t_cross:]
-        _place(bl, decorrelate(tail, 1), 0)
-        _place(br, decorrelate(tail, 2), 0)
-
+    # ISM arrivals as they are, minus the HRTF set's own (diffuse-field) gain; the tail is the RT's share
+    # of the GA bands at all times (scattered + specular above the ISM order), decorrelated per ear.
+    s = 1.0 / np.sqrt(hrtf_diffuse_gain(hrtf))
+    bl += s * early_l
+    br += s * early_r
+    _place(bl, decorrelate(RTp, 1), 0)
+    _place(br, decorrelate(RTp, 2), 0)
     return np.stack([bl, br])
 
 
@@ -319,13 +298,14 @@ def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav, dry_map=None):
         arr = read_arrivals(f"ARR{rec}_{src}.bin")
         if arr[0].size == 0:
             print(f"[binauralize]  !! src{src}: 0 ISM arrivals — direct sound falls back to straight-ahead. "
-                  "Check the sim's '[ISM] src rec: N paths' line (occlusion / t_cross / coords).", flush=True)
+                  "Check the sim's '[ISM] src rec: N paths' line (occlusion / coords).", flush=True)
         else:
             print(f"[binauralize]  src{src}: {arr[0].size} arrivals, building BRIR…", flush=True)
         RTp = allIRs.rt_only_ir(rec, src)                     # None for runs without HRT files
         if RTp is None:
-            print(f"[binauralize]  src{src}: no HRT files (older main3D) -> tail from HIRp after the last "
-                  "arrival, early part rescaled (previous method)", flush=True)
+            print(f"[binauralize]  !! src{src}: no HRT files (run older than the HRT split) -> skipped. "
+                  "Re-run the GA (GA-only reuses the FVM) to auralize it.", flush=True)
+            return None
         return brir(LIRp, HIRp, arr, hrtf, pose, RTp=RTp)
 
     def _add(acc, y):                                            # zero-pad to the longer, then add
@@ -384,8 +364,11 @@ def main(sofa, pose_deg=(0, 0, 0)):
         if res is None:
             print(f"[binauralize] rec{rec} src{src}: no low IR -> skip"); continue
         _, LIRp, HIRp = res
+        RTp = allIRs.rt_only_ir(rec, src)
+        if RTp is None:
+            print(f"[binauralize] rec{rec} src{src}: no HRT files -> skip (re-run the GA)"); continue
         arr = read_arrivals(f"ARR{rec}_{src}.bin")
-        b = brir(LIRp, HIRp, arr, hrtf, pose)
+        b = brir(LIRp, HIRp, arr, hrtf, pose, RTp=RTp)
         np.save(f"BRIR_{rec}_{src}.npy", b.astype(np.float32))
         print(f"[binauralize] rec{rec} src{src}: BRIR {b.shape} -> BRIR_{rec}_{src}.npy")
 
@@ -436,7 +419,11 @@ def _selfcheck():
     delay = np.array([0.01, 0.02, 0.03])                        # direct + 2 reflections (s)
     doa = np.array([[0, 1, 0.0], [1, 0, 0], [-1, 0, 0]])       # direct LEFT, others front/back
     g = np.ones((3, 8)); g[1:] *= 0.5
-    B = brir(LIRp, HIRp, (delay, doa, g), hrtf, (0, 0, 0))
+    B = brir(LIRp, HIRp, (delay, doa, g), hrtf, (0, 0, 0), RTp=HIRp)   # synthetic tail as the RT stream
+    try:
+        brir(LIRp, HIRp, (delay, doa, g), hrtf, (0, 0, 0)); raise AssertionError("no RTp must be refused")
+    except ValueError:
+        pass
     assert B.shape[0] == 2 and np.isfinite(B).all(), "stereo finite"
     onL = np.argmax(np.abs(B[0]) > 1e-3); onR = np.argmax(np.abs(B[1]) > 1e-3)
     assert onL <= onR, "source on the left should reach the left ear first"
