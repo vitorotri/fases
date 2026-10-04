@@ -62,14 +62,17 @@ def _c_sound():
 def _rir_parts(rec, src):
     """Pieces shared by foa_rir and hoa_rir, at FS, world frame, or None if the pair has no data:
     (N, LIRp, XYZl (3,N) low-band -Z0*v or None, arrivals [(start, kernel, unit doa)], a, tail,
-    t_cross, e_hip = energy of HIRp[:t_cross]).
-    `a` rescales the ISM arrivals (raw deposit gains) to HIRp's early energy, as binauralize.brir."""
+    t_cross, e_hip = energy of HIRp[:t_cross], has_rt).
+    has_rt (HRT files present, allIRs.rt_only_ir): a = 1 (the ARR gains ARE the deposited pressures) and
+    tail = the RT-only stream at ALL times -- nothing counted twice. Otherwise (older runs) the previous
+    method: `a` rescales the arrivals to HIRp's early energy and the tail is HIRp after the last arrival."""
     res = allIRs.broadband_ir(rec, src)
     if res is None:
         return None
     _, LIRp, HIRp = res
+    RTp = allIRs.rt_only_ir(rec, src)                          # None for runs without HRT files
     fx = allIRs.f_cutoff                                       # the crossover broadband_ir settled on
-    N = max(LIRp.size, HIRp.size) + 512
+    N = max(LIRp.size, HIRp.size, RTp.size if RTp is not None else 0) + 512
     XYZl = None
     vf = f"VEL{rec}_{src}.bin"
     if LIRp.any() and allIRs.fs_fv is not None and os.path.isfile(vf):
@@ -90,6 +93,12 @@ def _rir_parts(rec, src):
         s0 = int(round(delay[k] * FS)) - KLEN // 2             # compensate kernel group delay
         arr.append((s0, ker, doa[k] / (np.linalg.norm(doa[k]) or 1.0)))
         _place(eW, ker, s0)
+    if RTp is not None:                                        # exact arrivals + RT-only tail at all times
+        tail = np.zeros(N)
+        tail[:RTp.size] = RTp
+        return N, LIRp, XYZl, arr, 1.0, tail, 0, 0.0, True
+    print(f"[ambisonic] rec{rec} src{src}: no HRT files (older main3D) -> previous method (rescaled arrivals, "
+          "tail after the last arrival)")
     t_cross = int(round((delay.max() if delay.size else 0) * FS)) + KLEN
     e_arr = np.dot(eW[:t_cross], eW[:t_cross])
     hi = HIRp[:min(t_cross, HIRp.size)]
@@ -99,7 +108,7 @@ def _rir_parts(rec, src):
     tail = np.zeros(N)
     if HIRp.size > t_cross:
         tail[t_cross:HIRp.size] = HIRp[t_cross:]
-    return N, LIRp, XYZl, arr, a, tail, t_cross, e_hip
+    return N, LIRp, XYZl, arr, a, tail, t_cross, e_hip, False
 
 
 def foa_rir(rec, src):
@@ -107,7 +116,7 @@ def foa_rir(rec, src):
     parts = _rir_parts(rec, src)
     if parts is None:
         return None
-    N, LIRp, XYZl, arr, a, tail, _, _ = parts
+    N, LIRp, XYZl, arr, a, tail, _, _, _ = parts
     W, XYZ = np.zeros(N), np.zeros((3, N))
     _place(W, LIRp, 0)
     if XYZl is not None:
@@ -177,7 +186,7 @@ def hoa_rir(rec, src, order=3, g=None, pose=(0.0, 0.0, 0.0)):
     parts = _rir_parts(rec, src)
     if parts is None:
         return None
-    N, LIRp, XYZl, arr, a, tail, t_cross, e_hip = parts
+    N, LIRp, XYZl, arr, a, tail, t_cross, e_hip, has_rt = parts
     S = np.zeros(((order + 1) ** 2, N))
     k0, k1 = 0.28209479177387814, 0.4886025119029199          # Y00, order-1 factor
     _place(S[0], k0 * LIRp, 0)
@@ -188,7 +197,14 @@ def hoa_rir(rec, src, order=3, g=None, pose=(0.0, 0.0, 0.0)):
         y = sh(d, order)[0]
         for n in range(y.size):
             _place(Se[n], a * y[n] * ker, s0)
-    if g is not None and e_hip > 0 and t_cross > 0:
+    if g is not None and has_rt:
+        # Arrivals are exact (a = 1); remove only the HRTF set's own gain, as binauralize.hrtf_diffuse_gain does.
+        # Diffuse-field energy of the SH-domain decoder: with orthonormal SH, a plane wave p*Y(d) reaches an ear
+        # as sum_n Y_n(d) G_n, whose energy averaged over the sphere is sum_n ||G_n||^2 / (4 pi); /2 averages ears.
+        g_df = float(np.sum(np.asarray(g, float) ** 2)) / (8.0 * np.pi)
+        if g_df > 0:
+            Se /= np.sqrt(g_df)
+    elif g is not None and e_hip > 0 and t_cross > 0:
         # Calibrate AFTER the HRTF, exactly as binauralize.brir: the decoded early field (both ears,
         # [:t_cross]) must carry 2 x HIRp's early energy. Calibrating before the decode (the `a` above)
         # left the HRTF set's own gain (pinna/ear-canal boost, several dB) on the direct sound + early
@@ -675,6 +691,11 @@ def _selfcheck_hoa():
     brir = hoa_decode(np.pad(Sr, ((0, 0), (0, Lg))), np.zeros((2, 200 + Lg)), gf, pose)
     B = np.stack([np.convolve(dry, brir[e]) for e in range(2)])[:, :prog.shape[1]]
     assert np.allclose(A, B, atol=1e-9), "2-ch binaural room response shortcut != streamed decode"
+    # decoder diffuse-field gain used by hoa_rir (HRT mode): the decoded energy of a unit plane wave, averaged
+    # over the sphere and both ears, must equal sum ||G_n||^2 / (8 pi) (orthonormal SH)
+    Yd = sh(_fib(3000), 3)                                               # (K, 16)
+    e_dirs = np.sum(np.einsum('kn,net->ket', Yd, gf) ** 2, axis=(1, 2)) / 2.0
+    assert abs(e_dirs.mean() / (np.sum(gf ** 2) / (8 * np.pi)) - 1) < 2e-2, "decoder diffuse-field gain formula"
     # FOA (W = p, XYZ = p d) -> SH order 1 equals the plane-wave encoding p Y(d)
     dd = np.array([0.36, -0.48, 0.8])
     k0, k1 = 0.28209479177387814, 0.4886025119029199

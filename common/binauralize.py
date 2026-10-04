@@ -99,6 +99,26 @@ def load_hrtf(sofa_path):
     return out
 
 
+def hrtf_diffuse_gain(hrtf, n_dirs=1200):
+    """Diffuse-field ENERGY gain of an HRIR set: sum of hrir^2 over taps, averaged over both ears and over
+    directions spread evenly on the sphere (dense SOFA grids crowd the poles -> take the measured direction
+    nearest to each of n_dirs Fibonacci points). Rendering the ISM arrivals through the HRTFs and dividing
+    their pressure by sqrt(this) puts them on the same footing as the HRTF-less diffuse tail, so the
+    direct-to-reverberant balance is not shifted by the set's own pinna/ear-canal gain. Cached on the dict."""
+    if "_df_gain" in hrtf:
+        return hrtf["_df_gain"]
+    U = np.asarray(hrtf["unit"], float)
+    i = np.arange(min(n_dirs, len(U))) + 0.5
+    z = 1.0 - 2.0 * i / i.size
+    r = np.sqrt(np.maximum(0.0, 1.0 - z * z)); ph = i * np.pi * (3.0 - np.sqrt(5.0))
+    F = np.stack([r * np.cos(ph), r * np.sin(ph), z], 1)
+    idx = np.unique(np.concatenate([np.argmax(U @ F[j:j + 200].T, axis=0) for j in range(0, len(F), 200)]))
+    h = np.asarray(hrtf["hrir"], float)[idx]                   # (K, 2, taps)
+    g = float(np.mean(np.sum(h * h, axis=-1)))
+    hrtf["_df_gain"] = g
+    return g
+
+
 def lookup_hrir(hrtf, az, el):
     """Nearest-DOA HRIR pair (hL, hR) by great-circle distance on the measurement grid."""
     d = np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
@@ -169,13 +189,16 @@ def _place(dst, ir, start):
         dst[a:b] += ir[a - start:b - start]
 
 
-def brir(LIRp, HIRp, arrivals, hrtf, head_pose, band_w=None):
+def brir(LIRp, HIRp, arrivals, hrtf, head_pose, band_w=None, RTp=None):
     """Stereo BRIR (2, N) from the calibrated mono streams + ISM arrivals + head pose (az,el,roll rad).
-    LIRp = FVM low band, HIRp = GA high band (early+diffuse mixed), arrivals = (delay_s, doa, g8)."""
+    LIRp = FVM low band, HIRp = GA high band (early+diffuse mixed), arrivals = (delay_s, doa, g8).
+    RTp = RT-only GA stream (allIRs.rt_only_ir): if given, the ISM arrivals are rendered EXACTLY (their ARR
+    gains are the deposited pressures) scaled only by the HRTF set's diffuse-field gain, and RTp is the
+    whole diffuse tail at ALL times -- each part counted once. None (older runs) -> previous window rescale."""
     basis = head_basis(*head_pose)
     band_w = _band_weights(np.fft.rfftfreq(KLEN, 1 / FS)) if band_w is None else band_w
     delay, doa, g = arrivals
-    N = max(LIRp.size, HIRp.size) + 512
+    N = max(LIRp.size, HIRp.size, RTp.size if RTp is not None else 0) + 512
     bl, br = np.zeros(N), np.zeros(N)
 
     # --- FVM low band: convolve with the direct-DOA HRIR (earliest arrival = direct) ---
@@ -198,8 +221,19 @@ def brir(LIRp, HIRp, arrivals, hrtf, head_pose, band_w=None):
         _place(early_l, fftconvolve(hL, ker), s)
         _place(early_r, fftconvolve(hR, ker), s)
 
-    # calibrate the ARR-built early field to HIRp's early energy (ARR carries the RAW deposit gains;
-    # allIRs re-scaled HIRp by its FVM<->GA spectral match -> one broadband scalar reconciles them).
+    if RTp is not None:
+        # ISM arrivals as they are, minus the HRTF set's own (diffuse-field) gain; the tail is the RT's share
+        # of the GA bands at all times (scattered + specular above the ISM order), decorrelated per ear.
+        s = 1.0 / np.sqrt(hrtf_diffuse_gain(hrtf))
+        bl += s * early_l
+        br += s * early_r
+        _place(bl, decorrelate(RTp, 1), 0)
+        _place(br, decorrelate(RTp, 2), 0)
+        return np.stack([bl, br])
+
+    # FALLBACK (no HRT files, older main3D): calibrate the ARR-built early field to HIRp's early energy
+    # (ARR carries the RAW deposit gains; allIRs re-scaled HIRp by its FVM<->GA spectral match -> one
+    # broadband scalar reconciles them).
     t_cross = int(round((delay.max() if delay.size else 0) * FS)) + KLEN
     e_arr = early_l[:t_cross] @ early_l[:t_cross] + early_r[:t_cross] @ early_r[:t_cross]
     hi_early = HIRp[:min(t_cross, HIRp.size)]
@@ -288,7 +322,11 @@ def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav, dry_map=None):
                   "Check the sim's '[ISM] src rec: N paths' line (occlusion / t_cross / coords).", flush=True)
         else:
             print(f"[binauralize]  src{src}: {arr[0].size} arrivals, building BRIR…", flush=True)
-        return brir(LIRp, HIRp, arr, hrtf, pose)
+        RTp = allIRs.rt_only_ir(rec, src)                     # None for runs without HRT files
+        if RTp is None:
+            print(f"[binauralize]  src{src}: no HRT files (older main3D) -> tail from HIRp after the last "
+                  "arrival, early part rescaled (previous method)", flush=True)
+        return brir(LIRp, HIRp, arr, hrtf, pose, RTp=RTp)
 
     def _add(acc, y):                                            # zero-pad to the longer, then add
         if acc is None:

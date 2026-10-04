@@ -263,6 +263,35 @@ def broadband_ir(rec, src):
     return LIRp + HIRp, LIRp, HIRp             # broadband, low-only, high-only (all length N)
 
 
+def rt_only_ir(rec, src):
+    """RT-only broadband stream for the AURALIZATION tail: main3D's HRT<rec>_<src>_<band>.bin (the ray
+    tracer's share of each GA band, nothing of the ISM) through EXACTLY the band filtering broadband_ir
+    applies to the HIR files (same edges, same seam high-pass on the lowest kept band). No FVM band: the RT
+    lives above the seam. The renderers take the ISM arrivals from ARR (with directions) and this as their
+    diffuse tail, so nothing is counted twice. broadband_ir / IR_broad are NOT affected. Returns an array
+    at fs, or None if this run wrote no HRT files (older main3D -> callers fall back)."""
+    _init()
+    files = sorted(f for f in glob.glob("HRT*.bin")
+                   if f[3:].split(".")[0].split("_")[:2] == [str(rec), str(src)])
+    if not files:
+        return None
+    low_files = [f for f in glob.glob("IR*.bin") if f[2:].split(".")[0].split("_")[:2] == [str(rec), str(src)]]
+    have_low = (bool(low_files) and fs_fv is not None
+                and f_cutoff_sim >= octave_bands[0] / 2 ** 0.5)     # the same have_low as broadband_ir
+    fx = f_cutoff
+    fcs = [int(f.split("_")[-1].split(".")[0]) for f in files]
+    lowest_fc = min(fcs)
+    out = []
+    for f, fc in zip(files, fcs):
+        if have_low and fc * 2 ** 0.5 <= fx:
+            continue
+        hp_e = None if (not have_low and fc == lowest_fc) else max(fx, fc / 2 ** 0.5)
+        lp_e = None if fc == octave_bands[-1] else fc * 2 ** 0.5
+        out.append(_filt(np.fromfile(f, np.float32), hp_e, lp_e,
+                         hp_pow=(hp_e is not None and abs(hp_e - fx) < 1e-6)))
+    return np.sum(out, axis=0) if out else None
+
+
 def discover_pairs():
     """Every (rec, src) with a low IR<rec>_<src>.bin OR a GA band HIR<rec>_<src>_<band>.bin present,
     sorted. GA-only runs (no low IR) are still discovered so their broadband IR gets built."""

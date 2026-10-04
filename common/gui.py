@@ -10940,8 +10940,9 @@ class MainWindow(QMainWindow):
             return
         out = os.path.join(self._proj_root, "output")
         s = int(getattr(self, "_run_src_idx", 0))
-        kinds = ("HIR", "ARR") if getattr(self, "_is_ga_only_run", False) else ("IR", "VEL", "HIR", "ARR")
-        pat = _re.compile(r"^(IR|VEL|HIR|ARR)(\d+)_(\d+)(_\w+)?\.bin$")
+        kinds = (("HIR", "HRT", "ARR") if getattr(self, "_is_ga_only_run", False)
+                 else ("IR", "VEL", "HIR", "HRT", "ARR"))           # HRT = RT-only band IRs (auralization)
+        pat = _re.compile(r"^(IR|VEL|HIR|HRT|ARR)(\d+)_(\d+)(_\w+)?\.bin$")
         for k in sorted(range(len(rows)), reverse=True):
             r = rows[k]
             if r == k:
