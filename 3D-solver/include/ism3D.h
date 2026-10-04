@@ -515,7 +515,8 @@ inline static void ism_paths_for_pairs(
     std::vector<std::vector<std::vector<ISMPath>>>& out_paths,
     ISMConfig cfg = ISMConfig(),                     // optional tuning knobs; omit for defaults
     std::vector<Reflector>* planes_out = nullptr,
-    std::vector<uint8_t>*   group_is_curved_out = nullptr)
+    std::vector<uint8_t>*   group_is_curved_out = nullptr,
+    int*                    order_used_out = nullptr)    // order actually used, after the clamp below
 {
     cfg.max_order = (max_order < 0) ? 0 : max_order; // call-site input wins
 
@@ -539,6 +540,7 @@ inline static void ism_paths_for_pairs(
             cfg.max_order = ord;
         }
     }
+    if(order_used_out)*order_used_out=cfg.max_order;
     if(planes_out)*planes_out=planes;
     if(group_is_curved_out)*group_is_curved_out=curvedflag;
 
@@ -626,6 +628,8 @@ struct ISMImagePath {
 
 struct ISMResult {
     int Ns = 0, Nr = 0;
+    int order_used = 0;                                     // reflection order ACTUALLY computed (after the RAM clamp);
+                                                            // the RT skips specular paths up to this order (ISM owns them)
     std::vector<float>                      src_pressure;  // [Ns]: initial sound pressure per real source (val_s)
     std::vector<float>                      direct;        // [Ns*Nr]: direct distance, 0.0f if invalid (1)
     std::vector<std::vector<ISMImagePath>>  images;        // [Ns*Nr]: valid image sources (2)
@@ -650,9 +654,12 @@ inline static ISMResult ism_solve(
     ISMConfig cfg = ISMConfig())
 {
     std::vector<std::vector<std::vector<ISMPath>>> out;
-    ism_paths_for_pairs(Sc, src_arr, rec_arr, group_to_material, impedance_by_material, max_order, out, cfg);
+    int order_used = 0;
+    ism_paths_for_pairs(Sc, src_arr, rec_arr, group_to_material, impedance_by_material, max_order, out, cfg,
+                        nullptr, nullptr, &order_used);
 
     ISMResult R;
+    R.order_used = order_used;
     R.Ns = (int)out.size();
     R.Nr = R.Ns ? (int)out[0].size() : 0;
     R.direct.assign((size_t)R.Ns*R.Nr, 0.0f);

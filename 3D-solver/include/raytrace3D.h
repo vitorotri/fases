@@ -358,7 +358,9 @@ inline static void rt_trace_late(const RTScene& S,
                                  float c, float fs, int Nt,
                                  int Nrays, int max_order, float recv_radius,
                                  std::vector<float>& e_spec,   // OUT: specular energy (NOT sqrt'd)
-                                 std::vector<float>& e_diff){  // OUT: diffuse  energy (NOT sqrt'd)
+                                 std::vector<float>& e_diff,   // OUT: diffuse  energy (NOT sqrt'd)
+                                 int ism_order = -1){          // specular paths of order <= ism_order are the ISM's
+                                                               // (skipped here); -1 = none skipped (old behaviour)
 
     const int Ns=(int)(src_arr.size()/3), Nr=(int)(rec_arr.size()/3); // #sources, #receivers (arrays are xyz triplets)
     const size_t NBUF=(size_t)RT_NBANDS*(size_t)Nr*(size_t)Nt;        // size of each output buffer: band * receiver * time
@@ -486,13 +488,16 @@ inline static void rt_trace_late(const RTScene& S,
 
                 // ---- DETECTION on segment [o,p1]: the sphere, every ray, full energy (distance-
                 // independent energy per crossing). The ray's STATE picks the buffer: still a pure
-                // specular path -> e_spec (main gates it after t_cross, the ISM owns the early
-                // specular); scattered at least once -> e_diff (enters at all times).
+                // specular path -> e_spec; scattered at least once -> e_diff (enters at all times).
+                // HANDOVER BY ORDER, not by time: this segment follows `bounce` reflections, so a pure
+                // specular detection here IS an order-`bounce` image path. Orders <= ism_order are the
+                // ISM's exact, deterministic arrivals (direct = order 0) -> skipped, else counted twice.
                 // EXCEPT the segment right after a DIFFUSE draw: "scatter at that bounce, then
                 // straight to the receiver" is exactly what the diffuse rain below deposits
                 // deterministically at that bounce -- detecting it here too would count it twice.
                 std::vector<float>& e_buf = scattered ? e_diff : e_spec;
-                for(int rr = 0; !after_diffuse && rr < Nr; rr++){
+                const bool ism_owned = (!scattered && bounce <= ism_order);
+                for(int rr = 0; !after_diffuse && !ism_owned && rr < Nr; rr++){
                     float s_ca;
                     if(rt_point_seg_dist2(rec[(size_t)rr], o, p1, s_ca) <= R2){
                         const float d_run = d_travel + s_ca; // total path to the receiver
