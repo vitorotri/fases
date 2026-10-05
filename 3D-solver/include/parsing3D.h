@@ -1176,6 +1176,9 @@ inline static void scene_free(Scene3D* sc){
 
 // bolique incidence reflection coefficient for a locally reacting surface
 __host__ float R_oblique(float alpha, float cos_theta){
+	// anechoic safeguard: alpha -> 1 gives xi -> 1, i.e. R = (cos-1)/(cos+1), which still reflects at oblique
+	// incidence (-0.33 at cos 0.5, -0.82 at cos 0.1). A surface meant to be anechoic absorbs at every angle.
+	if (alpha > 0.99f) return 0.0f;
 	float R = sqrtf(1.0 - alpha);
 	if (R > 0.99999) return R; // near-rigid safeguard: xi -> inf
 	float xi = (1.0 + R) / (1.0 - R);
