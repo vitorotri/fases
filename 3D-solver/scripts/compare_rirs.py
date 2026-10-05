@@ -1,6 +1,6 @@
 # To properly compare IRs and validate ISM vs FVM, remove fractional delay from direct ISM part and simulate
 # inside an anechoic booth measuring at 1m, applying the negative delay to FVM later if simulated with the PCS
-# (PCS is naturally delayed).
+# (PCS is naturally delayed). Also, keep theta's = 0.0 (look for "amplitude validation" in main3D.cu).
 
 import numpy as np
 import matplotlib.pyplot as plt
