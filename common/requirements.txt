@@ -1,0 +1,24 @@
+# F.A.S.E.S Python dependencies (Python >= 3.9).
+# Floors only; for a release, pin the exact versions of a tested environment (pip freeze).
+
+# GUI
+PySide6>=6.4              # Qt 6 binding (LGPL); the only Qt binding the app uses
+PyOpenGL>=3.1.6           # 3D scene view
+PyOpenGL_accelerate>=3.1.6  # optional speed-up for PyOpenGL
+matplotlib>=3.5           # Results plots (backend_qtagg needs >= 3.5)
+
+# numerics / post-processing (allIRs, acouparams, fminconFIT, binauralize, ambisonic)
+numpy>=1.22
+scipy>=1.8
+pyfar>=0.6                # acouparams, SOFA HRTF reading in binauralize
+pyrato>=0.3               # room-acoustic parameters (acouparams)
+scikit-rf>=0.29           # fminconFIT (imported as skrf)
+
+# audio (auralization)
+soundfile>=0.12           # wav I/O; wheels include libsndfile
+sounddevice>=0.4          # live ambisonic playback; Linux needs the system PortAudio (libportaudio2)
+
+# 2D sketch / CAD import (sketch2d)
+ezdxf>=1.0                # DXF import
+shapely>=2.0              # polygon booleans
+mapbox-earcut>=1.0        # polygon-with-holes triangulation
