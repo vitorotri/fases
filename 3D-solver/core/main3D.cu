@@ -17,29 +17,6 @@
 #include "raytrace3D.h"
 #include "functions3D.cuh"
 
-// Name the kernel that faults, without needing compute-sanitizer/cuda-memcheck.
-// Kernel launches are async and their errors are STICKY: an illegal access inside a
-// kernel is not reported at the launch, it surfaces later at the next cudaMemcpy as
-// "Xid 31 MMU Fault ... ENGINE HOST" -- which points at the copy, not the culprit.
-// Build with -DKDEBUG to sync + check after every launch and die at the real one.
-// Off by default: zero cost in normal runs (the RK3 loop already syncs once per step).
-//   make clean && make EXTRA="-DKDEBUG -lineinfo"
-#ifdef KDEBUG
-#define KCHECK(name)                                                              \
-    do {                                                                          \
-        cudaError_t _e = cudaDeviceSynchronize();                                 \
-        if (_e == cudaSuccess) _e = cudaGetLastError();                           \
-        if (_e != cudaSuccess) {                                                  \
-            printf("\n[!] kernel %s failed at step n=%d: %s\n\n",                 \
-                   (name), n, cudaGetErrorString(_e));                            \
-            fflush(stdout);                                                       \
-            exit(EXIT_FAILURE);                                                   \
-        }                                                                         \
-    } while (0)
-#else
-#define KCHECK(name) do {} while (0)
-#endif
-
 unsigned long long available_ram_bytes() {
     long pages = sysconf(_SC_AVPHYS_PAGES);
     long page_size = sysconf(_SC_PAGESIZE);
@@ -682,7 +659,7 @@ int main(int argc, char *argv[]){
 	cudaMalloc(&d_beta, L_m * nMat * sizeof(float));
 	cudaMemcpy(d_beta, beta, L_m * nMat * sizeof(float), cudaMemcpyHostToDevice);
 	
-	// ----- free host arrays -----
+	// ----- free host arrays for materials -----
 	
 	delete[] Rinf;
 	delete[] Ak;
@@ -732,6 +709,7 @@ int main(int argc, char *argv[]){
 	cudaMemset(phi_nu,   0, nB * K_m * sizeof(float));
 	cudaMemset(psi_1_nu, 0, nB * L_m * sizeof(float));
 	cudaMemset(psi_2_nu, 0, nB * L_m * sizeof(float));
+	
     
     // ------------------------------- Allocate pressures and velocities --------------------------------------
 
@@ -1149,16 +1127,16 @@ int main(int argc, char *argv[]){
 	
 	
 	// Kernel launch parameters
-	dim3 TP(32,4,4); // row-major order, 32*4*4 = 512 threads/block
+	dim3 TP(32,4,4); // row-major order, 32*4*4 = 512 threads/block (favoring memory coalescing)
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 
 	// Copy initial data to device
     if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_w0, w0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
+     || cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+     || cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
+     || cudaMemcpy(d_w0, w0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
     		printf("[!] CUDA error allocating device memory\n");
-    	return -1;
+    		return -1;
     }
     /*
     if (cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
@@ -1172,14 +1150,6 @@ int main(int argc, char *argv[]){
 	
 	// -------------------------------- Memory assessment for animations --------------------------------------
 	
-	// FATAL, not a warning. Every cudaMalloc above (48 of them, lines 371-1062) discards its
-	// return code, so this sticky error is the only thing standing between a failed allocation
-	// and a null/garbage device pointer. It used to only printf and fall through -- the run then
-	// reached the timestep loop and handed that pointer to cudaMemcpy(...DeviceToHost), so the
-	// COPY ENGINE read unmapped memory: "Xid 31 MMU Fault: ENGINE HOST6 HUBCLIENT_HOST ...
-	// ACCESS_TYPE_READ". That poisons the context (every later call returns 999) and the process
-	// then wedges in uvm_va_space_destroy -- D state, unkillable, reboot required.
-	// Dying here instead keeps the context clean and names the real problem: not enough VRAM.
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		size_t freeB = 0, totB = 0;
@@ -1193,7 +1163,8 @@ int main(int argc, char *argv[]){
 		return -1;
 	}
 	
-	// ---- animation frame sampling ----
+	// ---------------------------- animation frame sampling ----------------------------------
+	
 	// User picks fps (real-time playback); frames capped so total anim memory stays under a
 	// fraction of the machine's ACTUAL RAM (queried, not hardcoded). RAM cap wins over fps.
 	double ram_total = (double)sysconf(_SC_PHYS_PAGES) * (double)sysconf(_SC_PAGE_SIZE); // bytes
@@ -1253,7 +1224,7 @@ int main(int argc, char *argv[]){
 	std::vector<float> Ix_Y(stride_Y), Iz_Y(stride_Y);   // XZ slice (y = y0)
 	std::vector<float> Ix_Z(stride_Z), Iy_Z(stride_Z);   // XY slice (z = z0)
 
-	// open BIN file for writing pressure fields. GA-only: "ab" = open WITHOUT truncating -- the time-march
+	// open BIN file for writing pressure fields. GA-only: "ab" = open WITHOUT truncating - the time-march
 	// (the only writer) is skipped, so a reused run keeps the previous animation slices intact ("wb" emptied
 	// them to 0 bytes even after the purge spared them).
 	const char* slice_mode = ga_only ? "ab" : "wb";
@@ -1332,35 +1303,26 @@ int main(int argc, char *argv[]){
 		// (0)
 		
 		kernel_WENO_stage0<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
-		KCHECK("WENO_stage0");
 			
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 1.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n, src_opt, d_src_freq);
-		KCHECK("inject_src_SSP");
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u0, d_v0, d_w0, d_p0, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 0.0, 1.0, 1.0, phi, phi_old, phi_old, psi_1, psi_1_old, psi_1_old, psi_2, psi_2_old, psi_2_old); // right arrays are the same as middle (can be passed twice as dummy function arguments)
-		KCHECK("apply_BC_immersed_sdf");
 			
 		// (1)
 			
 		kernel_WENO_stage1<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
-		KCHECK("WENO_stage1");
 
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p2, d_us, d_sidx, d_sval, 0.25, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 2, src_opt, d_src_freq);
-		KCHECK("inject_src_SSP");
 		
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u2, d_v2, d_w2, d_p2, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u1, d_v1, d_w1, d_p1, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 3.0, 1.0, 4.0, phi_nu, phi_old, phi, psi_1_nu, psi_1_old, psi_1, psi_2_nu, psi_2_old, psi_2);
-		KCHECK("apply_BC_immersed_sdf");
 			
 		// (2)
 		
 		kernel_WENO_stage2<<<BP, TP>>>(Nx, Ny, Nz, d_p0, d_u0, d_v0, d_w0, d_p1, d_u1, d_v1, d_w1, d_p2, d_u2, d_v2, d_w2, rho, c, h, dt, c_rl, eps, dd, beta_rl, d_S, U_PML, D_PML, R_PML, L_PML, F_PML, B_PML, d_px, d_py, d_pz, pml_mode, d_psi_px, d_psi_py, d_psi_pz, d_psi_ux, d_psi_vy, d_psi_wz);
-		KCHECK("WENO_stage2");
 			
 		kernel_inject_src_SSP<<<BS,TS>>>(d_p1, d_us, d_sidx, d_sval, 2.0/3.0, c, h, dt, rho, (float)A_s, Nx, Ny, N_src, 2*n + 1, src_opt, d_src_freq);
-		KCHECK("inject_src_SSP");
 			
 		kernel_apply_BC_immersed_sdf<<<BP, TP>>>(d_u1, d_v1, d_w1, d_p1, Nx, Ny, Nz, h, d_S, d_oid, rho, c, n, dt, d_u2, d_v2, d_w2, d_p2, tol, d_Rinf, d_Ak, d_zeta, d_Bl, d_Cl, d_alpha, d_beta, K_m, L_m, d_bmap, 1.0, 2.0, 3.0, phi, phi_old, phi_nu, psi_1, psi_1_old, psi_1_nu, psi_2, psi_2_old, psi_2_nu);
-		KCHECK("apply_BC_immersed_sdf");
 
 		// sync
 		cudaDeviceSynchronize();
@@ -1382,37 +1344,6 @@ int main(int argc, char *argv[]){
 		cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
 		cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
-
-#ifdef KDEBUG
-		// Blow-up tracer: p0 is on the host anyway, so find the cell with the largest |p|
-		// and report it with everything the BC kernel would have known about it. Prints
-		// when |p|max first exceeds the trip level and then every time it grows 10x, so a
-		// run that diverges yields ~5 lines naming the FIRST bad cell -- not a guess.
-		{
-			static float trip = 1e3f;                 // ~ way above any physical pressure here
-			size_t am = 0; float pm = 0.f;
-			for (size_t q = 0; q < N; ++q){ float a = fabsf(p0[q]); if (a > pm){ pm = a; am = q; } }
-			if (pm > trip || (n % 200 == 0 && n > 0)){
-				int ii = (int)(am % Nx), jj = (int)((am / Nx) % Ny), kk = (int)(am / ((size_t)Nx*Ny));
-				auto SS = [&](int a,int b,int c){ return S[(size_t)a + (size_t)Nx*((size_t)b + (size_t)Ny*c)]; };
-				float gx=(SS(ii+1,jj,kk)-SS(ii-1,jj,kk))*(0.5f/h), gy=(SS(ii,jj+1,kk)-SS(ii,jj-1,kk))*(0.5f/h),
-				      gz=(SS(ii,jj,kk+1)-SS(ii,jj,kk-1))*(0.5f/h);
-				float gn = sqrtf(gx*gx+gy*gy+gz*gz);
-				printf("\n[trace] n=%d  |p|max=%.3e at (%d,%d,%d) = (%.3f,%.3f,%.3f) m\n"
-				       "        S=%.3f (%.2f h)  oid=%d  |gradS|=%.3f  band:%s  weno:%s\n"
-				       "        S along x: %.2f %.2f [%.2f] %.2f %.2f   z: %.2f %.2f [%.2f] %.2f %.2f  (in h)\n",
-				       n, pm, ii, jj, kk, (ii+0.5f)*h, (jj+0.5f)*h, (kk+0.5f)*h,
-				       S[am], S[am]/h, (int)oid[am], gn,
-				       (oid[am] != 0 && oid[am] != 0xFF) ? "yes" : "no",
-				       (S[am] < h) ? "SKIPPED" : "evolved",
-				       SS(ii-2,jj,kk)/h, SS(ii-1,jj,kk)/h, SS(ii,jj,kk)/h, SS(ii+1,jj,kk)/h, SS(ii+2,jj,kk)/h,
-				       SS(ii,jj,kk-2)/h, SS(ii,jj,kk-1)/h, SS(ii,jj,kk)/h, SS(ii,jj,kk+1)/h, SS(ii,jj,kk+2)/h);
-				fflush(stdout);
-				if (pm > trip) trip *= 10.f;
-				if (pm > 1e12f){ printf("[trace] diverged -- stopping.\n"); return -1; }
-			}
-		}
-#endif
 
 		// write animation slices
 		if (n % anim_step == 0){
@@ -1620,7 +1551,7 @@ int main(int argc, char *argv[]){
 	std::vector<float> sctr_g((size_t)rtS.ngroups, 0.01f);   // GLOBAL s per group (the stochastic draw)
 // OPTION, off: per-band expansion of the single value (Odeon-style table, rt_scatter_bands).
 	//  Refines the ISM's early images per band, but the RT can only scatter with the single value, so
-	//  the early energy per band becomes (1 - s_b) + sg != 1 -- worst at the lowest GA band for
+	//  the early energy per band becomes (1 - s_b) + sg != 1 - worst at the lowest GA band for
 	//  high-scattering surfaces (seating at 250 Hz: +1.9 dB -> EDT dip there). Needs the ISM lines
 	//  below switched to sctr_gb[gk*8+b] as well.
 	//std::vector<float> sctr_gb((size_t)rtS.ngroups * 8, 0.0f);
@@ -1687,7 +1618,7 @@ int main(int argc, char *argv[]){
 		// diffuse tail must not contain them again). p_hf / HIR are NOT changed by it.
 		std::vector<float> p_rt(Nt * (size_t)Q.Nr);
 		// Fractional-delay deposit (windowed sinc), ref. Reuben Thomas (Thesis), Fu & Li (2016).
-		// Places an arrival at its exact SUB-SAMPLE time -- this is a TIMING tool, independent
+		// Places an arrival at its exact SUB-SAMPLE time - this is a TIMING tool, independent
 		// of coherence (coherence is set by the sign of g). Incoherent audible IR: deposit each
 		// arrival's magnitude with a random sign, deposit(tau, rt_sign(...)*mag, ...). During the
 		// energy-echogram validation below it is bypassed (arrivals hard-binned as energy), hence
@@ -1709,7 +1640,7 @@ int main(int argc, char *argv[]){
 			//std::vector<float> e_ism(Nt, 0.0); // incoherent ISM energy (amplitude validation)
 			// ISM specular contributions: EVERY valid image of order <= Q.order_used, at any time. The
 			// RT e_spec holds only higher orders (rt_trace_late skips orders <= Q.order_used), so the two
-			// never overlap -- handover by reflection order, not by a time crossover.
+			// never overlap - handover by reflection order, not by a time crossover.
 			// Per-ARRIVAL sign counter: coincident image sources (same int(tau), common in a
 			// shoebox and more numerous at higher order) must get INDEPENDENT random signs so
 			// they add incoherently (sqrt(K)), not coherently (K -> the spurious 2x-direct peak).
@@ -1780,7 +1711,7 @@ int main(int argc, char *argv[]){
 						// (one trajectory per ray, no per-band split), so the ISM must remove the
 						// same sg: early energy per band = (1-sg) + sg = 1. The per-band table
 						// (sctr_gb, Odeon-style expansion) is kept as an option: it refines the early
-						// images but the tail then contradicts it by (sg - s_b) per band -- worst at
+						// images but the tail then contradicts it by (sg - s_b) per band - worst at
 						// the lowest GA band for high-scattering surfaces (seating at 250 Hz, +1.9 dB).
 						int gk = iS.group[k];
 						if (gk >= 0 && gk < rtS.ngroups)
@@ -1856,7 +1787,7 @@ int main(int argc, char *argv[]){
 	// -------- ISM arrival lists for binaural (HRTF) rendering --------------------------------------
 	// One file per receiver: ARR{r}_{src}.bin = int32 count, then per arrival 12 floats
 	// [delay_s, doa_x,doa_y,doa_z, g0..g7]. doa = unit WORLD dir receiver->(image)source; g[b] is the
-	// per-band pressure gain, SAME formula as deposit() above -- mirror it, do not diverge. All the
+	// per-band pressure gain, SAME formula as deposit() above - mirror it, do not diverge. All the
 	// discrete specular arrivals of order <= Q.order_used are listed (the ISM's share); the RT part is
 	// rendered decorrelated in Python, not per-arrival. Python: rotate doa into the head frame -> (az,el) -> HRIR.
 	for (int r = 0; r < Q.Nr; r++){
@@ -1905,8 +1836,6 @@ int main(int argc, char *argv[]){
 	}
 
 	printf("\n[OK] Ray-tracer and ISM finished\n");
-
-    // ---------------------------------------------------------------------------------------------------------
     
     printf("\n[OK] Simulation end\n\n"); 
     
