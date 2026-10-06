@@ -214,7 +214,7 @@ OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 # program is installed elsewhere; it is the default shown in the Run tab's
 # "Binary:" field and is NOT overwritten by a project's saved manifest unless
 # that manifest points to a file that actually exists.
-SOLVER_BINARY = "/home/vitorotri/Documents/Github/fases/3D-solver/build/phases3D"
+SOLVER_BINARY = "/home/vitorotri/Documents/Github/fases/3D-solver/build/fases3D"
 
 # ── About window ───────────────────────────────────────────────────────────────
 APP_NAME, APP_FULLNAME = "F.A.S.E.S", "Faithful Acoustic Solver for Extended Spaces"
@@ -9247,7 +9247,7 @@ class MainWindow(QMainWindow):
         created  = existing.get("created") or f"{datetime.now():%Y-%m-%d %H:%M}"
         scene    = os.path.abspath(self._obj_path) if self._obj_path else ""
         # Binary is stored VERBATIM. It is a shared build artifact living
-        # outside the project (e.g. .../3D-solver/build/phases3D): absolute
+        # outside the project (e.g. .../3D-solver/build/fases3D): absolute
         # paths (from Browse) stay absolute; a relative path means "relative to
         # the project root at run time" (the solver runs with cwd = root) and
         # must NOT be absolutized against the project, where it does not exist.
@@ -9354,7 +9354,7 @@ class MainWindow(QMainWindow):
             return rel if os.path.isabs(rel) else os.path.join(d, rel)
 
         # binary: only adopt the manifest's path if it actually exists, so a
-        # stale relative entry (e.g. "build/phases3D") never clobbers the field.
+        # stale relative entry (e.g. "build/fases3D") never clobbers the field.
         if hasattr(self, "_bin_le"):
             mb = man.get("binary", "")
             if mb and os.path.isfile(mb):

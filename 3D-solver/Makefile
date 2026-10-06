@@ -1,5 +1,5 @@
 NVCC      = nvcc
-TARGET    = phases3D
+TARGET    = fases3D
 
 # Absolute path to the directory containing this Makefile
 ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
