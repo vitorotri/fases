@@ -1497,8 +1497,7 @@ int main(int argc, char *argv[]){
 	       std::chrono::duration<double>(std::chrono::steady_clock::now() - t_ism0).count());
 	fflush(stdout);
 
-	// Ray-traced late tail: build BVH scene ONCE (before the mesh is freed); the
-	// tracer continues the ISM past max_order into the reverberant tail.
+	// BVH scene for the ray tracer, built ONCE before the mesh is freed.
 	RTScene rtS = rt_build(sc);
 
 	scene_free(&sc); // free scene here: ism_solve and rt_build are its last users
@@ -1518,7 +1517,7 @@ int main(int argc, char *argv[]){
 	int Nw = 32;   // Hann-windowed-sinc fractional-delay length (33 taps): plenty for sub-sample
 	               // timing, and its short support stops nearby arrivals' sinc tails from piling up.
 	
-	// ----- ray-traced late reverberant tail (continues the ISM past max_order) -----
+	// ----- ray tracer: specular orders above Q.order_used + all scattered energy -----
 	
 	// Flat absorption table for the BVH tracer: alpha_gb[gid*8 + band]. Z is indexed
 	// by material == group_id (names[gid+1]), exactly like the .fit loop above.
@@ -1543,9 +1542,9 @@ int main(int argc, char *argv[]){
 	int   rt_nrays       = (conf_arr.size() > 14) ? std::max(0, (int)conf_arr[14]) : 10000;
 	int   rt_max_order   = 100000;	// not a limit: rays stop at t_end (IR length) or at the energy floor. A cap of
 	                                	// 200 truncated a hard small room's tail at 200*mfp/c ~ 1.5 s, at -28 dB, all rays at once.
-	float rt_recv_radius = 0.12f; // [m] receiver radius (keep it around 0.10 m to match ray-tracer)
-	// per-group scattering: ONE value from input/sctr/<name>.sctr = the on-off draw probability in the
-	// RT and the specular removal in the ISM (one trajectory per ray, so one value per band too).
+	float rt_recv_radius = 0.12f; // [m] detection-sphere radius; levels are R-independent, R trades noise vs time smear
+	// per-group scattering: ONE value from input/sctr/<name>.sctr = the on-off draw probability and the
+	// diffuse-rain weight in the RT, and the specular removal in the ISM (same value in every band).
 	// names[g+1] is material g (names[0]=BoundingBox).
 	std::filesystem::path sctr_dir = project_root / "input" / "sctr";
 	std::vector<float> sctr_g((size_t)rtS.ngroups, 0.01f);   // GLOBAL s per group (the stochastic draw)
@@ -1603,7 +1602,7 @@ int main(int argc, char *argv[]){
 
 	// --------------------------------------------------------------------------
 
-	// --- compute IRs ISM fraction ---
+	// --- GA IRs per band: ISM (coherent) + RT (random sign) ---
 	
 	// for each band
 	for (int b = 0; b < 8; b++){
@@ -1618,11 +1617,8 @@ int main(int argc, char *argv[]){
 		// diffuse tail must not contain them again). p_hf / HIR are NOT changed by it.
 		std::vector<float> p_rt(Nt * (size_t)Q.Nr);
 		// Fractional-delay deposit (windowed sinc), ref. Reuben Thomas (Thesis), Fu & Li (2016).
-		// Places an arrival at its exact SUB-SAMPLE time - this is a TIMING tool, independent
-		// of coherence (coherence is set by the sign of g). Incoherent audible IR: deposit each
-		// arrival's magnitude with a random sign, deposit(tau, rt_sign(...)*mag, ...). During the
-		// energy-echogram validation below it is bypassed (arrivals hard-binned as energy), hence
-		// uncomment the deposit() lines to switch the ISM to the timed path.
+		// Places an arrival at its exact SUB-SAMPLE time; coherence is set by the sign of g. The ISM
+		// deposits coherently (signed R product); the e_ism lines are the energy-validation path.
 		
 		auto deposit = [&](float tau, float g, int rr, float dist){
 			int tt = (int)tau;
@@ -1641,24 +1637,12 @@ int main(int argc, char *argv[]){
 			// ISM specular contributions: EVERY valid image of order <= Q.order_used, at any time. The
 			// RT e_spec holds only higher orders (rt_trace_late skips orders <= Q.order_used), so the two
 			// never overlap - handover by reflection order, not by a time crossover.
-			// Per-ARRIVAL sign counter: coincident image sources (same int(tau), common in a
-			// shoebox and more numerous at higher order) must get INDEPENDENT random signs so
-			// they add incoherently (sqrt(K)), not coherently (K -> the spurious 2x-direct peak).
-			// Keying on tau shared one sign across them; key on aid instead.
+			// aid: per-arrival sign counter, only for the commented incoherent ISM deposit below
+			// (coincident images get independent signs -> sqrt(K), not K).
 			//unsigned aid = 0;
-			// Antithetic sign: consecutive arrivals pair up as (+base,-base) so the count is
-			// exactly 50/50 (+-1) -> kills the low-order positive lean, without an ordering/comb
-			// pattern (base is random per pair). Coincident arrivals land in different pairs, so
-			// they stay incoherent. Balances the COUNT only; energy |gS| is untouched.
-			// Independent random sign per non-zero bin: white, zero-mean in expectation. The earlier
-			// antithetic pairing (k>>1 shared the draw, k&1 flipped it) made the DENSE tail a
-			// +s,-s,+s',-s' sequence = a first difference, power 4 sin^2(pi f/fs): -32 dB at 250 Hz,
-			// -20 dB at 1 kHz, -8 dB at 4 kHz relative to white, while the sparse early part was
-			// untouched -> EDT/T20 short in every GA band, worst at the lowest (the 250 Hz valley).
-			// SHARED across bands (no band term, keyed on the time sample): the octaves carry the same
-			// arrivals, and allIRs combines them amplitude-complementary, which assumes they are
-			// COHERENT. A per-band sign made them incoherent: -3 dB at every octave edge in the tail,
-			// and a full cancellation where two bands drew opposite signs for a strong arrival.
+			// asign(k): independent random sign per key (white, zero mean), SHARED across bands (no band
+			// term): allIRs sums the octaves amplitude-complementary, which assumes coherent bands; per-band
+			// signs gave -3 dB at every octave edge and cancellations on strong arrivals. The RT keys it on t.
 			auto asign = [&](unsigned k){
 				return rt_sign(k*2654435761u + (unsigned)r*40503u);
 				//return rt_sign(k*2654435761u + (unsigned)r*40503u + (unsigned)b*97u); // old: independent per band
@@ -1719,7 +1703,7 @@ int main(int argc, char *argv[]){
 							//R *= std::sqrt(std::max(0.0f, 1.0f - sctr_gb[(size_t)gk*8 + b])); // per-band table option
 						P *= R;
 					}
-					// iS.amp in [0,1] handles curved surfaces (parser heuristic)
+					// iS.amp: curvature gain (1 planar, < 1 convex, > 1 concave focus; <= 4 per curved bounce)
 					float gS = Q.src_pressure[s] * iS.amp * P / d * std::exp(-m_air[b]*d); // tied to Lp,1m
 					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d) * std::exp(-m_air[b]*d);
 					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d); // amplitude validation
@@ -1735,16 +1719,9 @@ int main(int argc, char *argv[]){
 				}
 			}
 
-			// --- ray-tracer late field. e_diff (scattered) enters at ALL times -- it is energy ---
-
-			// the specular ISM lacks; e_spec (specular) only AFTER the ISM crossover, to
-			// avoid duplicating the ISM early reflections. Sum the energies per bin, root
-			// -> pressure, deposit as incoherent noise (random phase / sign).
-			// INCOHERENT (geometrical-acoustics) combine: ISM + RT scattered + RT specular
-			// energies ADD per bin, then sqrt -> pressure magnitude. Phase is discarded, so
-			// coinciding arrivals add in energy (sqrt(sum a^2)), matching the ray-tracer and
-			// the incoherent rir_ism.py. Random sign for the audible IR (comment for
-			// amplitude validation).
+			// --- RT part: e_diff (all scattered) + e_spec (specular orders > Q.order_used), at ALL times ---
+			// Energies add per bin, sqrt -> pressure, random sign. 4*pi: the RT works with p = ps/(4 pi d),
+			// the ISM above with p = ps/d (Lp,1m).
 			
 			for (int t = 1; t < (int)Nt; t++){
 				//float e = e_ism[t]; // amplitude validation (comment below)

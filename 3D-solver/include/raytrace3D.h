@@ -7,31 +7,26 @@ raytrace3D.h
 Acoustical ray-tracer.
 
 Rays leave the source on a Fibonacci-sphere pattern (near-uniform angular spread).
-This is the DIFFUSE LATE TAIL that continues the ISM past its max reflection order.
+The RT covers the specular paths ABOVE the ISM order (Q.order_used) and all scattered
+energy (on-off scattering + diffuse rain), at all times.
 
-Each ray that reaches a receiver contributes the ENERGY of an ISM-style arrival --
-the square of
-    p_ray[b] = ps * PROD_bounces sqrt(1 - alpha_b) * air_b / (4*pi*d_run)
-where d_run is the total path length the ray actually travelled to the receiver,
-sqrt(1-alpha_b) is the per-band normal-incidence pressure reflection coefficient
-(from alpha_gb), air_b = exp(-m_air_b * d_run), and ps is that source's pressure.
-Energies are accumulated (incoherent, random-phase addition -- the correct diffuse
-model), NOT pressures (which would add coherently and over-inflate the dense tail).
+Each detection deposits the ENERGY of an ISM-style arrival, the square of
+    p_ray[b] = ps * PROD_bounces |R_oblique(alpha_b, cos_theta)| * air_b / (4*pi*d_run)
+where d_run is the total path length to the receiver, R_oblique the angle-dependent
+pressure reflection coefficient (alpha from alpha_gb), air_b = exp(-m_air_b * d_run),
+ps that source's pressure. Energies add (incoherent), NOT pressures (which would add
+coherently and over-inflate the dense tail).
 
-p_rt[(b*Nr + r)*Nt + sample] ends up holding a per-band PRESSURE amplitude: the
-detection sphere is crossed by ~n_path = Nrays*R^2/(4 d^2) rays per path, so at the
-end rt_trace_late divides the accumulated energy by n_path (d = c*sample/fs is exact
-per bin) and takes the square root. Nrays-INDEPENDENT; one arrival reproduces the ISM
-image amplitude ps*PROD sqrt(1-alpha)/(4 pi d), K overlapping arrivals give sqrt(K)
-times it. This is the standard energy-echogram -> noise tail synthesis.
+Outputs are ENERGY echograms e_spec / e_diff [(b*Nr + r)*Nt + sample], not rooted. The
+per-crossing energy Kspec already divides by the crossings per path (n_path =
+Nrays*R^2/(4 d^2)), so the sums are Nrays- and R-independent: one arrival gives the ISM
+image energy, K overlapping arrivals K times it. main3D sums, takes sqrt and applies a
+random sign (energy-echogram -> noise synthesis).
 
 Call sequence in main3D.cu:
     RTScene rtS = rt_build(sc);              // build once, before scene_free
-    rt_trace_late(rtS, ..., p_rt);           // fill p_rt[8 * Nr * Nt] pressures
-    // VALIDATION (amplitudes vs ISM): compare p_rt cells directly, or deposit
-    //   p_ism += sqrt(e*e)          (magnitude, no random sign)
-    // SYNTHESIS (audible diffuse tail): deposit
-    //   p_ism += rt_sign(...) * sqrt(e*e)   (random phase; same magnitude)
+    rt_trace_late(rtS, ..., e_spec, e_diff, Q.order_used);   // energies [8 * Nr * Nt]
+    p += 4*pi * rt_sign(...) * sqrt(e_spec + e_diff)          // per bin (sqrt only, no sign, to validate)
 
 Absorption is passed in flat as alpha_gb[group_id*8 + band] so this header stays
 decoupled from the material/impedance code.
@@ -84,7 +79,7 @@ inline static float rt_u01(unsigned int s){
 }
 
 // cosine-weighted (Lambert) direction about surface normal N. u1,u2 in [0,1).
-// This is how a diffusely-scattered ray CONTINUES to propagate -- carrying its
+// This is how a diffusely-scattered ray CONTINUES to propagate, carrying its
 // full reflected energy in a new random direction, so multiple scattering (and
 // the reverberant tail) survives instead of being dropped after one deposit.
 inline static vec3 rt_lambert_dir(const vec3& N, float u1, float u2){
@@ -128,16 +123,11 @@ inline static vec3 rt_lambert_dir(const vec3& N, float u1, float u2){
 //    for(int b=0;b<RT_NBANDS;++b) s_out[b] = tab[i][b] + t*(tab[i+1][b]-tab[i][b]);
 //}
 
-// ISM -> RT crossover sample index t_cross = HYBRID of two limits, whichever comes FIRST:
-//   (1) MIXING TIME (Polack): the field turns perceptually diffuse. Image sources lie on a sphere
-//       of radius c*t, so the echo-density RATE is dN/dt = 4*pi*c^3*t^2/V; the field is "mixed"
-//       once RT_TCROSS_NOVERLAP reflections fall within the ear's window RT_TCROSS_DT_AUD:
-//           t_mix = sqrt( N_OVERLAP * V / (4*pi*c^3 * DT_AUD) )   [s]   (~ sqrt(V), order-free)
-//   (2) ISM COMPLETENESS: an order-N reflection travels ~N mean free paths (mfp = 4V/S), so the
-//       exact ISM only reaches t_complete = max_order * mfp / c   [s].
-// t_cross = min(t_mix, t_complete): the ISM owns time until EITHER the field mixes (high order)
-// OR the ISM runs out of orders (low order); beyond it the RT e_spec takes over. Returned as a
-// SAMPLE INDEX (fs * t). Ref: Polack -- 10 reflections within the 24 ms auditory window.
+// t_cross: statistical time at which an order-N ISM is "complete". INFORMATION ONLY (main3D prints
+// it); the ISM/RT handover is by reflection order (rt_trace_late's ism_order), not by time.
+// An order-N reflection travels ~N mean free paths (mfp = 4V/S): t_complete = max_order * mfp / c.
+// Returned as a SAMPLE INDEX (fs * t). Option, off: Polack mixing time t_mix = sqrt(N_OVERLAP * V /
+// (4 pi c^3 DT_AUD)) (10 reflections within the 24 ms auditory window), t_cross = min(t_mix, t_complete).
 #ifndef RT_TCROSS_NOVERLAP
 #define RT_TCROSS_NOVERLAP 10.f    // reflections overlapping within the auditory window
 #endif
@@ -196,7 +186,7 @@ namespace rt_detail {
 
     // recursive median split on the longest centroid axis; reorders idx[first,last).
     // Returns this node's index. Pushing self before recursing means child indices
-    // are whatever build() returns -- we store both explicitly (no left+1 assumption).
+    // are whatever build() returns; we store both explicitly (no left+1 assumption).
     inline int build(std::vector<BVHNode>& nodes, std::vector<int>& idx,
                      const std::vector<Prim>& prim, int first, int last)
     {
@@ -328,25 +318,19 @@ inline static float rt_point_seg_dist2(const vec3& q, const vec3& p0, const vec3
 }
 
 // ============================================================
-// Late diffuse tail: shoot Fibonacci rays from each source, bounce specularly
-// so no recursion is needed, and whenever a ray segment passes within
-// recv_radius of a receiver ACCUMULATE ENERGY -- the square of the ISM-style per-ray
-// pressure  p_ray[b] = ps * PROD sqrt(1-alpha_b) * air / (4*pi*d_run).
-// Energy adds incoherently (random phase), which is the correct diffuse-field model;
-// distinct arrivals in a bin add as energy, not as a coherent (all-positive) pressure
-// sum. At the end the buffer is normalized (per-path multiplicity) and sqrt'd, so
-// p_rt holds a PRESSURE amplitude: one arrival -> the ISM image amplitude, K arrivals
-// -> sqrt(K) times it (the physical random-phase level). Deposit into the RIR with a
-// per-sample random sign (rt_sign) for the audible tail. This is the standard
-// energy-echogram -> noise synthesis (Vorlander/Kuttruff/Moorer).
+// Shoot Fibonacci rays from each source; each ray is one linear path (specular or, with
+// probability s, Lambert direction at each bounce: no recursion). Whenever a segment passes within
+// recv_radius of a receiver, ACCUMULATE ENERGY, the square of the ISM-style per-ray pressure
+//     p_ray[b] = ps * PROD |R_oblique(alpha_b, cos)| * air / (4*pi*d_run),
+// plus the diffuse rain at every bounce. Energies add incoherently (random phase), the
+// diffuse-field model (Vorlander/Kuttruff/Moorer).
 //
 // Outputs TWO energy buffers (NOT sqrt'd), each sized RT_NBANDS*Nr*Nt, indexed
-// [(b*Nr + r)*Nt + sample]:  e_spec = specular (image-source) energy, e_diff = diffuse
-// (scattered) energy. main combines and roots them to pressure, gating the specular at
-// the ISM crossover:  t<=t_cross -> p += sign*sqrt(e_diff);  t>t_cross -> p +=
-// sign*sqrt(e_spec + e_diff).  alpha_gb is per group per band (gid*8+b), sctr_g per group, null
-// => rigid / no scattering. Source/receiver positions are RAW (world), transformed like
-// the walls so times line up with the ISM.
+// [(b*Nr + r)*Nt + sample]: e_spec = still-specular rays, orders > ism_order only;
+// e_diff = rays scattered at least once + the rain. Both enter main3D at all times:
+// p += 4*pi * sign * sqrt(e_spec + e_diff). alpha_gb per group per band (gid*8+b), null => rigid;
+// sctr_g per group, null => no scattering. Source/receiver positions are RAW (world),
+// transformed like the walls so times line up with the ISM.
 // ============================================================
 inline static void rt_trace_late(const RTScene& S,
                                  const std::vector<float>& src_arr,
@@ -375,14 +359,15 @@ inline static void rt_trace_late(const RTScene& S,
     std::vector<vec3> rec(Nr);
     for(int r=0;r<Nr;++r) rec[(size_t)r]=xform(rec_arr[(size_t)(3*r)],rec_arr[(size_t)(3*r+1)],rec_arr[(size_t)(3*r+2)]);
 
-    const float R2     = recv_radius*recv_radius;      // detection-sphere radius^2 (SPECULAR reception only; see below)
+    const float R2     = recv_radius*recv_radius;      // detection-sphere radius^2 (every ray; also floors the rain's d^2)
     const float t_end  = (float)Nt/fs;                 // IR length [s]; rays/paths past this are dropped
     const float Rp_min = 1e-4f;                        // amplitude floor: once every band is below this, the ray is dead
     const float RT_INVPI = 0.318309886183791f;          // 1/pi, precomputed
 
     // =====================================================================================
-    // ENERGY BOOKKEEPING -- both deposit constants derived from first principles below.
-    // We work in |p|^2 ("energy"); ISM amplitude convention is p = ps/(4 pi d) at distance d.
+    // ENERGY BOOKKEEPING: both deposit constants derived from first principles below.
+    // We work in |p|^2 ("energy") with p = ps/(4 pi d) at distance d; main3D multiplies the rooted
+    // pressure by 4 pi to reach its ISM convention p = ps/d (Lp,1m).
     //
     // SOLID ANGLE. Directions are measured as area on the unit sphere (steradians, sr). The
     // whole sphere = 4 pi sr (all directions); a hemisphere = 2 pi sr. A free monopole source
@@ -400,7 +385,7 @@ inline static void rt_trace_late(const RTScene& S,
     // receiver, so we give the receiver a finite sphere of radius R = recv_radius and count
     // crossings. IMAGE SOURCE: unfolding a specular path (mirror the source across each wall)
     // makes it a straight ray from an image point. Specular reflection is solid-angle
-    // preserving (it maps a bundle dOmega to an equal reflected bundle dOmega -- etendue
+    // preserving (it maps a bundle dOmega to an equal reflected bundle dOmega: etendue
     // conservation), so the image radiates with the SAME uniform density Nrays/(4 pi) sr^-1 as
     // the real source. The detection sphere presents a disk of area pi R^2, subtending solid
     // angle pi R^2 / d^2 at path-distance d, so the number of rays of THIS path that cross it:		
@@ -455,14 +440,15 @@ inline static void rt_trace_late(const RTScene& S,
         const float Kdiff = ps*ps/(4.f*M_PI*(float)Nrays); // w_ray = ps^2/(4 pi Nrays): energy carried by one ray
         // Equivalent to Reuben Thomas's thesis equation (6.5): for small gamma --> gamma approx sin(gamma)
         // approx R/r, where R is detector's radius, r is distance from src to rec, so, expanding in Taylor
-        // cos(gamma) approx 1 - gamma² / 2 + O(h³), and using that sin(gamma) approx R/r, then using the
+        // cos(gamma) approx 1 - gamma² / 2 + O(gamma⁴), and using that sin(gamma) approx R/r, then using the
         // expansion,
-        // 1 - cos(gamma) approx gamma² = R²/(2 r²).
+        // 1 - cos(gamma) approx gamma² / 2 = R²/(2 r²).
         // Plugging into the denominator of (6.5) ==> 2pi r² N (1 - cos(gamma))) = 2pi r² N R² / (2 r²) =
         // = pi N R², so
         // Er = Es / (pi N R²).
-        // Kspec is energy --> ps² / (4 pi² N R²), later we multiply by 4 pi on main, so
-        // Kspec_final = ps² / (pi N R²), showing the same formula as Thomas. Q.E.D.. 
+        // Kspec is energy --> ps² / (4 pi² N R²); main multiplies the PRESSURE by 4 pi (energy by 16 pi²), so
+        // Kspec_final = 4 ps² / (N R²) = Es / (pi N R²) with Es = 4 pi ps² (the source energy for which
+        // |p|² = ps²/d², main's ISM convention): the same formula as Thomas. Q.E.D..
         
         const float Kspec = Kdiff*RT_INVPI/R2; // w_ray/(pi R^2): energy per specular detection-sphere crossing
 
@@ -494,7 +480,7 @@ inline static void rt_trace_late(const RTScene& S,
                 // ISM's exact, deterministic arrivals (direct = order 0) -> skipped, else counted twice.
                 // EXCEPT the segment right after a DIFFUSE draw: "scatter at that bounce, then
                 // straight to the receiver" is exactly what the diffuse rain below deposits
-                // deterministically at that bounce -- detecting it here too would count it twice.
+                // deterministically at that bounce; detecting it here too would count it twice.
                 std::vector<float>& e_buf = scattered ? e_diff : e_spec;
                 const bool ism_owned = (!scattered && bounce <= ism_order);
                 for(int rr = 0; !after_diffuse && !ism_owned && rr < Nr; rr++){
@@ -653,11 +639,12 @@ inline static void rt_trace_late(const RTScene& S,
 // ============================================================
 // Visualization: trace Nrays Fibonacci rays from src_world up to max_order bounces
 // (purely specular, no bands/energy/receiver) and write every segment to `file`, one
-// per line: "src_id ray_id x0 y0 z0 x1 y1 z1 order" (ray_id unique across all sources).
-// Traces every source in `srcs`. Points are un-transformed to WORLD coords
-// so they overlay the raw OBJ in the GUI. `order` is the bounce index (0 = source ->
-// first hit, 1 = after 1st reflection, ...) for per-order colouring. Escaped rays get
-// one stub segment of the scene-diagonal length so the launch direction stays visible.
+// per line: "src_id ray_id x0 y0 z0 x1 y1 z1 order group" (ray_id unique across all sources),
+// after "# group <id> <name>" header lines. Traces every source in `srcs`. Points are
+// un-transformed to WORLD coords so they overlay the raw OBJ in the GUI. `order` is the bounce
+// index (0 = source -> first hit, 1 = after 1st reflection, ...) for per-order colouring. Escaped
+// rays get one stub segment (a quarter of the scene diagonal, order = group = -1) so the
+// launch direction stays visible.
 // ============================================================
 inline static void rt_dump_paths(const RTScene& S, const std::vector<vec3>& srcs,
                                  int Nrays, int max_order, const char* file,

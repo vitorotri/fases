@@ -2,7 +2,7 @@
 /*
 ism3D.h
 -------
-Deterministic image-source method (ISM) for early reflections, on top of parsing3D.h.
+Deterministic image-source method (ISM) for every specular path up to the ISM order, on top of parsing3D.h.
 Reuses vec3 math, ray_triangle_intersect (occlusion), point_triangle_dist2 (in-facet),
 Scene3D::vertex_transformed, per-triangle group_id. parsing3D.h is NOT modified.
 
@@ -11,7 +11,7 @@ Three reflector kinds, one unified image tree
   * Planar walls  : coplanar facets merged by GEOMETRY ALONE across all groups
                     (different objects in the same plane share ONE image).
   * Curved proxies: a dense cluster of small non-coplanar facets (sphere, cylinder,
-                    bump, free-form) is SIMPLIFIED -- region-grown by normal coherence
+                    bump, free-form) is SIMPLIFIED: region-grown by normal coherence
                     into a few larger planar patches. Each patch is a reflector whose
                     local curvature radius (per-patch least-squares sphere fit) drives
                     a spherical-mirror amplitude correction. A sphere becomes ~N caps
@@ -28,12 +28,13 @@ several objects or layers resolves each bounce correctly.
 Per path you get (you build the reflection coefficients yourself):
   length        : SINGLE total unfolded length (m), one value per image-source.
   reflections[] : per bounce (source->receiver): material_id, hit group_id, incidence
-                  angle (cos_theta, theta), complex octave-band impedance (Z_re[8],Z_im[8]).
+                  angle (cos_theta, theta), octave-band absorption alpha[8] (used by main3D's
+                  R_oblique) and complex impedance (Z_re[8],Z_im[8], loaded but unused).
   amp           : product of per-bounce curvature factors (1 for purely planar paths).
   order, curved, approx.
 
-Frame: vertex_transformed=(v+shift)*scale, shift=-bmin+3h. cfg.frame=AUTO resolves each
-endpoint by AABB containment, so the pad can't misalign anything.
+Frame: vertex_transformed=(v+shift)*scale, shift=-bmin+3h. main3D uses cfg.frame=OBJECT_SPACE
+(src/rec get the same transform as the walls); AUTO resolves each endpoint by AABB containment.
 
 Threading: host + optional OpenMP over receivers.
 */
@@ -92,7 +93,7 @@ struct ISMConfig {
 struct MaterialImpedance {
     std::array<float, ISM_NBANDS> Z_re;
     std::array<float, ISM_NBANDS> Z_im;
-    std::array<float, ISM_NBANDS> alpha;  // octave-band absorption from the .mat file (Allen-Berkley)
+    std::array<float, ISM_NBANDS> alpha;  // octave-band absorption from the .mat file
     bool loaded = false;
     MaterialImpedance(){ Z_re.fill(0.f); Z_im.fill(0.f); alpha.fill(0.f); }
 };
@@ -153,7 +154,7 @@ inline static std::vector<MaterialImpedance> ism_load_impedances(
 
 // Convenience for the solver's layer-name array: names[0]="BoundingBox", real
 // materials at names[1..]. Every OBJ group has faces so lid==gid, hence names[gid+1]
-// is the material of group gid -- the SAME indexing your .fit loop uses. Returns a
+// is the material of group gid, the SAME indexing your .fit loop uses. Returns a
 // table indexed by group_id; call ism_paths_for_pairs with group_to_material={} so
 // reflection.material_id == group_id, and its name is names[material_id+1].
 inline static std::vector<MaterialImpedance> ism_load_impedances_layered(
@@ -395,8 +396,7 @@ inline static void ism_build_reflectors(const Scene3D& Sc, const ISMConfig& cfg,
             if(!planes[(size_t)r].curved &&
                dot3(planes[(size_t)r].n,P.n)>cfg.coplanar_cos &&
                std::fabs(planes[(size_t)r].d-P.d)<cfg.coplanar_dist &&
-               planes[(size_t)r].radius==FLT_MAX){ /* only merge into flat walls */
-                // also require it is a wall (not a flat proxy) to avoid cross-object surprises:
+               planes[(size_t)r].radius==FLT_MAX){ /* merge into any FLAT reflector: wall or flat proxy */
                 hit=r; break; }
         if(hit<0){ Reflector R; R.n=P.n; R.d=P.d; R.area=P.area; R.hit_band=cfg.facet_tol; R.tri_ids=std::move(P.tris); planes.push_back(std::move(R)); }
         else { planes[(size_t)hit].area+=P.area; auto& dst=planes[(size_t)hit].tri_ids; dst.insert(dst.end(),P.tris.begin(),P.tris.end()); }
@@ -631,8 +631,8 @@ inline static void ism_paths_for_pairs(
 // ============================================================
 // Flat result view: exactly the lists needed to build RIRs.
 // ============================================================
-// One valid image source for a (source, receiver) pair. All four per-surface
-// lists have the same length = reflection order, in source->receiver order.
+// One valid image source for a (source, receiver) pair. All per-surface lists
+// have the same length = reflection order, in source->receiver order.
 struct ISMImagePath {
     float distance = 0.f;                                  // image-source -> receiver (total unfolded), 2a
     std::array<float,3> doa {{0.f,0.f,0.f}};               // unit dir receiver->image-source (arrival DOA), world
@@ -640,7 +640,7 @@ struct ISMImagePath {
     std::vector<float> angle_rad;                          // same angle in radians, 2b
     std::vector<std::array<float, ISM_NBANDS>> Z_re;       // impedance (real) per surface, per band, 2c
     std::vector<std::array<float, ISM_NBANDS>> Z_im;       // impedance (imag) per surface, per band, 2c
-    std::vector<std::array<float, ISM_NBANDS>> alpha;      // absorption per surface, per band (Allen-Berkley)
+    std::vector<std::array<float, ISM_NBANDS>> alpha;      // absorption per surface, per band (.mat)
     std::vector<int> group;                                // hit group_id per crossed surface (for scattering lookup)
     float amp = 1.f;                                       // curvature amplitude factor (1 unless curved)
 };
@@ -649,7 +649,7 @@ struct ISMResult {
     int Ns = 0, Nr = 0;
     int order_used = 0;                                     // reflection order ACTUALLY computed (after the RAM clamp);
                                                             // the RT skips specular paths up to this order (ISM owns them)
-    std::vector<float>                      src_pressure;  // [Ns]: initial sound pressure per real source (val_s)
+    std::vector<float>                      src_pressure;  // [Ns]: pressure at 1 m per source [Pa] (from Lp,1m)
     std::vector<float>                      direct;        // [Ns*Nr]: direct distance, 0.0f if invalid (1)
     std::vector<std::vector<ISMImagePath>>  images;        // [Ns*Nr]: valid image sources (2)
     inline int idx(int s, int r) const { return s*Nr + r; }
@@ -659,9 +659,9 @@ struct ISMResult {
 };
 
 // One-call entry point. Runs the ISM and returns the flat lists above.
-// src_pressure is the per-source initial pressure (val_s, the 4th column of src.txt);
-// pass {} to default every source to 1.0. It is NOT baked into distances/amplitudes --
-// it is returned per source so you scale that source's contributions: p = val_s * amp/dist * Rprod.
+// src_pressure is the per-source pressure at 1 m [Pa], main3D: 2e-5*10^(Lp,1m/20) from src.txt;
+// pass {} to default every source to 1.0. It is NOT baked into distances/amplitudes; it is
+// returned per source so you scale that source's contributions: p = src_pressure * amp/dist * Rprod.
 inline static ISMResult ism_solve(
     const Scene3D& Sc,
     const std::vector<float>& src_arr,
@@ -730,7 +730,7 @@ inline static ISMResult ism_solve(
 //
 // Ref: Kuttruff equation 5.22 (b), equivalent to Thomas's thesis equation 2.24
 // Also check https://strutt.arup.com/help/Building_Acoustics/RTInsert.html
-// Not considering absorption of air here
+// Eyring + air term 4 m V, m = ENERGY attenuation [1/m] = 2*m_air (m_air is the pressure one, Np/m)
 //
 void estimate_T60s(std::vector<float>& T60, float V, float c, float A_tot, const std::vector<float>& A,
 				   const std::vector<MaterialImpedance>& Z, std::vector<float>& m_air){
@@ -744,7 +744,7 @@ void estimate_T60s(std::vector<float>& T60, float V, float c, float A_tot, const
 		}
 		alpha_m /= A_tot;
 		if (alpha_m < 1e-6f){ T60[b] = 1e9f; continue; } // rigid room: no absorption, no decay
-		den = -c * A_tot * std::log(1.0 - alpha_m) + 4.0*m_air[b]*V*c;
+		den = -c * A_tot * std::log(1.0 - alpha_m) + 4.0*(2.0f*m_air[b])*V*c;
 		T60[b] = num / den;
 	}
 }
