@@ -1,6 +1,3 @@
-# Build
-build/
-
 # Runtime scratch
 tmp/
 output/
