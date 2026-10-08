@@ -23,7 +23,7 @@ Key bindings (GL viewport):
     Ctrl+Z          : undo last source/receiver placement, move, or removal
 """
 
-import sys, os, math, glob
+import sys, os, math, glob, shutil
 from shift_obj import shift_to_positive
 from pathlib import Path
 from datetime import datetime
@@ -158,6 +158,12 @@ PROP_LIFT = {"plane": ("bottom", 0.75),   # props placed ABOVE the floor beneath
              "skyline": ("center", 1.20)}  # skyline diffuser centred at seated ear height
 PART_SPL_GAMMA = 0.25     # particles: on-screen motion follows this fraction of the Lp,1m change (dB) around 94 dB
 PART_COLOR_FULL = 2.0     # particles: displacement [cells] shown in the full (amber) colour
+PART_FRONT_FULL = 2.0     # + the wavefront NOW (local |pressure|, the displacement lingers behind it), relative to the
+                          # frame's strongest front: that front gets t = 1/this (2 -> between green-cyan and magenta).
+                          # Colour = the stronger of the two. Lower = brighter fronts (1 -> amber), higher = fainter.
+PART_FRONT_FLOOR = 0.05   # ... but never scaled above (1/this) x the early-front level: a near-silent field stays purple
+PART_ALPHA_REST = 0.5     # particle opacity at rest (purple bed): half-transparent; 0 = invisible until a wave reaches it
+PART_LIT = (0.10, 0.30)   # colour value t over which a particle fades in (0.3 = green-cyan, fully lit)
 PART_RAMP_T = [0.0, 0.3, 0.65, 1.0]                              # rest -> front -> moving -> max
 PART_RAMP = np.array([(0.34, 0.30, 1.00),     # rest: purple-blue
                       (0.20, 0.95, 0.75),     # any wavefront: green-cyan, pops against the purple bed
@@ -210,21 +216,32 @@ OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 # ─────────────────────────────────────────────────────────────
 #  Solver executable location
 # ─────────────────────────────────────────────────────────────
-# Absolute path to the compiled solver. This is the single place to edit if the
-# program is installed elsewhere; it is the default shown in the Run tab's
-# "Binary:" field and is NOT overwritten by a project's saved manifest unless
-# that manifest points to a file that actually exists.
-SOLVER_BINARY = "/home/vitorotri/Documents/Github/fases/3D-solver/build/fases3D"
+# Paths are RELATIVE TO gui.py, so the repo and an installed copy of the same tree
+# (fases/common/gui.py, fases/3D-solver/build/fases3D, fases/LICENSE.md) need no editing.
+# SOLVER_BINARY is the default of the Run tab's hidden "Binary:" field; a project's manifest
+# or the last browsed binary only replaces it if that file actually exists.
+_GUI_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXE = ".exe" if os.name == "nt" else ""
+
+
+def _first_file(*cands):
+    """First candidate that exists (None entries skipped), else the first one."""
+    cands = [c for c in cands if c]
+    return next((c for c in cands if os.path.isfile(c)), cands[0])
+
+
+SOLVER_BINARY = _first_file(
+    os.path.join(os.path.dirname(_GUI_DIR), "3D-solver", "build", "fases3D" + _EXE),   # repo / installed tree
+    os.path.join(_GUI_DIR, "fases3D" + _EXE),                                          # flat install, next to gui.py
+    shutil.which("fases3D"))                                                           # on PATH
 
 # ── About window ───────────────────────────────────────────────────────────────
 APP_NAME, APP_FULLNAME = "F.A.S.E.S", "Faithful Acoustic Solver for Extended Spaces"
 APP_VERSION = "0.9-dev"
 ABOUT_AUTHOR = ""       # e.g. "Name Surname, Affiliation - email"   (shown only when filled in)
 ABOUT_CITATION = ""     # the paper / thesis to cite                  (shown with a Copy button)
-_GUI_DIR = os.path.dirname(os.path.abspath(__file__))
-LICENSE_PATH = next((f for f in (os.path.join(_GUI_DIR, "LICENSE.md"),                 # next to gui.py,
-                                 os.path.join(os.path.dirname(_GUI_DIR), "LICENSE.md"))  # or the repo root above
-                     if os.path.isfile(f)), os.path.join(_GUI_DIR, "LICENSE.md"))
+LICENSE_PATH = _first_file(os.path.join(_GUI_DIR, "LICENSE.md"),                   # next to gui.py,
+                           os.path.join(os.path.dirname(_GUI_DIR), "LICENSE.md"))  # or the repo root above
 
 
 def license_markdown():
@@ -285,7 +302,7 @@ def logo_pixmap(size, tint=None):
 #   rough_concrete 0.01 0.01 0.02 0.04 0.06 0.08 0.10 0.10
 # The GUI shows material_name as "material name" in the selector, but keeps the
 # file format underscore-based and human-editable.
-MATERIALS_FILE = "/home/vitorotri/Documents/Github/fases/common/materialsREF.txt"
+MATERIALS_FILE = os.path.join(_GUI_DIR, "materialsREF.txt")   # common/, next to gui.py
 
 # ─────────────────────────────────────────────────────────────
 #  Project layout
@@ -1397,7 +1414,7 @@ class GLViewer(QOpenGLWidget):
                         'y': (D, U, L, R),      # XZ: col=x, row=z
                         'z': (B, F, L, R)}      # XY: col=x, row=y
         planes2d = {'x': (Nz, Ny), 'y': (Nz, Nx), 'z': (Ny, Nx)}   # (hgt, wid) per plane at solver res
-        self._sim2d = {}; self._part_idx = {}; self._part_gain = 1.0
+        self._sim2d = {}; self._part_idx = {}; self._part_gain = 1.0; self._part_pfull = 0.0
         PAD = 4
         CAP = 100                                  # cap the live-sim grid: keeps the mask (point-in-mesh,
         if self._slices is None or not len(self._verts):   # a Python per-point loop) and the FDTD fast
@@ -1442,7 +1459,7 @@ class GLViewer(QOpenGLWidget):
         # auto-normalised gain would cancel amplitude entirely.) Reset after so playback starts at t=0.
         from slice2d import P_REF, SPL_AMP_CALIB
         REF_SPL = 94.0
-        peaks = []; rep_amp = 0.0
+        peaks = []; ppeaks = []; rep_amp = 0.0
         for sim in self._sim2d.values():
             rep_amp = max(rep_amp, float(sim.amp))
             for _ in range(50):
@@ -1450,7 +1467,11 @@ class GLViewer(QOpenGLWidget):
                 a = np.abs(sim.disp).ravel()
                 if a.size:
                     peaks.append(float(np.percentile(a, 99)))
+                    ppeaks.append(float(np.percentile(np.abs(sim.p), 99)))   # typical front |p| (colour scale)
             sim.reset()
+        ppeaks = [p for p in ppeaks if p > 1e-12]
+        if ppeaks:
+            self._part_pfull = float(np.median(ppeaks))        # early-front |p|: only the floor of the live scale
         peaks = [p for p in peaks if p > 1e-12]
         if peaks and rep_amp > 0:
             k = float(np.median(peaks)) / rep_amp              # displacement per unit source amplitude
@@ -1665,8 +1686,9 @@ class GLViewer(QOpenGLWidget):
         return tid
 
     def _draw_particles(self):
-        """Plain-blue balls displaced from their rest cell by the pressure-derived displacement;
-        they return to rest once the wavefront has passed (displacement -> 0)."""
+        """Balls displaced from their rest cell by the pressure-derived displacement; colour and opacity
+        follow the stronger of displacement and local |pressure|, so a resting particle is invisible
+        (PART_ALPHA_REST) and lights up as a wave reaches it."""
         if self._anim_palette != 'particles' or self._slices is None or not self._part_idx:
             return
         mn, mx = self._domain_min, self._domain_max
@@ -1687,11 +1709,17 @@ class GLViewer(QOpenGLWidget):
             disp = sim.disp[rr, cc]                            # (Nsel,2) live displacement in cells
             col = cc + 0.5 + pc + np.clip(G * disp[:, 0], -clamp, clamp)
             row = rr + 0.5 + pr + np.clip(G * disp[:, 1], -clamp, clamp)
-            # colour by the displayed displacement: rest purple-blue -> green-cyan -> magenta -> amber
-            t = np.clip(G * np.hypot(disp[:, 0], disp[:, 1]) / PART_COLOR_FULL, 0.0, 1.0)
-            rgba = np.empty((len(t), 4), np.float32); rgba[:, 3] = 1.0
+            # colour = the stronger of displayed displacement and local |pressure| (the wavefront now),
+            # the latter relative to this frame's strongest front: rest purple-blue -> green-cyan -> magenta -> amber
+            pa = np.abs(sim.p[rr, cc])
+            pref = max(float(np.percentile(pa, 99)) if pa.size else 0.0, PART_FRONT_FLOOR * self._part_pfull, 1e-30)
+            t = np.clip(np.maximum(G * np.hypot(disp[:, 0], disp[:, 1]) / PART_COLOR_FULL,
+                                   pa / (PART_FRONT_FULL * pref)), 0.0, 1.0)
+            rgba = np.empty((len(t), 4), np.float32)
             for ch in range(3):
                 rgba[:, ch] = np.interp(t, PART_RAMP_T, PART_RAMP[:, ch])
+            lit = np.clip((t - PART_LIT[0]) / (PART_LIT[1] - PART_LIT[0]), 0.0, 1.0)   # fade in, smoothstep
+            rgba[:, 3] = PART_ALPHA_REST + (1.0 - PART_ALPHA_REST) * lit * lit * (3.0 - 2.0 * lit)
             glColorPointer(4, GL_FLOAT, 0, np.ascontiguousarray(rgba))
             u = col / W; v = row / H
             world = np.empty((len(col), 3), np.float32)
@@ -4894,15 +4922,40 @@ class MaterialRefPreview(QWidget):
         p.end()
 
 
+# Numbers a numeric table cell accepts: plain or scientific, '.' decimal point (locale-free; float() would
+# also take nan / inf / 1_000). UNSIGNED for quantities that cannot be negative (absorption, scattering).
+_NUM_RE = r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?"
+_UNUM_RE = r"(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?"
+
+
+def _is_number(s, signed=True):
+    import re
+    return re.fullmatch(_NUM_RE if signed else _UNUM_RE, s.strip()) is not None
+
+
 class _CellDelegate(QStyledItemDelegate):
     """Per-column tweaks: `no_select` paints the cell as if never selected (so a
     row-selection highlight skips it); `center` centre-aligns the text; `tint`
-    fills the cell background with a colour (unless the cell is selected)."""
-    def __init__(self, parent=None, no_select=False, center=False, tint=None):
+    fills the cell background with a colour (unless the cell is selected);
+    `numeric` ("signed" / "unsigned") lets the cell editor accept numbers only."""
+    def __init__(self, parent=None, no_select=False, center=False, tint=None, numeric=None):
         super().__init__(parent)
         self._no_select = no_select
         self._center = center
         self._tint = QColor(tint) if tint else None
+        self._numeric = numeric
+    def createEditor(self, parent, option, index):
+        ed = super().createEditor(parent, option, index)
+        if self._numeric and isinstance(ed, QLineEdit):
+            from PySide6.QtCore import QRegularExpression
+            from PySide6.QtGui import QRegularExpressionValidator
+            rx = QRegularExpression(_NUM_RE if self._numeric == "signed" else _UNUM_RE)
+            ed.setValidator(QRegularExpressionValidator(rx, ed))   # letters never reach the cell
+        return ed
+    def setModelData(self, editor, model, index):
+        if self._numeric and isinstance(editor, QLineEdit) and not editor.hasAcceptableInput():
+            return              # incomplete number ("", "-", "1e"): keep the previous value
+        super().setModelData(editor, model, index)
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
         if self._center:
@@ -4988,8 +5041,9 @@ class MaterialPanel(QWidget):
         # numbers are centred (Layer name stays left-aligned).
         self._tbl.setItemDelegateForColumn(0, _CellDelegate(self._tbl, no_select=True, tint=PAL['panel']))
         for c in range(1, len(OCTAVE_BANDS) + 1):
-            self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True))
-        self._tbl.setItemDelegateForColumn(sctr_c, _CellDelegate(self._tbl, no_select=True, center=True))
+            self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True, numeric="unsigned"))
+        self._tbl.setItemDelegateForColumn(sctr_c, _CellDelegate(self._tbl, no_select=True, center=True,
+                                                                 numeric="unsigned"))
         self._tbl.setStyleSheet(f"""
             QTableWidget {{background:{PAL['bg']};color:{PAL['text']};
                 gridline-color:{PAL['border']};border:1px solid {PAL['border']};}}
@@ -5659,9 +5713,7 @@ class MaterialPanel(QWidget):
                 if cc > len(OCTAVE_BANDS):
                     break
                 val = val.strip()
-                try:
-                    float(val)
-                except ValueError:
+                if not _is_number(val, signed=False):         # alphas / scattering: numbers >= 0 only
                     continue
                 self._tbl.setItem(rr, cc, QTableWidgetItem(val))
         self._tbl.blockSignals(False)
@@ -6029,7 +6081,7 @@ class PointTable(QWidget):
         self._tbl.setColumnWidth(0, 90)
         self._tbl.setItemDelegateForColumn(0, _CellDelegate(self._tbl, tint=PAL['panel']))  # Name col
         for c in range(self._coff, len(cols)):   # centre the numeric columns (Name stays left)
-            self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True))
+            self._tbl.setItemDelegateForColumn(c, _CellDelegate(self._tbl, center=True, numeric="signed"))
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tbl.verticalHeader().setVisible(False)   # drop the left row-number gutter
@@ -6254,8 +6306,8 @@ class PointTable(QWidget):
                 if cc >= ncol:
                     break
                 val = val.strip()
-                try: float(val)
-                except ValueError: continue                   # names / non-numeric -> unchanged
+                if not _is_number(val):                       # names / non-numeric -> unchanged
+                    continue
                 self._tbl.setItem(rr, cc, QTableWidgetItem(val))
         self._tbl.blockSignals(False)
         self.changed.emit()                                   # -> _refresh_gl_points (scene) + save
