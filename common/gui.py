@@ -4933,6 +4933,15 @@ def _is_number(s, signed=True):
     return re.fullmatch(_NUM_RE if signed else _UNUM_RE, s.strip()) is not None
 
 
+def _nanmean_cols(mat):
+    """Column means ignoring NaN. A band undefined for EVERY receiver (all-NaN column) gives NaN without
+    numpy's "Mean of empty slice" warning (np.errstate does not cover it: it is a Python warning)."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmean(mat, axis=0)
+
+
 class _CellDelegate(QStyledItemDelegate):
     """Per-column tweaks: `no_select` paints the cell as if never selected (so a
     row-selection highlight skips it); `center` centre-aligns the text; `tint`
@@ -8191,9 +8200,9 @@ class MainWindow(QMainWindow):
             # plain arithmetic mean for times (T20/T30/EDT) and the D50 ratio. NaN bands are ignored.
             with np.errstate(invalid='ignore', divide='ignore'):
                 if param in ("C50", "C80"):
-                    avg = 10 * np.log10(np.nanmean(10 ** (mat / 10.0), axis=0))
+                    avg = 10 * np.log10(_nanmean_cols(10 ** (mat / 10.0)))
                 else:
-                    avg = np.nanmean(mat, axis=0)
+                    avg = _nanmean_cols(mat)
             ax.plot(x, avg, color="#d7dde3", lw=2.0, ls="--", label="avg (selected)")
             ax.set_xticks(x); ax.set_xticklabels([str(bnd) for bnd in ref_bands],
                                                   rotation=45 if len(ref_bands) > 10 else 0)   # 1/3: 22 labels
@@ -8236,8 +8245,8 @@ class MainWindow(QMainWindow):
         bands = next(d["bands"] for d in data.values() if isinstance(d, dict) and "bands" in d)
         mat = np.array(rows)
         with np.errstate(invalid='ignore', divide='ignore'):
-            avg = (10 * np.log10(np.nanmean(10 ** (mat / 10.0), axis=0)) if param in ("C50", "C80")
-                   else np.nanmean(mat, axis=0))
+            avg = (10 * np.log10(_nanmean_cols(10 ** (mat / 10.0))) if param in ("C50", "C80")
+                   else _nanmean_cols(mat))
         return bands, avg
 
     def _single_number(self, param, bands, band_avg):
