@@ -163,6 +163,8 @@ PART_FRONT_FULL = 2.0     # + the wavefront NOW (local |pressure|, the displacem
                           # Colour = the stronger of the two. Lower = brighter fronts (1 -> amber), higher = fainter.
 PART_FRONT_FLOOR = 0.05   # ... but never scaled above (1/this) x the early-front level: a near-silent field stays purple
 PART_ALPHA_REST = 0.5     # particle opacity at rest (purple bed): half-transparent; 0 = invisible until a wave reaches it
+MODE_BANDS = [20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250]   # Run tab Modes: 1/3-octave band centres [Hz]
+MODE_Z_AMP = 0.2          # Run tab Modes: the sheet is lifted by up to this [m] at a mode's maximum (|value| = 1)
 PART_LIT = (0.10, 0.30)   # colour value t over which a particle fades in (0.3 = green-cyan, fully lit)
 PART_RAMP_T = [0.0, 0.3, 0.65, 1.0]                              # rest -> front -> moving -> max
 PART_RAMP = np.array([(0.34, 0.30, 1.00),     # rest: purple-blue
@@ -1098,6 +1100,9 @@ class GLViewer(QOpenGLWidget):
         self._part_gain = 1.0      # auto display gain (no knob)
         self._part_spf = {}; self._part_carry = {}   # particles: 2D steps per frame (3D frame time) + carry
         self._part_tex = None      # lazy round-ball point-sprite texture
+        self._modes = None         # Run tab Modes: modes3d.py result (sheets at h above every floor level)
+        self._mode_i = 0           # mode shown
+        self._mode_phase = None    # None = static shape; else cos(phase) while "Oscillate" runs
         self._lut = None; self._lut_key = None
 
         # pivot (orbit centre = mesh centre)
@@ -1763,6 +1768,74 @@ class GLViewer(QOpenGLWidget):
         glDisable(GL_POINT_SPRITE); glDisable(GL_TEXTURE_2D)
         glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
 
+    # ── room modes (Run tab -> Modes): sheets at h above every floor level, coloured by one mode ──
+    def set_modes(self, data):
+        """data: modes3d.py result (dict of arrays) or None to clear. The sheet points (tile centres) are
+        joined into a SURFACE: a quad between 4 neighbours on the same floor level whose base heights
+        differ by < 2 cells (so steps / level changes are not bridged). Drawn lifted by MODE_Z_AMP * value."""
+        self._modes = None
+        if data is not None and len(data["pts"]) and len(data["freqs"]):
+            p = np.asarray(data["pts"], np.float32)
+            hx, hy = (float(x) for x in data["tile"])
+            lv = np.asarray(data["level"], np.int64)
+            ix = np.round((p[:, 0] - p[:, 0].min()) / hx).astype(np.int64)
+            iy = np.round((p[:, 1] - p[:, 1].min()) / hy).astype(np.int64)
+            NY, NL = int(iy.max()) + 2, int(lv.max()) + 1
+            key = (ix * NY + iy) * NL + lv
+            order = np.argsort(key); ks = key[order]
+
+            def find(k):                                       # tile index with key k, else -1
+                j = np.clip(np.searchsorted(ks, k), 0, len(ks) - 1)
+                return np.where(ks[j] == k, order[j], -1)
+            b = find(((ix + 1) * NY + iy) * NL + lv)
+            c = find(((ix + 1) * NY + iy + 1) * NL + lv)
+            d = find((ix * NY + iy + 1) * NL + lv)
+            q = np.stack([np.arange(len(p)), b, c, d], 1)[(b >= 0) & (c >= 0) & (d >= 0)]
+            zq = p[q, 2]
+            q = q[(zq.max(1) - zq.min(1)) < 2.0 * max(hx, hy)]
+            self._modes = {"base": p, "quads": np.ascontiguousarray(q.astype(np.uint32).ravel()),
+                           "vals": np.asarray(data["vals"], np.float32), "freqs": np.asarray(data["freqs"])}
+        self._mode_i = 0
+        self.update()
+
+    def set_mode_index(self, i):
+        self._mode_i = int(i)
+        self.update()
+
+    def set_mode_phase(self, ph):
+        """None = static mode shape; a phase [rad] = the shape times cos(phase) (Oscillate)."""
+        self._mode_phase = ph
+        self.update()
+
+    def _draw_modes(self):
+        """One mode as a surface: lifted by MODE_Z_AMP * value (down where negative), red / purple-blue =
+        opposite signs, more transparent towards the nodes."""
+        m = self._modes
+        if m is None or not (0 <= self._mode_i < len(m["vals"])) or not len(m["quads"]):
+            return
+        v = m["vals"][self._mode_i]
+        if self._mode_phase is not None:
+            v = v * np.cos(self._mode_phase)
+        pos = m["base"].copy()
+        pos[:, 2] += MODE_Z_AMP * v
+        rgba = np.empty((len(v), 4), np.float32)
+        rgba[:, :3] = np.where((v < 0)[:, None], np.float32([0.42, 0.38, 1.00]), np.float32([0.95, 0.27, 0.32]))
+        rgba[:, 3] = 0.30 + 0.60 * np.abs(v)                  # nodes lighter, antinodes solid
+        glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)        # seen through the walls, like the particles
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, np.ascontiguousarray(pos))
+        glColorPointer(4, GL_FLOAT, 0, rgba)
+        glDrawElements(GL_QUADS, len(m["quads"]), GL_UNSIGNED_INT, m["quads"])
+        glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY)
+        glDisable(GL_BLEND); glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
+
+    def modes_tris(self):
+        """(V, T): the ACTIVE layers' triangles (visible, no bounding box) for modes3d.py."""
+        T = [np.asarray(g["tris"]) for g in self._groups
+             if g["visible"] and not g["is_bbox"] and len(g["tris"])]
+        return np.asarray(self._verts, np.float64), (np.concatenate(T, 0) if T else np.zeros((0, 3), np.int64))
+
     def exit_placement_mode(self):
         self._mode      = self.MODE_NONE
         self._axis_lock = None
@@ -1913,6 +1986,7 @@ class GLViewer(QOpenGLWidget):
         self._draw_slices()
         self._draw_anim()
         self._draw_particles()
+        self._draw_modes()
         self._draw_rays()
         self._occ = self._glyph_occlusion()
         self._draw_sources()
@@ -9315,6 +9389,50 @@ class MainWindow(QMainWindow):
         up.addWidget(an_box)
         up.addSpacing(14)
 
+        # ── Modes: room eigenmodes on sheets at a height above EVERY floor level (modes3d.py) ──
+        mo_box = QGroupBox("Modes ≋"); mo = QVBoxLayout(mo_box); mo.setSpacing(6)
+        m1 = QHBoxLayout(); m1.setSpacing(8)
+        m1.addWidget(QLabel("Bands up to"))
+        self._modes_slider = QSlider(Qt.Horizontal)             # stepped: snaps to the 1/3-octave bands
+        self._modes_slider.setRange(0, len(MODE_BANDS) - 1)
+        self._modes_slider.setSingleStep(1); self._modes_slider.setPageStep(1)
+        self._modes_slider.setTickPosition(QSlider.TickPosition.TicksBelow); self._modes_slider.setTickInterval(1)
+        self._modes_band_lbl = QLabel(); self._modes_band_lbl.setMinimumWidth(150)
+        self._modes_slider.valueChanged.connect(self._on_modes_band)
+        self._modes_slider.setValue(MODE_BANDS.index(63))
+        self._on_modes_band(self._modes_slider.value())
+        m1.addWidget(self._modes_slider, 1); m1.addWidget(self._modes_band_lbl)
+        mo.addLayout(m1)
+        m2 = QHBoxLayout(); m2.setSpacing(8)
+        m2.addWidget(QLabel("Height above floor [m]"))
+        self._modes_h = QDoubleSpinBox(); self._modes_h.setRange(0.05, 20.0); self._modes_h.setDecimals(2)
+        self._modes_h.setSingleStep(0.1); self._modes_h.setValue(1.2); self._modes_h.setMaximumWidth(80)
+        self._modes_h.setToolTip("Sheets this far above every floor level (raked floors, steps, balconies)")
+        m2.addWidget(self._modes_h)
+        m2.addWidget(QLabel("PPW"))
+        self._modes_ppw = QSpinBox(); self._modes_ppw.setRange(10, 20); self._modes_ppw.setValue(10)
+        self._modes_ppw.setMaximumWidth(60)
+        self._modes_ppw.setToolTip("Cells per wavelength at the top of the band: finer grid and sheets, slower. "
+                                   "Capped at 60,000 cells (the log says when the cap lowers it).")
+        m2.addWidget(self._modes_ppw); m2.addStretch(1)
+        self._modes_btn = QPushButton("Compute modes"); self._modes_btn.setFixedHeight(24)
+        self._modes_btn.setToolTip("Lossless room modes: rigid walls; p = 0 on domain faces with the PML on")
+        self._modes_btn.clicked.connect(self._compute_modes)
+        m2.addWidget(self._modes_btn)
+        mo.addLayout(m2)
+        m3 = QHBoxLayout(); m3.setSpacing(8)
+        self._modes_combo = QComboBox(); self._modes_combo.setEnabled(False)
+        self._modes_combo.currentIndexChanged.connect(self._on_mode_pick)
+        self._modes_show = QCheckBox("Show"); self._modes_show.setChecked(True); self._modes_show.setEnabled(False)
+        self._modes_show.toggled.connect(self._on_modes_show)
+        self._modes_osc = QCheckBox("Oscillate"); self._modes_osc.setEnabled(False)
+        self._modes_osc.toggled.connect(self._on_modes_osc)
+        m3.addWidget(self._modes_combo, 1); m3.addWidget(self._modes_show); m3.addWidget(self._modes_osc)
+        mo.addLayout(m3)
+        self._modes_data = None
+        up.addWidget(mo_box)
+        up.addSpacing(14)
+
         # ── Simulation: Fit impedances + Run/Stop ──
         sim_box = QGroupBox("Simulation ∿"); top = QHBoxLayout(sim_box); top.setSpacing(8)
         self._fitimp_btn = QPushButton("⡶\uFE0E⣰\uFE0E  Fit impedances")
@@ -9335,7 +9453,7 @@ class MainWindow(QMainWindow):
 
         # groups hug their content (don't inflate to fill the tab)
         from PySide6.QtWidgets import QSizePolicy
-        for box in (rt_box, an_box, sim_box):
+        for box in (rt_box, an_box, mo_box, sim_box):
             box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         # ── output log ── lower splitter pane: starts small, drag the handle up to enlarge it
@@ -9365,6 +9483,97 @@ class MainWindow(QMainWindow):
         self._aural_queue = []      # remaining source indices to run (auralization mode)
         self._aural_cmd = None
         return w
+
+    # ── Run tab -> Modes (modes3d.py) ─────────────────────────
+    def _on_modes_band(self, i):
+        fc = MODE_BANDS[int(i)]
+        self._modes_band_lbl.setText(f"{fc:g} Hz band (modes up to {fc * 2 ** (1 / 6):.1f} Hz)")
+
+    def _compute_modes(self):
+        """Lossless room modes up to the upper edge of the chosen 1/3-octave band, sampled on sheets at the
+        chosen height above every floor level (modes3d.py, in output/; progress in the Output log)."""
+        if not self._proj_root:
+            self._sb.showMessage("Open a project first."); return
+        t = getattr(self, "_modes_thread", None)
+        if t is not None and t.isRunning():
+            return
+        script = self._find_common_script("modes3d.py")
+        if script is None:
+            self._sb.showMessage("modes3d.py not found next to gui.py."); return
+        V, T = self._gl.modes_tris()
+        if not len(T):
+            self._sb.showMessage("Load a scene first (the modes use its active layers)."); return
+        out = os.path.join(self._proj_root, "output")
+        os.makedirs(out, exist_ok=True)
+        geom = os.path.join(out, "modes_geom.npz")
+        np.savez(geom, V=V, T=T, bmin=np.asarray(self._gl._domain_min, float),
+                 bmax=np.asarray(self._gl._domain_max, float))
+        faces = {"R_PML": "x+", "F_PML": "y+", "U_PML": "z+", "L_PML": "x-", "B_PML": "y-", "D_PML": "z-"}
+        pml = ",".join(f for k, f in faces.items() if self._pml[k].isChecked())
+        fmax = MODE_BANDS[self._modes_slider.value()] * 2 ** (1 / 6)
+        c = math.sqrt(1.4 * 287.05 * (self._cfg["T_C"].value() + 273.15))
+        self._modes_out = os.path.join(out, "modes.npz")
+        cmd = [sys.executable, script, "--geom", geom, "--fmax", f"{fmax:.3f}", "--h", f"{self._modes_h.value():.3f}",
+               "--c", f"{c:.2f}", "--pml", pml, "--ppw", str(self._modes_ppw.value()), "--out", self._modes_out]
+        self._modes_btn.setEnabled(False)
+        self._log.append(f"$ {' '.join(cmd)}")
+        self._modes_thread = SolverThread(cmd, out)
+        self._modes_thread.output.connect(self._log.append)
+        self._modes_thread.done.connect(self._on_modes_done)
+        self._modes_thread.start()
+        self._sb.showMessage(f"Computing room modes up to {fmax:.1f} Hz… (see the Output log)")
+
+    def _on_modes_done(self, rc):
+        self._modes_btn.setEnabled(True)
+        p = getattr(self, "_modes_out", "")
+        if rc != 0 or not os.path.isfile(p):
+            self._sb.showMessage(f"Modes failed (rc={rc}) — see the Output log."); return
+        with np.load(p) as z:
+            self._modes_data = {k: z[k] for k in z.files}
+        f = self._modes_data["freqs"]
+        logb = np.log(np.asarray(MODE_BANDS, float))
+        self._modes_combo.blockSignals(True)
+        self._modes_combo.clear()
+        for k, fk in enumerate(f):
+            band = MODE_BANDS[int(np.argmin(np.abs(logb - math.log(max(fk, 1e-3)))))]
+            self._modes_combo.addItem(f"{k + 1}  ·  {fk:.1f} Hz  ({band:g} Hz band)")
+        self._modes_combo.blockSignals(False)
+        ok = len(f) > 0
+        for wdg in (self._modes_combo, self._modes_show, self._modes_osc):
+            wdg.setEnabled(ok)
+        self._modes_show.setChecked(True)
+        self._gl.set_modes(self._modes_data if ok else None)
+        if ok:
+            self._modes_combo.setCurrentIndex(0); self._on_mode_pick(0)
+        self._sb.showMessage(str(self._modes_data.get("info", "")) or "No modes in that range.")
+
+    def _on_mode_pick(self, i):
+        if self._modes_data is None or i < 0:
+            return
+        self._gl.set_mode_index(i)
+        self._sb.showMessage(f"Mode {i + 1}: {float(self._modes_data['freqs'][i]):.1f} Hz — red and "
+                             f"purple-blue = opposite pressure, height = amplitude (max {MODE_Z_AMP:g} m), "
+                             "flat and light = nodes.")
+
+    def _on_modes_show(self, on):
+        self._gl.set_modes(self._modes_data if (on and self._modes_data is not None) else None)
+        self._gl.set_mode_index(max(self._modes_combo.currentIndex(), 0))
+
+    def _on_modes_osc(self, on):
+        """Oscillate: the shape times cos(phase), ~0.66 s per cycle (a real modal frequency is far too fast
+        to watch)."""
+        if getattr(self, "_mode_timer", None) is None:
+            self._mode_timer = QTimer(self)
+            self._mode_timer.timeout.connect(self._mode_tick)
+        self._mode_ph = 0.0
+        if on:
+            self._mode_timer.start(33)
+        else:
+            self._mode_timer.stop(); self._gl.set_mode_phase(None)
+
+    def _mode_tick(self):
+        self._mode_ph = (self._mode_ph + 2 * math.pi / 20) % (2 * math.pi)   # 20 ticks x 33 ms per cycle
+        self._gl.set_mode_phase(self._mode_ph)
 
     # ── fit output -> Run-tab Output log ─────────────────────
     def _begin_fit_log(self, header):
