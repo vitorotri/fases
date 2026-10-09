@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# F.A.S.E.S installer (Linux x86-64). Lives at the top of the shipped folder:
-#   install.sh  LICENSE.md  requirements.txt  common/  3D-solver/build/fases3D
-# Run: double-click (it opens itself in a terminal) or ./install.sh
-# Installs: system packages (sudo), a private Python venv with requirements.txt,
-# the program in ~/.local/share/fases, a menu entry, a desktop shortcut and an uninstaller.
-# It does NOT install the NVIDIA driver (distribution-specific, Secure Boot, reboot): it checks it.
+# F.A.S.E.S installer (Linux x86-64). Standalone: download only this file and run it
+# (double-click opens it in a terminal, or ./install.sh). It fetches the LATEST GitHub release:
+# the source tree of that tag (common/, 3D-solver/, LICENSE.md, requirements.txt) + the release
+# asset "fases3D" (prebuilt solver, make release), into ~/.local/share/fases.
+# Next to a full checkout that already holds 3D-solver/build/fases3D, it installs that instead (offline/dev).
+# Installs: system packages (sudo), a private Python venv with requirements.txt, a menu entry,
+# a desktop shortcut and an uninstaller. It does NOT install the NVIDIA driver (distribution-specific,
+# Secure Boot, reboot): it checks it.
 set -Eeuo pipefail
+REPO="vitorotri/fases"
 
 # double-clicked (no terminal): reopen in one, so sudo can ask for the password
 if [ ! -t 0 ] && [ -z "${FASES_IN_TERM:-}" ]; then
@@ -39,8 +42,8 @@ say "Checking the system"
 [ "$(uname -m)" = x86_64 ] || die "F.A.S.E.S needs Linux x86-64 (found $(uname -m))."
 glibc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
 ver_ge "$glibc" 2.31 || die "glibc $glibc is too old; 2.31 or newer is needed (Debian 11 / Ubuntu 20.04 or later)."
-[ -f "$SRC/common/gui.py" ] && [ -f "$SRC/$SOLVER" ] || die "Incomplete package: common/gui.py or $SOLVER is missing next to install.sh."
-[ "$SRC" -ef "$DEST" ] && die "Run install.sh from the downloaded folder, not from $DEST."
+[ "$SRC" -ef "$DEST" ] && die "Run a downloaded install.sh, not the copy inside $DEST."
+LOCAL=0; [ -f "$SRC/common/gui.py" ] && [ -f "$SRC/$SOLVER" ] && LOCAL=1
 
 if command -v nvidia-smi >/dev/null 2>&1; then
     drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 || true)"
@@ -60,16 +63,16 @@ fi
 # REQ: Python + venv, PortAudio (live auralization), OpenGL/GLU (3D view).
 # OPT: X11 libraries PySide6's Qt needs on minimal desktops (absent names are skipped).
 if   command -v apt-get >/dev/null 2>&1; then PM=apt
-    REQ=(python3 python3-venv python3-pip libportaudio2 libgl1 libglu1-mesa)
+    REQ=(curl tar python3 python3-venv python3-pip libportaudio2 libgl1 libglu1-mesa)
     OPT=(libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0)
 elif command -v dnf >/dev/null 2>&1; then PM=dnf
-    REQ=(python3 python3-pip portaudio mesa-libGL mesa-libGLU)
+    REQ=(curl tar python3 python3-pip portaudio mesa-libGL mesa-libGLU)
     OPT=(mesa-libEGL libxkbcommon-x11 xcb-util-cursor xcb-util-wm xcb-util-keysyms)
 elif command -v pacman >/dev/null 2>&1; then PM=pacman
-    REQ=(python python-pip portaudio mesa glu)
+    REQ=(curl tar python python-pip portaudio mesa glu)
     OPT=(libxkbcommon-x11 xcb-util-cursor xcb-util-wm xcb-util-keysyms)
 elif command -v zypper >/dev/null 2>&1; then PM=zypper
-    REQ=(python3 python3-pip portaudio libGLU1)
+    REQ=(curl tar python3 python3-pip portaudio libGLU1)
     OPT=(Mesa-libEGL1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1)
 else PM=none
 fi
@@ -99,14 +102,32 @@ python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' \
     || die "Python 3.9 or newer is needed (found $(python3 --version 2>&1))."
 
 # ---------------------------------------------------------------- program files
-say "Copying F.A.S.E.S to $DEST"
-mkdir -p "$DEST/3D-solver/build"
-rm -rf "$DEST/common"                                   # the venv is kept: a re-install is fast
-cp -a "$SRC/common" "$DEST/"
-cp -a "$SRC/$SOLVER" "$DEST/$SOLVER"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+if [ "$LOCAL" = 1 ]; then
+    say "Installing from the folder next to install.sh ($SRC)"
+    PKG="$SRC"
+else
+    command -v curl >/dev/null 2>&1 || die "curl not found (needed to download F.A.S.E.S)."
+    # tag of the latest release (github.com/<repo>/releases/latest redirects to .../releases/tag/<tag>)
+    TAG="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" | sed 's#.*/tag/##' || true)"
+    case "$TAG" in ""|*/*) die "No release found at https://github.com/$REPO/releases (internet connection?)." ;; esac
+    say "Downloading F.A.S.E.S $TAG (source + solver)"
+    curl -fL --retry 3 -o "$TMP/src.tar.gz" "https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz" \
+        || die "Could not download the source of $TAG."
+    mkdir -p "$TMP/pkg/3D-solver/build"
+    tar -xzf "$TMP/src.tar.gz" -C "$TMP/pkg" --strip-components=1
+    curl -fL --retry 3 -o "$TMP/pkg/$SOLVER" "https://github.com/$REPO/releases/download/$TAG/fases3D" \
+        || die "Release $TAG has no 'fases3D' asset (the prebuilt solver)."
+    PKG="$TMP/pkg"
+fi
+[ -f "$PKG/common/gui.py" ] && [ -f "$PKG/requirements.txt" ] || die "Incomplete package: common/gui.py or requirements.txt missing."
+
+say "Installing F.A.S.E.S to $DEST"
+mkdir -p "$DEST"
+find "$DEST" -mindepth 1 -maxdepth 1 ! -name venv -exec rm -rf {} +   # old version out, venv kept (fast re-install)
+cp -a "$PKG/." "$DEST/"
+rm -rf "$DEST/.git"
 chmod +x "$DEST/$SOLVER"
-cp -a "$SRC/requirements.txt" "$DEST/"
-[ -f "$SRC/LICENSE.md" ] && cp -a "$SRC/LICENSE.md" "$DEST/"
 
 # ---------------------------------------------------------------- Python environment
 say "Installing Python packages (private environment, this takes a few minutes)"
@@ -115,7 +136,9 @@ if ! "$DEST/venv/bin/python" -m pip --version >/dev/null 2>&1; then   # missing,
     python3 -m venv "$DEST/venv"
 fi
 "$DEST/venv/bin/python" -m pip install --upgrade pip
-"$DEST/venv/bin/python" -m pip install -r "$DEST/requirements.txt"
+# --no-compile: Python 3.9's compileall crashes on PySide6's template file (__init__.tmpl.py) under pip's
+# progress bar ("encode() argument 'encoding' must be str, not None"); modules compile on first import anyway
+"$DEST/venv/bin/python" -m pip install --no-compile -r "$DEST/requirements.txt"
 
 # ---------------------------------------------------------------- launcher, menu, icons, desktop
 say "Creating the launcher, menu entry and desktop shortcut"
