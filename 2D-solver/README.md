@@ -10,7 +10,7 @@
 
 ## Usage
 
-Convert DXF file to OBJ with script dxf2obj.py in the "scripts" directory.
+Convert DXF file to OBJ with script dxf2obj.py in the "scripts" directory.\
 Fit materials coefficients per octave band with filterFIT.py in the "common" directory. Then:
 
 ```bash
