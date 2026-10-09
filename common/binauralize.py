@@ -269,7 +269,8 @@ def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav, dry_map=None):
     so one render on the summed BRIR == summing per-source renders, but far cheaper), convolve the single
     dry anechoic file once. If `dry_map` {src_id: path} is given, each source plays its OWN signal, so we
     convolve each source's BRIR with its own dry and SUM the AUDIO (sources missing from the map fall back
-    to dry_path). Writes a peak-normalized stereo wav. Run from the project's output/ dir."""
+    to dry_path). Writes a stereo wav at the project's common playback level (allIRs.playback_gain), so
+    receivers keep their level differences. Run from the project's output/ dir."""
     import time
     import soundfile as sf
     try:
@@ -337,9 +338,8 @@ def auralize_receiver(rec, sofa, pose_deg, dry_path, out_wav, dry_map=None):
             raise FileNotFoundError(f"no ARR/broadband data for receiver {rec} in {os.getcwd()}")
         print(f"[binauralize] BRIR {B.shape}, convolving dry signal…", flush=True)
         acc = render(dry, B)
-    pk = np.abs(acc).max()
-    if pk > 0:
-        acc = 0.98 * acc / pk
+    # one Pa -> digital scale for ALL receivers (distance stays audible); only turned down if it would clip
+    acc = acc * allIRs.limit_gain(allIRs.playback_gain(), float(np.abs(acc).max()), 0.98, "binauralize")
     sf.write(out_wav, acc.T.astype(np.float32), FS)
     print(f"[binauralize] wrote {out_wav} ({time.time()-t0:.1f}s total)", flush=True)
     return out_wav

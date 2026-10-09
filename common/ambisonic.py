@@ -445,11 +445,12 @@ def decode(chs, dirs, pose_deg, i0=0, i1=None, prev=None):
     return out
 
 
-def _norm_gain(chs):
-    """Peak-normalize against the loudest possible decode (all sources and channels in phase)."""
+def _level_gain(chs):
+    """The project's common playback level (allIRs.playback_gain, same for every receiver), turned down
+    only if the loudest possible decode (all sources and channels in phase) would clip."""
     ch = chs.sum(0)
     pk = np.abs(ch[0]).max() + np.abs(ch[1:4]).sum(0).max() + max(np.abs(ch[4]).max(), np.abs(ch[5]).max())
-    return 0.9 / pk if pk > 0 else 1.0
+    return allIRs.limit_gain(allIRs.playback_gain(), float(pk), 0.9, "ambisonic")
 
 
 def _play(render, M, pose):
@@ -511,7 +512,7 @@ def _play(render, M, pose):
 def live(chs, dirs, pose_deg):
     """1st order, no HRTF: loop the programme; per block rotate + two virtual mics + per-source ITD."""
     pose = list(pose_deg)
-    chs = (chs * _norm_gain(chs)).astype(np.float32)          # gain baked in, half the memory traffic
+    chs = (chs * _level_gain(chs)).astype(np.float32)         # gain baked in, half the memory traffic
     prev = {}                                                  # per-source last ITD (crossfade state)
     print(f"[ambisonic] 1st order, no HRTF, {chs.shape[0]} source(s)", flush=True)
     _play(lambda n0, n1: decode(chs, dirs, pose, n0, n1, prev), chs.shape[2], pose)
@@ -525,7 +526,8 @@ def live_hoa(S, tails, g, pose_deg, order=3, peak=None):
         print("[ambisonic] estimating the output level (one offline decode)...", flush=True)
         peak = np.abs(hoa_decode(S, tails, g, pose, order)).max()
     pk = peak
-    gain = 0.7 / pk if pk > 0 else 1.0                          # ~3 dB headroom for other poses
+    # the project's common level (same for every receiver); 0.7 ceiling = ~3 dB headroom for other poses
+    gain = allIRs.limit_gain(allIRs.playback_gain(), float(pk), 0.7, "ambisonic")
     print(f"[ambisonic] offline decode peak {pk:.3g} -> gain {gain:.3g}", flush=True)
     S = (S * gain).astype(np.float32); tails = (tails * gain).astype(np.float32)
     st, state = HoaBinaural(g), {"M": None, "pose": None}
@@ -712,7 +714,8 @@ if __name__ == "__main__":
         S, tails, y = render_hoa(a.rec, a.dry, dmap, a.order, g, a.pose)   # y = output at --pose
         if a.out:
             import soundfile as sf
-            sf.write(a.out, (y * (0.9 / (np.abs(y).max() or 1.0))).T, FS)
+            sf.write(a.out, (y * allIRs.limit_gain(allIRs.playback_gain(), float(np.abs(y).max()),
+                                                    0.9, "ambisonic")).T, FS)
             print(f"[ambisonic] wrote {a.out} (order {a.order} + HRTF, pose {a.pose})")
         if a.live:
             live_hoa(S, tails, g, a.pose, a.order, peak=float(np.abs(y).max()))
@@ -720,7 +723,7 @@ if __name__ == "__main__":
     chs, dirs = render_channels(a.rec, a.dry, dmap)
     if a.out:
         import soundfile as sf
-        sf.write(a.out, (decode(chs, dirs, a.pose) * _norm_gain(chs)).T, FS)
+        sf.write(a.out, (decode(chs, dirs, a.pose) * _level_gain(chs)).T, FS)
         print(f"[ambisonic] wrote {a.out} (pose {a.pose})")
     if a.live:
         live(chs, dirs, a.pose)

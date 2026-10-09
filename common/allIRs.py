@@ -292,6 +292,36 @@ def rt_only_ir(rec, src):
     return np.sum(out, axis=0) if out else None
 
 
+def playback_gain(headroom_db=12.0):
+    """Pa -> digital scale for AURALIZATION, the SAME for every receiver of the project (a per-render peak
+    normalisation erased the distance: every receiver came out equally loud). Reference: the LOUDEST DIRECT
+    SOUND any simulated receiver gets, max over sources s and receivers r of p_s / d_sr, p_s = 2e-5 *
+    10^(Lp,1m/20) Pa (../input/src/src.txt col 4, positions src.txt / rec.txt): with a full-scale dry signal
+    it lands at -headroom_db dBFS. (A 1 m reference left a church's receivers 20-30 dB below full scale.)
+    Missing/unreadable tables -> 94 dB at 1 m."""
+    ref = 1.0
+    try:
+        S = np.loadtxt(os.path.join("..", "input", "src", "src.txt"), ndmin=2)
+        R = np.loadtxt(os.path.join("..", "input", "rec", "rec.txt"), ndmin=2)
+        p = 2e-5 * 10.0 ** (S[:, 3] / 20.0)
+        d = np.linalg.norm(S[:, None, :3] - R[None, :, :3], axis=2)          # (sources, receivers) [m]
+        ref = float(np.max(p[:, None] / np.maximum(d, 0.1)))                 # 0.1 m floor: receiver on a source
+    except (OSError, ValueError, IndexError):
+        print("[allIRs] !! no readable src.txt / rec.txt: playback level referenced to 94 dB at 1 m", flush=True)
+    return 10.0 ** (-headroom_db / 20.0) / ref
+
+
+def limit_gain(gain, peak, ceiling, who):
+    """`gain`, unless gain * peak would pass `ceiling` (clipping): then the largest safe gain, announced,
+    because that render is no longer level-matched with the other receivers."""
+    if peak > 0 and gain * peak > ceiling:
+        safe = ceiling / peak
+        print(f"[{who}] !! the common playback level would clip here: this render is "
+              f"{20 * np.log10(gain / safe):.1f} dB quieter than the other receivers' scale", flush=True)
+        return safe
+    return gain
+
+
 def discover_pairs():
     """Every (rec, src) with a low IR<rec>_<src>.bin OR a GA band HIR<rec>_<src>_<band>.bin present,
     sorted. GA-only runs (no low IR) are still discovered so their broadband IR gets built."""
