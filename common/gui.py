@@ -8769,6 +8769,7 @@ class MainWindow(QMainWindow):
         self._player.positionChanged.connect(self._on_media_pos)
         self._player.durationChanged.connect(lambda d: self._aur_slider.setRange(0, d))
         self._player.playbackStateChanged.connect(self._on_media_state)
+        self._player.mediaStatusChanged.connect(self._on_media_status)   # receiver switch: resume position
         self._aur_slider.sliderMoved.connect(self._player.setPosition)
         self._aur_blink = QTimer(self); self._aur_blink.timeout.connect(self._blink_play)
         self._aur_blink_on = False
@@ -8795,15 +8796,137 @@ class MainWindow(QMainWindow):
         self._pose_loading = False
 
     def _load_selected_rec_pose(self):
-        """Selecting a receiver shows ITS stored pose in the dials; enable Restore if it has a wav pose."""
+        """Selecting a receiver shows ITS stored pose in the dials; enable Restore if it has a wav pose.
+        A NEW receiver also brings back its saved auralization (_aur_apply_saved)."""
         if not hasattr(self, "_aur_dials"):        # selection can fire during project load pre-panel
             return
         row = self._current_receiver_row()
         if row < 0:
             return
         self._set_dials(*self._rec_tbl.get_pose(row))
+        if self._proj_root != getattr(self, "_aur_proj", None):     # another project: its own poses
+            self._aur_proj = self._proj_root
+            self._rendered_pose = {}
+        if (self._proj_root, row) != getattr(self, "_aur_last_row", None):
+            self._aur_last_row = (self._proj_root, row)
+            self._aur_apply_saved(row)
         if hasattr(self, "_aur_restore"):
             self._aur_restore.setEnabled(row in getattr(self, "_rendered_pose", {}))
+
+    # ── per-receiver saved auralization: output/auralization.json ──
+    def _aur_store_path(self):
+        return os.path.join(self._proj_root, "output", "auralization.json") if self._proj_root else None
+
+    def _aur_saved(self):
+        """{receiver row: {"dry", "src_dry" {source: path}, "sofa", "pose"}} saved for this project."""
+        import json
+        p = self._aur_store_path()
+        try:
+            with open(p) as f:
+                return {int(k): v for k, v in json.load(f).get("receivers", {}).items()}
+        except (OSError, TypeError, ValueError, AttributeError):
+            return {}
+
+    def _aur_panel_settings(self):
+        """The auralization panel's current audio settings, in the saved format."""
+        return {"dry": self._aur_dry.text().strip(),
+                "src_dry": {str(k): v for k, v in self._src_dry.items()},
+                "sofa": self._aur_sofa.text().strip()}
+
+    def _aur_save(self, rec, pose=None, settings=None):
+        """Remember receiver `rec`'s auralization settings: on Convolve / Live (pose = the rendered head
+        pose, for Restore) and whenever the audio files / SOFA are changed in the panel (pose=None keeps the
+        saved pose). settings: {"dry", "src_dry", "sofa"}; None -> the panel's current ones."""
+        import json
+        p = self._aur_store_path()
+        if p is None or rec < 0:
+            return
+        d = self._aur_saved()
+        s = settings or self._aur_panel_settings()
+        if pose is None:
+            pose = d.get(rec, {}).get("pose")
+        d[rec] = {"dry": s.get("dry", ""), "src_dry": dict(s.get("src_dry", {})),
+                  "sofa": s.get("sofa", ""),
+                  "pose": None if pose is None else [int(round(float(x))) for x in pose]}
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as f:
+                json.dump({"receivers": {str(k): d[k] for k in sorted(d)}}, f, indent=1)
+        except OSError as ex:
+            self._sb.showMessage(f"Could not save auralization settings: {ex}")
+
+    def _aur_restore_settings(self, row):
+        """Put receiver `row`'s saved audio file, per-source files, SOFA and rendered pose into the panel."""
+        s = self._aur_saved().get(row)
+        if s:
+            self._aur_dry.setText(s.get("dry", ""))
+            self._src_dry = {int(k): v for k, v in s.get("src_dry", {}).items()}
+            if s.get("sofa"):
+                self._aur_sofa.setText(s["sofa"])
+            if s.get("pose") is not None:
+                self._rendered_pose[row] = list(s["pose"])
+            if hasattr(self, "_aur_restore"):
+                self._aur_restore.setEnabled(row in self._rendered_pose)
+
+    def _aur_sync(self):
+        """Make the panel show the CURRENT receiver's saved settings, once per (project, receiver): a project
+        just opened (or a GUI restart) has a current row without any selection change. Called before the
+        panel is used (Per-source, Convolve / Live). Settings only: no Live restart, no player change."""
+        row = self._current_receiver_row() if self._proj_root else -1
+        if row < 0:
+            return
+        if self._proj_root != getattr(self, "_aur_proj", None):     # another project: its own poses
+            self._aur_proj = self._proj_root
+            self._rendered_pose = {}
+        if (self._proj_root, row) != getattr(self, "_aur_last_row", None):
+            self._aur_last_row = (self._proj_root, row)
+            self._aur_restore_settings(row)
+
+    def _aur_apply_saved(self, row):
+        """Newly selected receiver: restore its saved audio files / SOFA / rendered pose; while Live plays,
+        restart Live for it; otherwise load its binaural wav (if rendered), continuing at the same time."""
+        self._aur_restore_settings(row)
+        if self._foa_alive():
+            if row != getattr(self, "_live_rec", None):          # Live follows the selection: restart it
+                self._stop_foa_live()
+                dry = self._aur_dry.text().strip()
+                if dry and os.path.isfile(dry):
+                    self._run_foa_live(row, dry, os.path.join(self._proj_root, "output"))
+                else:
+                    self._sb.showMessage(f"Live stopped: receiver {row} has no anechoic audio file set.")
+            return
+        self._aur_load_wav(row)
+
+    def _aur_load_wav(self, row):
+        """Put receiver `row`'s binaural wav in the player; if one was playing, continue at the same time."""
+        if self._player is None or not self._proj_root:
+            return
+        from PySide6.QtMultimedia import QMediaPlayer
+        wav = os.path.join(self._proj_root, "output", f"binaural_rec{row}.wav")
+        playing = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        pos = self._player.position()
+        if not os.path.isfile(wav):
+            if not self._player.source().isEmpty():
+                self._player.stop(); self._player.setSource(QUrl())
+            self._aur_play.setEnabled(False); self._aur_slider.setEnabled(False)
+            return
+        self._aur_wav = wav
+        self._aur_resume = (pos, playing)                        # applied once the new file has loaded
+        self._player.setSource(QUrl.fromLocalFile(wav))
+        self._aur_play.setEnabled(True); self._aur_slider.setEnabled(True)
+
+    def _on_media_status(self, status):
+        """New wav loaded: jump to the position the previous receiver was at, and keep playing if it was."""
+        from PySide6.QtMultimedia import QMediaPlayer
+        res = getattr(self, "_aur_resume", None)
+        if res is None or status != QMediaPlayer.MediaStatus.LoadedMedia:
+            return
+        self._aur_resume = None
+        pos, playing = res
+        if pos > 0:
+            self._player.setPosition(min(pos, max(self._player.duration() - 1, 0)))
+        if playing:
+            self._use_default_audio_out(); self._player.play()
 
     def _on_pose_dial_changed(self, *_):
         """A dial moved: store it on the selected receiver and, if we're inside that receiver, steer
@@ -8846,14 +8969,18 @@ class MainWindow(QMainWindow):
         start = os.path.dirname(self._aur_sofa.text()) or os.path.expanduser("~")
         f, _ = QFileDialog.getOpenFileName(self, "Pick HRTF SOFA", start, "SOFA (*.sofa)")
         if f:
+            self._aur_sync()
             self._aur_sofa.setText(f); QSettings("phases", "gui").setValue("last_sofa", f)
+            self._aur_save(self._current_receiver_row())           # kept for this receiver right away
 
     def _pick_dry(self):
         start = os.path.dirname(self._aur_dry.text()) or os.path.expanduser("~")
         f, _ = QFileDialog.getOpenFileName(self, "Pick anechoic audio", start,
                                            "Audio (*.wav *.flac *.aiff *.aif *.ogg)")
         if f:
+            self._aur_sync()
             self._aur_dry.setText(f); QSettings("phases", "gui").setValue("last_dry", f)
+            self._aur_save(self._current_receiver_row())           # kept for this receiver right away
 
     def _edit_src_dry(self):
         """Assign each source its own anechoic signal (all sources play simultaneously into the receiver;
@@ -8863,6 +8990,7 @@ class MainWindow(QMainWindow):
         pts = self._src_tbl.get_points()
         if not pts:
             self._sb.showMessage("No sources defined yet."); return
+        self._aur_sync()                                       # show THIS receiver's saved paths
         dlg = QDialog(self); dlg.setWindowTitle("Per-source anechoic signals")
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel("Each source plays its own signal. Leave a row blank to use the default Audio."))
@@ -8877,8 +9005,10 @@ class MainWindow(QMainWindow):
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); lay.addWidget(bb)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._src_dry = {i: e.text().strip() for i, e in enumerate(edits) if e.text().strip()}
+            rec = self._current_receiver_row()
+            self._aur_save(rec)                                # kept for this receiver right away
             self._sb.showMessage(f"Per-source signals: {len(self._src_dry)} set "
-                                 f"(rest use the default Audio).")
+                                 f"(rest use the default Audio), saved for receiver {rec}.")
 
     def _browse_into(self, line_edit):
         from PySide6.QtWidgets import QFileDialog
@@ -8918,7 +9048,9 @@ class MainWindow(QMainWindow):
         script = self._find_common_script("ambisonic.py")
         if script is None:
             self._sb.showMessage("ambisonic.py not found next to gui.py."); return
-        pose = [str(self._aur_dials[k].value()) for k in ("az", "el", "roll")]
+        pose_i = [self._aur_dials[k].value() for k in ("az", "el", "roll")]
+        pose = [str(x) for x in pose_i]
+        self._aur_save(rec, pose_i)                           # this receiver's auralization, kept per project
         cmd = [sys.executable, script, "--rec", str(rec), "--dry", dry, "--live", "--pose", *pose]
         sofa = self._aur_sofa.text().strip()
         if sofa and os.path.isfile(sofa):                     # 3rd order + this HRTF; else 1st order, no HRTF
@@ -8930,6 +9062,7 @@ class MainWindow(QMainWindow):
             with open(mp, "w") as f:
                 json.dump(dm, f)
             cmd += ["--drymap", mp]
+        self._live_rec = rec                                  # the receiver Live is playing (restart on switch)
         if self._player is not None:
             self._player.stop()
         self._foa_thread = SolverThread(cmd, out, stdin=True)
@@ -8973,12 +9106,14 @@ class MainWindow(QMainWindow):
                                  "around inside it.")
 
     def _run_convolve(self):
-        """Render the selected receiver to a binaural wav via binauralize.py (in output/)."""
+        """Render the selected receiver to a binaural wav via binauralize.py (in output/). Its settings are
+        saved per receiver; selecting a rendered receiver later loads its wav again."""
         if not self._proj_root:
             self._sb.showMessage("Open a project first."); return
         rec = self._current_receiver_row()
         if rec < 0:
             self._sb.showMessage("Select a receiver row first."); return
+        self._aur_sync()                                       # this receiver's saved files, if not loaded yet
         sofa, dry = self._aur_sofa.text().strip(), self._aur_dry.text().strip()
         if not (dry and os.path.isfile(dry)):
             self._sb.showMessage("Pick an anechoic audio file."); return
@@ -8996,6 +9131,8 @@ class MainWindow(QMainWindow):
         self._aur_wav = os.path.join(out, f"binaural_rec{rec}.wav")
         pose_i = [self._aur_dials[k].value() for k in ("az", "el", "roll")]
         self._rendered_pose[rec] = pose_i                        # stamp: the pose this wav uses (Restore)
+        self._aur_save(rec, pose_i)                              # this receiver's auralization, kept per project
+        self._aur_resume = None                                  # no pending receiver-switch resume
         self._aur_restore.setEnabled(True)
         pose = [str(x) for x in pose_i]
         cmd = [sys.executable, script, sofa, "--rec", str(rec),

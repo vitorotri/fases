@@ -445,6 +445,49 @@ def decode(chs, dirs, pose_deg, i0=0, i1=None, prev=None):
     return out
 
 
+def _live_cache(rec, dry, dmap, sofa, order):
+    """(path, key) of receiver `rec`'s SAVED live preparation (output/live_cache/rec<N>.npz; cwd = output/).
+    The prepared signals are head-pose independent (world frame), so switching receivers or restarting
+    reloads them instead of convolving again. `key` holds everything they depend on (audio files, per-source
+    map, SOFA, order, this receiver's simulation files, config, the code): any change -> recomputed."""
+    def st(p):
+        try:
+            s = os.stat(p)
+            return [os.path.abspath(p), s.st_mtime, s.st_size]
+        except (OSError, TypeError):
+            return [p, 0, 0]
+    sim = sorted(f for pat in ("ARR", "HIR", "HRT", "IR", "VEL") for f in glob.glob(f"{pat}{rec}_*.bin"))
+    key = json.dumps({"dry": st(dry), "dmap": {k: st(v) for k, v in sorted((dmap or {}).items())},
+                      "sofa": st(sofa) if sofa else None, "order": order, "sim": [st(f) for f in sim],
+                      "cfg": [st(p) for p in ("header.txt", os.path.join("..", "config", "config.txt"),
+                                              os.path.join("..", "config", "p_ref.bin"))],
+                      "code": [st(__file__), st(allIRs.__file__)]}, sort_keys=True)
+    name = f"rec{rec}_hoa{order}.npz" if sofa else f"rec{rec}_foa.npz"     # one file per mode: no ping-pong
+    return os.path.join("live_cache", name), key
+
+
+def _cache_get(path, key):
+    """The saved arrays if `path` exists and was made with exactly `key`, else None."""
+    try:
+        with np.load(path) as z:
+            if str(z["key"]) != key:
+                return None
+            return {k: z[k] for k in z.files if k != "key"}
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _cache_put(path, key, **arrays):
+    """Save arrays + key (written to a temp file, then renamed: an interrupted save never looks valid)."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path[:-4] + ".tmp.npz"
+        np.savez(tmp, key=np.array(key), **arrays)
+        os.replace(tmp, path)
+    except OSError as ex:
+        print(f"[ambisonic] could not save the preparation ({ex})", flush=True)
+
+
 def _level_gain(chs):
     """The project's common playback level (allIRs.playback_gain, same for every receiver), turned down
     only if the loudest possible decode (all sources and channels in phase) would clip."""
@@ -711,16 +754,32 @@ if __name__ == "__main__":
         g = hoa_decoder_cached(a.sofa, a.order)
         print(f"[ambisonic] decoder ready: {g.shape[0]} SH x 2 ears x {g.shape[-1]} taps, "
               f"peak {np.abs(g).max():.3g}", flush=True)
-        S, tails, y = render_hoa(a.rec, a.dry, dmap, a.order, g, a.pose)   # y = output at --pose
-        if a.out:
-            import soundfile as sf
-            sf.write(a.out, (y * allIRs.limit_gain(allIRs.playback_gain(), float(np.abs(y).max()),
-                                                    0.9, "ambisonic")).T, FS)
-            print(f"[ambisonic] wrote {a.out} (order {a.order} + HRTF, pose {a.pose})")
+        path, key = _live_cache(a.rec, a.dry, dmap, a.sofa, a.order)
+        c = None if a.out else _cache_get(path, key)           # --out needs y at --pose: always computed
+        if c is not None:
+            S, tails, pk = c["S"], c["tails"], float(c["peak"])
+            print(f"[ambisonic] receiver {a.rec}: reusing the saved preparation ({path})", flush=True)
+        else:
+            S, tails, y = render_hoa(a.rec, a.dry, dmap, a.order, g, a.pose)   # y = output at --pose
+            pk = float(np.abs(y).max())
+            if a.out:
+                import soundfile as sf
+                sf.write(a.out, (y * allIRs.limit_gain(allIRs.playback_gain(), pk, 0.9, "ambisonic")).T, FS)
+                print(f"[ambisonic] wrote {a.out} (order {a.order} + HRTF, pose {a.pose})")
+            del y
+            _cache_put(path, key, S=S, tails=tails, peak=np.float64(pk))
         if a.live:
-            live_hoa(S, tails, g, a.pose, a.order, peak=float(np.abs(y).max()))
+            live_hoa(S, tails, g, a.pose, a.order, peak=pk)
         sys.exit(0)
-    chs, dirs = render_channels(a.rec, a.dry, dmap)
+    path, key = _live_cache(a.rec, a.dry, dmap, None, 1)
+    c = _cache_get(path, key)
+    if c is not None:
+        chs, dirs = c["chs"], c["dirs"]
+        print(f"[ambisonic] receiver {a.rec}: reusing the saved preparation ({path})", flush=True)
+    else:
+        chs, dirs = render_channels(a.rec, a.dry, dmap)
+        chs = chs.astype(np.float32)                           # live() uses float32 anyway: half the disk
+        _cache_put(path, key, chs=chs, dirs=dirs)
     if a.out:
         import soundfile as sf
         sf.write(a.out, (decode(chs, dirs, a.pose) * _level_gain(chs)).T, FS)
