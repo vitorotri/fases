@@ -295,6 +295,30 @@ def logo_pixmap(size, tint=None):
     return pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
+def logo_tile_pixmap(size, color):
+    """The app icon INVERTED for the dark bar: a `color` rounded tile with the face's lines cut out
+    (transparent), from icons/fases_<n>.png (white rounded tile + purple lines; the smallest file >= size).
+    None if the icon set is missing."""
+    from PySide6.QtGui import QImage
+    d = os.path.join(_GUI_DIR, "icons")
+    sizes = [n for n in (16, 24, 32, 48, 64, 128, 256, 512) if n >= size] or [512]
+    f = next((p for p in (os.path.join(d, f"fases_{n}.png") for n in sizes) if os.path.isfile(p)), None)
+    if f is None:
+        return None
+    img = QImage(f).convertToFormat(QImage.Format.Format_RGBA8888)
+    w, h, bpl = img.width(), img.height(), img.bytesPerLine()
+    px = np.frombuffer(img.constBits(), np.uint8, count=bpl * h).reshape(h, bpl // 4, 4)[:, :w].astype(np.float32)
+    tile = px[..., 3] / 255.0                                   # rounded tile shape (corners transparent)
+    dark = 255.0 - px[..., :3].mean(2)                          # 0 on the white tile, max on the lines
+    line = np.clip(dark / max(float(dark[tile > 0.5].max(initial=0.0)), 1.0), 0.0, 1.0)
+    c = QColor(color)
+    out = np.empty((h, w, 4), np.uint8)
+    out[..., 0], out[..., 1], out[..., 2] = c.red(), c.green(), c.blue()
+    out[..., 3] = (tile * (1.0 - line) * 255.0).astype(np.uint8)   # lines see-through
+    pm = QPixmap.fromImage(QImage(out.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy())
+    return pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+
 # Predefined absorption-material catalogue used by the material table RMB menu.
 # Expected line format inside the text file:
 #   material_name  a63  a125  a250  a500  a1000  a2000  a4000  a8000
@@ -7236,11 +7260,12 @@ class MainWindow(QMainWindow):
         self._sb.addPermanentWidget(self._mode_lbl)
         self._gl.modeLabelChanged.connect(
             lambda s: self._mode_lbl.setText(f"{s}   ·   ? Shortcuts"))
-        _lp = logo_pixmap(64, PAL["accent2"])          # About: the logo, tinted for the dark bar
+        # About: purple tile with the face's lines cut out (falls back to the tinted line logo)
+        _lp = logo_tile_pixmap(64, PAL["accent2"]) or logo_pixmap(64, PAL["accent2"])
         if _lp is not None:
             self._about_btn = QPushButton(); self._about_btn.setFlat(True)
-            self._about_btn.setIcon(QIcon(_lp)); self._about_btn.setIconSize(QSize(28, 28))
-            self._about_btn.setFixedSize(38, 32); self._about_btn.setToolTip(f"About {APP_NAME}")
+            self._about_btn.setIcon(QIcon(_lp)); self._about_btn.setIconSize(QSize(32, 32))
+            self._about_btn.setFixedSize(42, 36); self._about_btn.setToolTip(f"About {APP_NAME}")
             self._about_btn.setStyleSheet("QPushButton{border:none;background:transparent;}"
                                           f"QPushButton:hover{{background:{PAL['btn_hover']};border-radius:4px;}}")
             self._about_btn.clicked.connect(self._show_about)
