@@ -1,6 +1,6 @@
-# PHASES 2D
+# F.A.S.E.S 2D
 
-Solver for enclosed and open spaces.
+2D toy solver for enclosed and open spaces.
 
 ## Compilation
 
@@ -10,6 +10,7 @@ Solver for enclosed and open spaces.
 
 ## Usage
 
+Convert DXF file to OBJ with script dxf2obj.py in the "scripts" directory.
 Fit materials coefficients per octave band with filterFIT.py in the "common" directory. Then:
 
 ```bash
@@ -22,4 +23,4 @@ Fit materials coefficients per octave band with filterFIT.py in the "common" dir
 # python3 scripts/plot.py
 ```
 
-Video animation will be in the output directory.
+Video animation will be in the "output" directory.
