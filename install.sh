@@ -161,6 +161,7 @@ Type=Application
 Name=F.A.S.E.S
 GenericName=Room acoustics simulator
 Comment=Faithful Acoustic Solver for Extended Spaces
+Keywords=FASES;fases;acoustics;room acoustics;simulation;auralization;
 Exec="$BIN/fases"
 Icon=fases
 Terminal=false
