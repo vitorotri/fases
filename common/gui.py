@@ -2151,19 +2151,15 @@ class GLViewer(QOpenGLWidget):
     
         glLineWidth(2.0)
     
-        yaw_r   = math.radians(self._yaw)
-        pitch_r = math.radians(self._pitch)
-    
+        # world->eye rotation of the scene camera, read from the modelview _setup_camera just built
+        # (GL column-major -> transpose). Covers yaw/pitch, Ctrl roll, Alt tumble and receiver view alike.
+        R = np.asarray(self._mv, float)[:3, :3].T
+
         def project_axis(ax, ay, az):
             # returns (screen_x, screen_y, depth) — depth is the view-space z
             # (larger = nearer the camera) used only to paint-sort the 3 axes.
-            x1 = ax * math.cos(yaw_r) - ay * math.sin(yaw_r)
-            y1 = ax * math.sin(yaw_r) + ay * math.cos(yaw_r)
-            z1 = az
-            x2 = x1
-            y2 = y1 * math.cos(pitch_r) - z1 * math.sin(pitch_r)
-            depth = y1 * math.sin(pitch_r) + z1 * math.cos(pitch_r)
-            return x2, y2, depth
+            ex, ey, ez = R @ (ax, ay, az)
+            return ex, ey, ez
 
         # Project all three tips once. depth = view-space z (larger = nearer).
         proj = []
