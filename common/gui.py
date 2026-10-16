@@ -8843,7 +8843,7 @@ class MainWindow(QMainWindow):
         self._player.durationChanged.connect(lambda _d: self._on_media_status(None))   # backends signal "ready"
         self._player.seekableChanged.connect(lambda _s: self._on_media_status(None))   # in different ways
         self._aur_slider.sliderMoved.connect(self._player.setPosition)
-        self._aur_slider.sliderPressed.connect(lambda: setattr(self, "_aur_seek", None))   # user seeks: theirs
+        self._aur_slider.sliderPressed.connect(self._aur_seek_done)   # user seeks: theirs
         self._aur_blink = QTimer(self); self._aur_blink.timeout.connect(self._blink_play)
         self._aur_blink_on = False
 
@@ -8987,16 +8987,25 @@ class MainWindow(QMainWindow):
         self._aur_seek = None
         if not os.path.isfile(wav):
             self._aur_resume = None                              # player stops here: nothing to resume later
+            if getattr(self, "_aur_fade_t", None) is not None:   # and an earlier switch's fade must not load
+                self._aur_fade_t.stop(); self._aur_fade_then = None   # its file afterwards
+            self._aur_fade_due = False
+            self._audio_out.setVolume(1.0)
             if not self._player.source().isEmpty():
                 self._player.stop(); self._player.setSource(QUrl())
             self._aur_play.setEnabled(False); self._aur_slider.setEnabled(False)
             return
         self._aur_wav = wav
-        self._aur_resume = (pos, playing)                        # position applied once the new file has loaded
-        self._log.append(f"[aur] switch to receiver {row}: resume at {pos} ms, playing={playing}")   # DEBUG resume
-        self._player.setSource(QUrl.fromLocalFile(wav))
-        if playing:                                              # setSource stops the player: start it again now
-            self._use_default_audio_out(); self._player.play()  # (play() on a loading source starts when ready)
+
+        def go():                                                # set here, not before the fade-out: an OLD-file
+            self._aur_resume = (pos, playing)                    # status change must not consume it
+            self._player.setSource(QUrl.fromLocalFile(wav))
+            if playing:                                          # setSource stops the player: start it again now
+                self._use_default_audio_out(); self._player.play()  # (silent: the resume fades it in)
+        if playing:                                              # cutting live audio clicks: fade it out first
+            self._aur_fade(self._audio_out.volume(), 0.0, 60, go)
+        else:
+            go()
         self._aur_play.setEnabled(True); self._aur_slider.setEnabled(True)
 
     def _on_media_status(self, status):
@@ -9016,10 +9025,40 @@ class MainWindow(QMainWindow):
             # although position() already read the target): _on_media_pos repeats it once audio runs.
             self._aur_seek = (pos, 5) if pos > 0 else None        # (target ms, attempts left)
             self._use_default_audio_out(); self._player.play()
+            if pos > 0:
+                self._aur_fade_due = True                         # fade in once playback runs AT pos
+            else:
+                self._aur_fade(0.0, 1.0, 40)
         elif pos > 0:
             self._player.pause()                                  # Paused keeps the position; Stopped is 0
-        self._log.append(f"[aur] resume: status={getattr(status, 'name', status)} seek {pos} ms -> "
-                         f"position {self._player.position()} ms")             # DEBUG resume
+
+    def _aur_seek_done(self):
+        """End a switch's re-seek; fade in if it was still waiting silent for playback at the target."""
+        self._aur_seek = None
+        if getattr(self, "_aur_fade_due", False):
+            self._aur_fade_due = False
+            self._aur_fade(0.0, 1.0, 40)
+
+    def _aur_fade(self, v0, v1, ms, then=None, steps=20):
+        """Receiver switch: ramp the volume v0 -> v1 over `ms`, then call `then`. Out before the cut, in after
+        the resume, so neither the cut nor a start-from-0 the re-seek fixes is heard as a click. A new fade
+        replaces a running one (its `then` is dropped: only the latest switch loads)."""
+        t = getattr(self, "_aur_fade_t", None)
+        if t is None:
+            t = self._aur_fade_t = QTimer(self)
+            t.timeout.connect(self._aur_fade_step)
+        self._aur_fade_v, self._aur_fade_then, self._aur_fade_k, self._aur_fade_n = (v0, v1), then, 0, steps
+        self._audio_out.setVolume(v0)
+        t.start(max(1, ms // steps))
+
+    def _aur_fade_step(self):
+        (v0, v1), self._aur_fade_k = self._aur_fade_v, self._aur_fade_k + 1
+        self._audio_out.setVolume(v0 + (v1 - v0) * min(1.0, self._aur_fade_k / self._aur_fade_n))
+        if self._aur_fade_k >= self._aur_fade_n:
+            self._aur_fade_t.stop()
+            then, self._aur_fade_then = self._aur_fade_then, None
+            if then:
+                then()
 
     def _on_pose_dial_changed(self, *_):
         """A dial moved: store it on the selected receiver and, if we're inside that receiver, steer
@@ -9275,6 +9314,10 @@ class MainWindow(QMainWindow):
         from PySide6.QtMultimedia import QMediaPlayer
         self._aur_blink.stop(); self._aur_play.setStyleSheet("")
         self._aur_seek = None                                    # play/pause by hand ends a switch's re-seek
+        if getattr(self, "_aur_fade_t", None) is not None:
+            self._aur_fade_t.stop(); self._aur_fade_then = None
+        self._aur_fade_due = False
+        self._audio_out.setVolume(1.0)                           # ... and any switch fade (never stuck silent)
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
         else:
@@ -9291,12 +9334,13 @@ class MainWindow(QMainWindow):
         if sk is not None:
             target, left = sk
             if p > target + 1500 or left <= 0:                   # 1.5 s of real playback past it (or give up:
-                self._aur_seek = None                            # never fight the player)
-                self._log.append(f"[aur] playing at {p} ms (target {target} ms)")   # DEBUG resume
+                self._aur_seek_done()                            # never fight the player)
             elif p < target - 500:                               # playback (re)started from the top: seek again
                 self._aur_seek = (target, left - 1)
                 self._player.setPosition(target)
-                self._log.append(f"[aur] re-seek {p} -> {target} ms")              # DEBUG resume
+            elif p >= target + 150 and getattr(self, "_aur_fade_due", False):
+                self._aur_fade_due = False                       # audio really runs past the target: no more
+                self._aur_fade(0.0, 1.0, 40)                    # jumps to hide, fade in now
         if not self._aur_slider.isSliderDown():
             self._aur_slider.setValue(p)
         self._aur_time.setText(f"{p // 60000}:{(p // 1000) % 60:02d}")
