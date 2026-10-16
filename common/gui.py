@@ -112,7 +112,6 @@ LAYER_COLORS = [
 ]
 '''
 BBOX_COLOR = (0.35, 0.65, 1.0)
-SRC_COLOR  = (138/255, 130/255, 255/255)
 REC_COLOR  = (252/255, 118/255, 78/255)
 HL_COLOR   = (0.2, 1.0, 0.5)   # highlight tint for a selected/hovered point
 # Tint for sources/receivers placed OUTSIDE the domain box (single place to
@@ -132,22 +131,25 @@ def _scene_palette(light):
     if light:
         return {"bg":   (1.00, 1.00, 1.00, 1.0),   # white background (GL clear)
                 "wire": (0.0, 0.0, 0.0, 0.9),       # black wireframe + domain box
-                "grey": (0.45, 0.45, 0.45)}          # unselected fill on white
+                "grey": (0.45, 0.45, 0.45),          # unselected fill on white
+                "src":  (0.35, 0.10, 1.00)}          # sources: deeper violet (the pale one vanishes on white)
     return {"bg":   (0.05, 0.055, 0.07, 1.0),       # dark background (GL clear)
             "wire": (1.0, 1.0, 1.0, 0.9),           # white wireframe + domain box
-            "grey": (0.62, 0.62, 0.62)}              # unselected fill on dark
+            "grey": (0.62, 0.62, 0.62),              # unselected fill on dark
+            "src":  (138/255, 130/255, 255/255)}     # sources
 
 _pal = _scene_palette(SCENE_LIGHT_MODE)
 SCENE_BG   = _pal["bg"]
 WIRE_COLOR = _pal["wire"]
 GREY_FILL  = _pal["grey"]
+SRC_COLOR  = _pal["src"]   # source glyphs (palette-dependent, flipped by set_scene_mode)
 
 def set_scene_mode(light):
     """Flip the viewport colour scheme (background / wireframe / fill)."""
-    global SCENE_LIGHT_MODE, SCENE_BG, WIRE_COLOR, GREY_FILL
+    global SCENE_LIGHT_MODE, SCENE_BG, WIRE_COLOR, GREY_FILL, SRC_COLOR
     SCENE_LIGHT_MODE = bool(light)
     p = _scene_palette(SCENE_LIGHT_MODE)
-    SCENE_BG, WIRE_COLOR, GREY_FILL = p["bg"], p["wire"], p["grey"]
+    SCENE_BG, WIRE_COLOR, GREY_FILL, SRC_COLOR = p["bg"], p["wire"], p["grey"], p["src"]
 # Transparency of the SELECTED (highlighted) layer's fill, 0.0 (invisible) ..
 # 1.0 (fully opaque). Edit this value to taste.
 SEL_ALPHA  = 0.9
