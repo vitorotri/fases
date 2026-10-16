@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use F.A.S.E.S, please cite it as below."
+title: "F.A.S.E.S: Faithful Acoustic Solver for Extended Spaces"
+version: "0.9"
+date-released: 2026-10-16
+url: "https://github.com/vitorotri/fases"
+authors:
+  - family-names: "Romanelli Tricanico"
+    given-names: "Vito" 
+
