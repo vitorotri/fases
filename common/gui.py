@@ -2463,6 +2463,25 @@ class GLViewer(QOpenGLWidget):
                     glVertex3fv(verts[vi])
             glEnd()
 
+        def draw_shaded(g, color, tris=None):
+            # receiver view: OPAQUE, grey-shaded by orientation under one FIXED light direction, so a flat
+            # surface is one uniform shade (no triangulated look), walls of different orientation differ, and
+            # the shades stay put while the head turns
+            T = np.asarray(g["tris"] if tris is None else tris)
+            if len(T) == 0:
+                return
+            P = verts[T].astype(np.float64)
+            n = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+            L = np.array([0.35, 0.55, 0.76])                     # from above, skewed so x- and y-walls differ
+            s = np.abs(n @ L) / np.maximum(np.linalg.norm(n, axis=1), 1e-12)
+            s = 0.35 + 0.65 * s
+            glBegin(GL_TRIANGLES)
+            for k, tri in enumerate(T):
+                glColor4f(color[0] * s[k], color[1] * s[k], color[2] * s[k], 1.0)
+                for vi in tri:
+                    glVertex3fv(verts[vi])
+            glEnd()
+
         # Semi-transparent faces, NO edges. Walls are see-through so interior
         # layers (sphere, inner panels) are visible from outside. Selected
         # layer is drawn opaque and vivid in its own hue.
@@ -2480,15 +2499,25 @@ class GLViewer(QOpenGLWidget):
         # the selected layer gets its own vivid hue at SEL_ALPHA. Drawing every
         # fill BEFORE the wireframe is what keeps the highlighted layer BEHIND
         # the white wireframe instead of painting over it.
+        # Receiver view instead: opaque shaded fills WITH depth writes (the edges below then hide behind
+        # walls too; the global polygon offset keeps the visible ones on top of their own faces).
+        fpv = self._fpv is not None
+        if fpv:
+            glDisable(GL_BLEND); glDepthMask(GL_TRUE)
         for g in self._groups:
             if g["is_bbox"] or not g["visible"] or _cut(g):
                 continue
             keep = None if g["name"] == self._selected_layer else self._dollhouse_keep(g)
             tris = None if keep is None else np.asarray(g["tris"])[keep]   # dollhouse: per triangle
-            if self._selected_layer == g["name"] or g["name"] in self._surf_sel:
+            picked = self._selected_layer == g["name"] or g["name"] in self._surf_sel
+            if fpv:
+                draw_shaded(g, g["color"] if picked else (0.85, 0.85, 0.85), tris=tris)
+            elif picked:
                 draw_triangles(g, alpha=SEL_ALPHA, tris=tris)            # selected / surface-picked: own colour
             else:
                 draw_triangles(g, alpha=fill_a, color=GREY, tris=tris)   # others: grey
+        if fpv:
+            glEnable(GL_BLEND); glDepthMask(GL_FALSE)
 
         # Pass B: feature-edge wireframe for ALL visible layers (the selected
         # one included), drawn last so the edges always sit on top of every
@@ -3245,6 +3274,8 @@ class GLViewer(QOpenGLWidget):
         except Exception:
             return
         if sz < 0.0 or sz > 1.0:      # behind the camera / clipped
+            return
+        if self._fpv is not None and through < 1.0:   # receiver view: walls are opaque -> hidden behind them
             return
         # GL y is bottom-up; QPainter y is top-down
         self._glyph_queue.append((float(sx), float(H - sy), tuple(color),
@@ -8791,13 +8822,6 @@ class MainWindow(QMainWindow):
         self._aur_sofa = QLineEdit(QSettings("phases", "gui").value("last_sofa", "") or "")
         bs = QPushButton("SOFA…"); bs.setFixedHeight(24); bs.clicked.connect(self._pick_sofa)
         sr.addWidget(self._aur_sofa, 1); sr.addWidget(bs); v.addLayout(sr)
-        # Alternative renderer: live ambisonics. With a valid SOFA above -> 3rd order + that HRTF (SH-domain
-        # MagLS decode); without -> 1st order, no HRTF. Head pose is applied LIVE (dials or FPV mouselook
-        # stream to ambisonic.py --live); nothing is re-rendered or written per pose.
-        self._aur_foa = QCheckBox("Ambisonic live: head pose applied while playing (3rd order + HRTF with a "
-                                  "SOFA, else 1st order)")
-        self._aur_foa.setChecked(bool(QSettings("phases", "gui").value("aur_foa", False, type=bool)))
-        self._aur_foa.toggled.connect(self._on_foa_toggled); v.addWidget(self._aur_foa)
 
         ar = QHBoxLayout(); ar.addWidget(QLabel("Audio"))
         self._aur_dry = QLineEdit(QSettings("phases", "gui").value("last_dry", "") or "")
@@ -8806,6 +8830,18 @@ class MainWindow(QMainWindow):
         bps.setToolTip("Give each source its own anechoic signal (played simultaneously)")
         ar.addWidget(self._aur_dry, 1); ar.addWidget(bd); ar.addWidget(bps); v.addLayout(ar)
         self._src_dry = {}                # {source_index: anechoic_path}; blank -> uses the default Audio
+        # picked files shown like the Scene tab's project folder (grey text, set by the buttons only)
+        for le in (self._aur_sofa, self._aur_dry):
+            le.setReadOnly(True); le.setFrame(False)
+            le.setStyleSheet(f"color:{PAL['subtext']};font-size:11px;background:transparent;")
+
+        # Alternative renderer: live ambisonics. With a valid SOFA above -> 3rd order + that HRTF (SH-domain
+        # MagLS decode); without -> 1st order, no HRTF. Head pose is applied LIVE (dials or FPV mouselook
+        # stream to ambisonic.py --live); nothing is re-rendered or written per pose.
+        self._aur_foa = QCheckBox("Ambisonic live: head pose applied while playing (3rd order + HRTF with a "
+                                  "SOFA, else 1st order)")
+        self._aur_foa.setChecked(bool(QSettings("phases", "gui").value("aur_foa", False, type=bool)))
+        self._aur_foa.toggled.connect(self._on_foa_toggled); v.addWidget(self._aur_foa)
 
         self._aur_conv = QPushButton("∗	Convolve"); self._aur_conv.setFixedHeight(26)
         self._aur_conv.clicked.connect(self._run_convolve); v.addWidget(self._aur_conv)
