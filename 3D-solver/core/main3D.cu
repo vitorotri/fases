@@ -1705,8 +1705,7 @@ int main(int argc, char *argv[]){
 					}
 					// iS.amp: curvature gain (1 planar, < 1 convex, > 1 concave focus; <= 4 per curved bounce)
 					float gS = Q.src_pressure[s] * iS.amp * P / d * std::exp(-m_air[b]*d); // tied to Lp,1m
-					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d) * std::exp(-m_air[b]*d);
-					//float gS = Q.src_pressure[s] * iS.amp * P / (4.0*M_PI*d); // amplitude validation
+					//float gS = Q.src_pressure[s] * iS.amp * P / d; // amplitude validation
 					
 					// INCOHERENT (GA) energy deposit at the integer sample (validation path).
 					// no fractional delay (amplitude validation)
