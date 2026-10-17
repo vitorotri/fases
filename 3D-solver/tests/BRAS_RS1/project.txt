@@ -1,0 +1,22 @@
+# phases project manifest  —  written by gui.py
+# All paths are absolute (the solver reads inputs by absolute path).
+name      = BRAS_RS1
+root      = /home/vitorotri/Documents/Github/fases/3D-solver/tests/BRAS_RS1
+created   = 2026-09-08 08:56
+saved     = 2026-10-17 13:29
+scene     = /home/vitorotri/Documents/BRAS/1 Scene descriptions/RS1 single reflection (infinite plate)/Geometry/RS1_RIR_Absorbing_nu.obj
+binary    = /home/vitorotri/Documents/Github/fases/3D-solver/build/fases3D
+config    = /home/vitorotri/Documents/Github/fases/3D-solver/tests/BRAS_RS1/config/config.txt
+sources   = /home/vitorotri/Documents/Github/fases/3D-solver/tests/BRAS_RS1/input/src/src.txt
+receivers = /home/vitorotri/Documents/Github/fases/3D-solver/tests/BRAS_RS1/input/rec/rec.txt
+poles     = /home/vitorotri/Documents/Github/fases/3D-solver/tests/BRAS_RS1/config/poles.txt
+matdir    = /home/vitorotri/Documents/Github/fases/3D-solver/tests/BRAS_RS1/input/mat
+layers    = G-Object C-RockFon_Sonar_G C-RockFon_Sonar_G.001 C-RockFon_Sonar_G.002 C-RockFon_Sonar_G.003 C-RockFon_Sonar_G.004 C-RockFon_Sonar_G.005 C-RockFon_Sonar_G.006 C-RockFon_Sonar_G.007 C-RockFon_Sonar_G.008 C-RockFon_Sonar_G.009 C-RockFon_Sonar_G.010 C-RockFon_Sonar_G.011 C-RockFon_Sonar_G.012 C-RockFon_Sonar_G.013 C-RockFon_Sonar_G.014 C-RockFon_Sonar_G.015 C-RockFon_Sonar_G.016 C-RockFon_Sonar_G.017 C-RockFon_Sonar_G.018 C-RockFon_Sonar_G.019 C-RockFon_Sonar_G.020 C-RockFon_Sonar_G.021 C-RockFon_Sonar_G.022 C-RockFon_Sonar_G.023 C-RockFon_Sonar_G.024 C-RockFon_Sonar_G#1 C-RockFon_Sonar_G.025 C-RockFon_Sonar_G.026 C-RockFon_Sonar_G.027 C-RockFon_Sonar_G.028 C-RockFon_Sonar_G.029 C-RockFon_Sonar_G.030 C-RockFon_Sonar_G.031 C-RockFon_Sonar_G.032 C-RockFon_Sonar_G.033 C-RockFon_Sonar_G.034 C-RockFon_Sonar_G.035 C-RockFon_Sonar_G.036 C-RockFon_Sonar_G.037 C-RockFon_Sonar_G.038 C-RockFon_Sonar_G.039 C-RockFon_Sonar_G.040 C-RockFon_Sonar_G.041 C-RockFon_Sonar_G.042 C-RockFon_Sonar_G.043 C-RockFon_Sonar_G.044 C-RockFon_Sonar_G.045 C-RockFon_Sonar_G.046 C-RockFon_Sonar_G.047 wall_y0 wall_x1 wall_y1 wall_x0 ceiling
+show_bbox = 1
+inactive_layers = []
+orig_frame = 0
+shift_positive = 1
+scene_src = /home/vitorotri/Documents/BRAS/1 Scene descriptions/RS1 single reflection (infinite plate)/Geometry/RS1_RIR_Absorbing_nu.obj
+obj_shift = 0 0 0
+# domain extent (Lx Ly Lz) is derived from the scene AABB; informational only:
+# domain  = 11 5.97 5

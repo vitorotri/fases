@@ -1,0 +1,24 @@
+0.045     # h [m]
+0.15      # t_max [s]
+700       # f_cutoff [Hz]
+20.3      # temperature [°C]
+0.5       # CFL
+10        # number of poles for the ADE
+1.0       # U_PML
+0.0       # D_PML
+1.0       # R_PML
+1.0       # L_PML
+1.0       # F_PML
+1.0       # B_PML
+1         # ISM max reflection order
+207       # altitude [m]
+50000     # number of rays (ray-traced tail)
+0         # source type (0=PCS,1=Ricker,2=Sinusoid)
+25        # global source frequency [Hz] (PCS/Ricker; sinusoid uses per-source f0)
+0         # source index (auralization: one run per source; 0 otherwise)
+3.38185   # slice x0 [m] (animation)
+2.985     # slice y0 [m] (animation)
+2.16923   # slice z0 [m] (animation)
+12        # animation fps (frames capped to RAM in main3D)
+-0.01     # animation pressure min [Pa] (GUI only)
+0.01      # animation pressure max [Pa] (GUI only)
