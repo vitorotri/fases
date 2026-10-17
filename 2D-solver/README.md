@@ -1,6 +1,6 @@
 # F.A.S.E.S 2D
 
-2D toy solver for enclosed and open spaces.
+2D simple solver for enclosed and open spaces.
 
 ## Compilation
 
