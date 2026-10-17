@@ -1,12 +1,17 @@
+# Use Lp,1m = 93.98 dB in F.A.S.E.S to validate
+
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+HERE = os.path.dirname(os.path.abspath(__file__))   # binaries are read from the script's folder
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
-ROOM_DIM  = [3.4, 4.0, 3.0]  		# [Lx, Ly, Lz] metres
+ROOM_DIM  = [4.5, 3.0, 3.0]  		# [Lx, Ly, Lz] metres
 FS        = 44100.0           		# Hz  — must match the binary reference
 C         = 343.23					# m/s
-MAX_ORDER = 15                 		# total ISM reflection order
+MAX_ORDER = 9                 		# total ISM reflection order
 
 # Energy absorption coefficients per surface  (α ∈ [0,1], R = sqrt(1−α))
 # Convention matches pyroomacoustics ShoeBox:
@@ -15,23 +20,23 @@ MAX_ORDER = 15                 		# total ISM reflection order
 #   floor / ceiling →  z = 0   / z = Lz
 ALPHA = {
     "west":    0.10,
-    "east":    0.30,
-    "south":   0.15,
-    "north":   0.70,
-    "floor":   0.50,
-    "ceiling": 0.22,
+    "east":    0.25,
+    "south":   0.35,
+    "north":   0.55,
+    "floor":   0.10,
+    "ceiling": 0.10,
 }
 
 SOURCES = [
-    {"pos": [1.75, 1.0, 1.5], "pressure": 1.0}#,
-    #{"pos": [2.5, 1.0, 1.5], "pressure": 0.7},
+    {"pos": [1.2, 1.5, 1.5], "pressure": 1.0}#,
 ]
 
-RECEIVER = [1.75, 3.0, 1.5]
+RECEIVER = [2.2, 1.5, 1.5]
 
 # One binary (float32) file per source — edit paths as needed
 BINARY_FILES = [
-    "RIR0_500.bin"#,
+    "HIR0_0_125.bin"#,     # main3D: HIR<rec>_<src>_<band>.bin
+    #"RIR0_500.bin",
     #"RIR1_1000.bin",
 ]
 BINARY_DTYPE = np.float32
@@ -40,21 +45,6 @@ BINARY_DTYPE = np.float32
 
 Lx, Ly, Lz = ROOM_DIM
 R = {k: np.sqrt(max(0.0, 1.0 - v)) for k, v in ALPHA.items()}
-
-NW = 1024  # Hann window size for fractional delay — must match Nw in main3D.cu
-
-
-def deposit_fractional(rir, tau, amp):
-    """Hann-windowed sinc deposit, identical to deposit() in main3D.cu.
-
-    C:  rir[nn] += amp * 0.5*(1 + cos(2*pi*xx/Nw)) * sin(pi*xx)/(pi*xx),  xx = nn - tau
-    np.sinc(x) = sin(pi*x)/(pi*x), so np.sinc(xx) is the same sinc term.
-    """
-    t = int(tau)
-    nn = np.arange(max(0, t - NW//2), min(len(rir), t + NW//2 + 1))
-    xx = nn - tau
-    rir[nn] += amp * 0.5 * (1.0 + np.cos(2.0*np.pi*xx/NW)) * np.sinc(xx)
-
 
 # ── ISM ───────────────────────────────────────────────────────────────────────
 
@@ -97,7 +87,7 @@ def ism_rir(src_pos, src_pressure, rec_pos):
                             amp = (R["west"]   ** abs(l-p) * R["east"]    ** abs(l)
                                  * R["south"]  ** abs(m-q) * R["north"]   ** abs(m)
                                  * R["floor"]  ** abs(n-r) * R["ceiling"] ** abs(n))
-                            amp *= src_pressure / (4.0 * np.pi * d)
+                            amp *= src_pressure / d
 
                             tau_list.append(d / C * FS)
                             a_list.append(amp)
@@ -105,10 +95,7 @@ def ism_rir(src_pos, src_pressure, rec_pos):
     N = int(max(tau_list)) + 1
     e = np.zeros(N, dtype=np.float64)   # ENERGY per bin
 
-    # INCOHERENT (geometrical-acoustics) summation: overlapping image arrivals add in
-    # ENERGY, not pressure -- phase is discarded. This is the GA assumption and matches
-    # the ray-tracer, so the two agree even in symmetric rooms where arrivals coincide.
-    # (Coherent pressure summation would be  rir[int(tau)] += a .)
+    # tau here is just arrival time
     for tau, a in zip(tau_list, a_list):
         e[int(tau)] += a * a
 
@@ -140,22 +127,24 @@ for i, src in enumerate(SOURCES):
     t   = np.arange(len(rir)) / FS * 1e3  # ms
 
     ax = axes[i][0]
-    ax.plot(t, rir, label=f"ISM analytical (src {i+1})", linewidth=0.8)
+    ax.plot(t, rir, label=f"ISM analytical (src {i+1})", linewidth=0.8, c='b')
 
     d_direct = np.linalg.norm(np.array(src["pos"]) - np.array(RECEIVER))
     t_direct_py = int(d_direct / C * FS)
     print(f"[src {i+1}] direct distance={d_direct:.6f} m  →  Python sample={t_direct_py}  ({t_direct_py/FS*1e3:.4f} ms)")
 
+    path = os.path.join(HERE, BINARY_FILES[i])          # next to this script, wherever it is run from
     try:
-        ref   = np.fromfile(BINARY_FILES[i], dtype=BINARY_DTYPE)
+        ref   = np.fromfile(path, dtype=BINARY_DTYPE)
         t_ref = np.arange(len(ref)) / FS * 1e3
-        ax.plot(t_ref, ref, label="Reference (binary)", linestyle="--",
+        ax.plot(t_ref, ref, label=f"Computed ({BINARY_FILES[i]})", linestyle="--",
                 linewidth=0.8, alpha=0.75, c='r')
         t_peak_ref = int(np.argmax(np.abs(ref)))
         print(f"[src {i+1}] reference peak sample={t_peak_ref}  ({t_peak_ref/FS*1e3:.4f} ms)  amp={ref[t_peak_ref]:.6f}")
         print(f"[src {i+1}] Python    direct  amp ={rir[t_direct_py]:.6f}")
     except FileNotFoundError:
-        print(f"[info] '{BINARY_FILES[i]}' not found — reference skipped.")
+        print(f"[info] '{path}' not found — reference skipped. "
+              f"HIR files there: {sorted(f for f in os.listdir(HERE) if f.startswith('HIR'))}")
 
     ax.set_title(f"Source {i+1}  pos={src['pos']}  →  receiver={RECEIVER}")
     ax.set_xlabel("Time (ms)")
