@@ -51,6 +51,10 @@ make            # quick build for the GPU set in the Makefile (ARCH)
 make release    # portable build for all GPU generations
 ```
 
+## Documentation
+
+The user manual is [docs/F_A_S_E_S_manual.pdf](docs/F_A_S_E_S_manual.pdf).
+
 ## Ethical use
 
 This software and its derivatives shall not be used for mass surveillance or to harm civilians.
