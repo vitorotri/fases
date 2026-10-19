@@ -53,7 +53,7 @@ make release    # portable build for all GPU generations
 
 ## Documentation
 
-The user manual is [docs/F_A_S_E_S_manual.pdf](docs/F_A_S_E_S_manual.pdf).
+The user manual is [docs/F_A_S_E_S_Manual.pdf](docs/F_A_S_E_S_Manual.pdf).
 
 ## Ethical use
 
