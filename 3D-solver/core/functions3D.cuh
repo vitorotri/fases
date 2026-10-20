@@ -1046,6 +1046,42 @@ __global__ void kernel_inject_src_SSP(float *p, float *u_s, int *sidx, float *sv
 	p[sidx[s]] += SSP3w * dt * c*c * sval[s] * s_amp * rho0 * A_s / (h*h*h);
 }
 
+// kernel to show boundary artifacts, R is a global reflection coefficient
+__global__ void kernel_apply_BC_vox(float *q, float *S, int Nx, int Ny, int Nz, float R){
+    int i = blockIdx.x*blockDim.x + threadIdx.x + 3;
+	int j = blockIdx.y*blockDim.y + threadIdx.y + 3;
+	int k = blockIdx.y*blockDim.y + threadIdx.y + 3;
+    if ((i < Nx-3) && (j < Ny-3) && (k < Nz-3)){
+    	
+		int Cijk = flat3(i,j,k,Nx,Ny);
+		
+		float nodesum = 0.0, sum = 0.0, eps = 1e-7, F;
+		
+		//R *= -1.0f; // phase inversion, if desired
+		
+    	// Compute contributions from neighbors for each direction, ensuring parallel paradigm
+    	
+    	nodesum += R * S[flat3(i+1, j, k, Nx, Ny)] * q[flat3(i+1, j, k, Nx, Ny)];
+    	nodesum += R * S[flat3(i+1, j, k, Nx, Ny)] * q[flat3(i+1, j, k, Nx, Ny)];
+    	nodesum += R * S[flat3(i, j+1, k, Nx, Ny)] * q[flat3(i, j+1, k, Nx, Ny)];
+    	nodesum += R * S[flat3(i, j-1, k, Nx, Ny)] * q[flat3(i, j-1, k, Nx, Ny)];
+    	nodesum += R * S[flat3(i, j, k+1, Nx, Ny)] * q[flat3(i, j, k+1, Nx, Ny)];
+    	nodesum += R * S[flat3(i, j, k-1, Nx, Ny)] * q[flat3(i, j, k-1, Nx, Ny)];
+    	
+    	// for inner nodes, nodesum is already 0.0   
+	
+    	// Sum of active neighbors (based on S)
+    	sum = S[flat3(i+1, j, k, Nx, Ny)]+ S[flat3(i, j+1, k, Nx, Ny)] + S[flat3(i, j, k+1, Nx, Ny)] +
+          	  S[flat3(i-1, j, k, Nx, Ny)]+ S[flat3(i, j-1, k, Nx, Ny)] + S[flat3(i, j, k-1, Nx, Ny)];
+	
+    	// Determine node type
+    	F = 1.0 - S[Cijk]; // Boundary node factor (If F = 1.0, it is a boundary)
+	
+    	// Apply boundary condition
+    	q[Cijk] = S[Cijk]*q[Cijk] + F*nodesum/(sum + eps);
+    }
+}
+
 // WENO5 SSP-RK3 step 0
 __global__ void kernel_WENO_stage0(int Nx, int Ny, int Nz, float *__restrict__ p0, float *__restrict__ u0, float *__restrict__ v0, float *__restrict__ w0, float *__restrict__ p1, float *__restrict__ u1, float *__restrict__ v1, float *__restrict__ w1, float rho, float c, float h, float dt, float *c_rl, float eps, float *dd, float *beta_rl, float *__restrict__ S, float U_PML, float D_PML, float R_PML, float L_PML, float F_PML, float B_PML, float *px, float *py, float *pz, int pml_mode, float *psi_px, float *psi_py, float *psi_pz, float *psi_ux, float *psi_vy, float *psi_wz){
 	
