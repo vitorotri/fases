@@ -4,6 +4,10 @@
 #include <string>
 #include <cstdlib>
 
+__host__ __device__ size_t flat(int i, int j, int Nx){
+    return (j * Nx) + i;
+}
+
 static void skip_to_data(std::ifstream& in) {
     // Skip whitespace, blank lines, and full comment lines starting with '#'
     while (true) {
