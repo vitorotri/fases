@@ -67,8 +67,11 @@ try:
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
         from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavToolbar
     _HAS_MPL = True
-except Exception:
+    _MPL_ERR = None
+except Exception as _e:
     _HAS_MPL = False
+    _MPL_ERR = f"{type(_e).__name__}: {_e}"         # shown in the Results window instead of a blank view
+    print(f"[gui] !! matplotlib Qt backend unavailable, plots disabled: {_MPL_ERR}", flush=True)
 
 # ─────────────────────────────────────────────────────────────
 #  Palette
@@ -6753,6 +6756,7 @@ class ResultsView(QWidget):
     metricChanged = Signal()
     addSimRequested = Signal(str)      # path to another project's params.json (Summary compare)
     clearSimRequested = Signal()
+    exportWavRequested = Signal()      # IR + Spectrum: write the shown broadband IRs as .wav
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -6777,6 +6781,10 @@ class ResultsView(QWidget):
         self._clear_sim_btn = QPushButton("Clear compared"); self._clear_sim_btn.clicked.connect(self.clearSimRequested.emit)
         self._add_sim_btn.hide(); self._clear_sim_btn.hide()     # only shown in Summary view
         top.addWidget(self._add_sim_btn); top.addWidget(self._clear_sim_btn)
+        self._wav_btn = QPushButton("Export WAV…")             # only shown in IR + Spectrum view
+        self._wav_btn.setToolTip("Save the shown receivers' broadband IRs as 32-bit float .wav (values in Pa)")
+        self._wav_btn.clicked.connect(self.exportWavRequested.emit)
+        top.addWidget(self._wav_btn)
         lay.addLayout(top)
         self._label = QLabel("Select receiver(s) in the Receivers tab or the scene.")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -6843,6 +6851,7 @@ class ResultsView(QWidget):
     def _on_metric_changed(self, *_):
         summary = self.current_metric() == "Summary (avg)"
         self._add_sim_btn.setVisible(summary); self._clear_sim_btn.setVisible(summary)
+        self._wav_btn.setVisible(self.current_metric() == "IR + Spectrum")
         self._frac.setVisible(self.current_metric() not in ("IR + Spectrum", "h² normalized (dB)", "Summary (avg)"))
         self.metricChanged.emit()
 
@@ -6887,6 +6896,8 @@ class ResultsView(QWidget):
         box to zoom, pan, Home/Back/Forward, save PNG/SVG/PDF, cursor coordinates). Replaces any previous
         canvas; a fresh canvas + toolbar per figure keeps the toolbar's view history tied to that figure."""
         if not _HAS_MPL:
+            self._show_image_mode(); self._pix = None
+            self._label.setText(f"Plots unavailable: matplotlib's Qt backend did not load.\n{_MPL_ERR}")
             return
         for w in (self._toolbar, self._canvas):
             if w is not None:
@@ -7230,6 +7241,7 @@ class MainWindow(QMainWindow):
         self._results.metricChanged.connect(lambda: self._apply_results_selection(mirror_table=False))
         self._results.addSimRequested.connect(self._add_compare_sim)
         self._results.clearSimRequested.connect(self._clear_compare_sims)
+        self._results.exportWavRequested.connect(self._export_ir_wav)
         self._compare = []                         # [(label, params_dict)] extra sims in the Summary view
         self._view_mode = "sim"
         self._panel_locked = False
@@ -8385,6 +8397,39 @@ class MainWindow(QMainWindow):
         if vals.size == 0:
             return None
         return float(10 * np.log10(np.mean(10 ** (vals / 10.0)))) if param in ("C50", "C80") else float(vals.mean())
+
+    def _export_ir_wav(self):
+        """IR + Spectrum: write the broadband IRs of the receivers shown (selection, else the current row) as
+        32-bit float .wav at 44.1 kHz, one file per receiver and source. Samples are the IR in Pa, unscaled
+        (float wav keeps values > 1), so levels stay absolute and comparable between files."""
+        import glob, re
+        if not self._proj_root:
+            self._sb.showMessage("Open a project folder first."); return
+        recs = sorted(r for r in self._results_sel if r >= 0) or (
+            [self._current_receiver_row()] if self._current_receiver_row() >= 0 else [])
+        out = os.path.join(self._proj_root, "output")
+        files = [(rec, int(m.group(1)), f) for rec in recs
+                 for f in sorted(glob.glob(os.path.join(out, f"IR_broad_{rec}_*.npy")))
+                 for m in [re.search(r"IR_broad_\d+_(\d+)\.npy$", f)] if m]
+        if not files:
+            self._sb.showMessage("No broadband IRs for the shown receiver(s): run a simulation, open Results."); return
+        try:
+            import soundfile as sf
+        except ImportError:
+            self._sb.showMessage("soundfile is not installed (pip install soundfile)."); return
+        from PySide6.QtWidgets import QFileDialog
+        d = QFileDialog.getExistingDirectory(self, "Export IRs as WAV — pick a folder", out)
+        if not d:
+            return
+        rn, sn = self._rec_tbl.get_names(), self._src_tbl.get_names()
+        def _nm(names, i, kind):                       # table name, made file-safe; else rec3 / src0
+            n = names[i] if 0 <= i < len(names) and names[i] else f"{kind}{i}"
+            return re.sub(r"[^\w.-]+", "_", str(n)).strip("_") or f"{kind}{i}"
+        for rec, src, f in files:
+            ir = np.asarray(np.load(f), np.float32)
+            sf.write(os.path.join(d, f"IR_{_nm(rn, rec, 'rec')}_{_nm(sn, src, 'src')}.wav"), ir, 44100,
+                     subtype="FLOAT")
+        self._sb.showMessage(f"Exported {len(files)} IR(s) as WAV to {d}")
 
     def _add_compare_sim(self, path):
         import json
