@@ -100,7 +100,14 @@ def params_for(ir, fractions=FRACTIONS):
     # plain Schroeder integral (no noise-floor detection): simulated IRs decay to ~0, they have no
     # noise plateau, so the Chu/Lundeby truncation methods fail ("Low SNR"). Schroeder is correct here.
     edc = ra.edc.schroeder_integration(bands)
-    rt = ra.reverberation_time_linear_regression
+    # normalise each band's EDC to 0 dB at t = 0: pyrato >= 1.0 reads the regression interval (-5..-25 dB
+    # etc.) on the ABSOLUTE EDC level (0.x measured it from edc[0]); our IRs are in Pa, so an unnormalised
+    # EDC put the interval anywhere on the decay -> wrong or missing T20/T30/EDT, depending on level.
+    e0 = edc.time[..., :1]
+    edc = pf.TimeData(np.divide(edc.time, e0, out=np.full_like(edc.time, np.nan), where=e0 > 0), edc.times)
+    rt = getattr(ra, "reverberation_time_linear_regression", None)   # pyrato 0.x: top level
+    if rt is None:                                                    # pyrato >= 1.0 (needs Python 3.11):
+        from pyrato.parameters import reverberation_time_linear_regression as rt   # moved, same signature
     C50, C80, D50 = [], [], []
     for i in range(len(centres)):
         c50, c80, d50 = _clarity(bt[i]) if i < bt.shape[0] else (None, None, None)

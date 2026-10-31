@@ -7826,10 +7826,10 @@ class MainWindow(QMainWindow):
         newest_in = max(os.path.getmtime(f) for f in ins + [f for f in extra if os.path.isfile(f)])
         return min(os.path.getmtime(f) for f in outs) >= newest_in
 
-    def _params_fresh(self, out):
-        """params.json newer than every IR_broad_*.npy and acouparams.py -> no need to rerun it."""
+    def _params_fresh(self, out, fname="params.json"):
+        """params.json (or params3.json) newer than every IR_broad_*.npy and acouparams.py -> no need to rerun it."""
         import glob
-        pj = os.path.join(out, "params.json")
+        pj = os.path.join(out, fname)
         if not os.path.isfile(pj):
             return False
         deps = glob.glob(os.path.join(out, "IR_broad_*.npy"))
@@ -8298,7 +8298,12 @@ class MainWindow(QMainWindow):
         out = os.path.join(self._proj_root, "output")
         frac = self._results.bands_fraction()
         pj = os.path.join(out, "params3.json" if frac == 3 else "params.json")
-        if not os.path.isfile(pj):
+        import glob
+        if not glob.glob(os.path.join(out, "IR_broad_*.npy")):   # nothing to compute from (acouparams would
+            self._results._show_image_mode()                      # write nothing -> rerun forever)
+            self._results._label.setPixmap(QPixmap())
+            self._results._label.setText("No broadband IRs yet: run a simulation, then open Results."); return
+        if not self._params_fresh(out, os.path.basename(pj)):   # missing, or older than the IRs / acouparams.py
             self._results._show_image_mode()
             self._results._label.setPixmap(QPixmap())
             self._results._label.setText(f"Computing 1/{frac}-octave parameters… (acouparams.py)")
