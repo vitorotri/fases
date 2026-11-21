@@ -1339,15 +1339,16 @@ int main(int argc, char *argv[]){
 			
 		print_progress_nobar(n, Nt); // gui.py loads progress by querrying the output of this function!
 		
-		// Copy result back to host for creating animation
-		cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
-
 		// write animation slices
 		if (n % anim_step == 0){
-				
+
+			// Copy result back to host for creating animation: full fields only when a frame is written
+			// (was: every step). The receivers below read their cells straight from the device.
+			cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
+			cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
+			cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
+			cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
+
 			// Unit energy-flow direction: Ihat = sign(p) * vel / |vel|  (eps-guarded).
 			const float veps = 1e-20f;
 
@@ -1411,11 +1412,17 @@ int main(int argc, char *argv[]){
 		// i_recV.size() should be the same as j_recV.size() and k_recV.size()
 		for (int ct = 0; ct < i_recV.size(); ct++){
 			size_t ridx = flat3(i_recV[ct], j_recV[ct], k_recV[ct], Nx, Ny);
-			files_rec[ct].write(reinterpret_cast<const char*>(&p0[ridx]), sizeof(float));
+			// 4 one-float copies per receiver per step; with hundreds of receivers (grids) a gather kernel pays off
+			float pr;
+			cudaMemcpy(&pr, d_p0 + ridx, sizeof(float), cudaMemcpyDeviceToHost);
+			files_rec[ct].write(reinterpret_cast<const char*>(&pr), sizeof(float));
 			// velocity triplet at the receiver cell (same index convention as the intensity slices):
 			// vx,vy,vz interleaved -> the rotatable v field for binaural DirAC in Python
 			if (!ga_only){
-				const float vel3[3] = { u0[ridx], v0[ridx], w0[ridx] };
+				float vel3[3];
+				cudaMemcpy(&vel3[0], d_u0 + ridx, sizeof(float), cudaMemcpyDeviceToHost);
+				cudaMemcpy(&vel3[1], d_v0 + ridx, sizeof(float), cudaMemcpyDeviceToHost);
+				cudaMemcpy(&vel3[2], d_w0 + ridx, sizeof(float), cudaMemcpyDeviceToHost);
 				files_vel[ct].write(reinterpret_cast<const char*>(vel3), 3*sizeof(float));
 			}
 		}
