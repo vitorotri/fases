@@ -447,8 +447,6 @@ int main(int argc, char *argv[]){
 	
 	// ------------------------------------- atmospheric values ------------------------------------------------
 	
-	// should to to config later
-	
 	float R_spec = 287.05; // specific gas constant for air [J] [kg]^-1 [K]^-1
 	float gamma = 1.4; // specific heat ratio for air
 	float alti = (conf_arr.size() > 13) ? conf_arr[13] : 0.0f; // altitude [m]; 0 if absent (older configs)
@@ -507,14 +505,14 @@ int main(int argc, char *argv[]){
 	if (estimate_only){
 		printf("\n[OK] estimate: V = %.3f m^3, f_Schroeder = %.2f Hz\n", V, f_Schroeder);
 		// Pre-flight MEMORY estimate for the GUI: same accounting as the fail-fast block
-		// below (~36 B/voxel host, ~52 B/voxel device; thresholds 0.7 host / 0.9 device).
+		// below (~4 B/voxel host, ~52 B/voxel device; thresholds 0.7 host / 0.9 device).
 		// Emitted as one parseable line so the GUI can warn/refuse BEFORE a real run.
 		{
 			size_t Nvox = (size_t)Nx * (size_t)Ny * (size_t)Nz;
 			unsigned long long avail = available_ram_bytes();
 			size_t gpu_free = 0, gpu_total = 0;
 			cudaMemGetInfo(&gpu_free, &gpu_total);
-			double need_host = 36.0 * (double)Nvox, need_dev = 52.0 * (double)Nvox;
+			double need_host = 4.0 * (double)Nvox, need_dev = 52.0 * (double)Nvox;
 			double over = 0.0;
 			if (avail > 0     && need_host > 0.7 * (double)avail)    over = std::max(over, need_host / (0.7 * (double)avail));
 			if (gpu_total > 0 && need_dev  > 0.9 * (double)gpu_free) over = std::max(over, need_dev  / (0.9 * (double)gpu_free));
@@ -538,14 +536,14 @@ int main(int argc, char *argv[]){
     
     size_t N = Nx * Ny * Nz; // number of grid cells
 
-    // Fail fast before the big allocations: the solver still needs ~36 B/voxel host
-    // (bmap + 8 field arrays; S/oid already resident) and ~52 B/voxel device
+    // Fail fast before the big allocations: the solver still needs ~4 B/voxel host
+    // (bmap; the host fields hold only the 3 animation planes; S/oid already resident) and ~52 B/voxel device
     // (bmap + 12 field arrays). Swapping past this point is what freezes the machine.
     {
         unsigned long long avail = available_ram_bytes();
         size_t gpu_free = 0, gpu_total = 0;
         cudaMemGetInfo(&gpu_free, &gpu_total);
-        double need_host = 36.0 * (double)N, need_dev = 52.0 * (double)N;
+        double need_host = 4.0 * (double)N, need_dev = 52.0 * (double)N;
         double over = 0.0;
         if (avail > 0     && need_host > 0.7 * (double)avail)    over = std::max(over, need_host / (0.7 * (double)avail));
         if (gpu_total > 0 && need_dev  > 0.9 * (double)gpu_free) over = std::max(over, need_dev  / (0.9 * (double)gpu_free));
@@ -714,6 +712,7 @@ int main(int argc, char *argv[]){
     // ------------------------------- Allocate pressures and velocities --------------------------------------
 
     // Allocate main host memory arrays and initilize to 0.0f
+    // (budget already verified by the upfront check after N was computed)
     // Host side only holds the three animation planes back to back (YZ at i0 | XZ at j0 | XY at k0), not the
     // whole grid: the time loop copies just those planes from the device on animation frames.
     const size_t N_planes = (size_t)Ny*Nz + (size_t)Nx*Nz + (size_t)Nx*Ny;
@@ -1132,23 +1131,8 @@ int main(int argc, char *argv[]){
 	dim3 TP(32,4,4); // row-major order, 32*4*4 = 512 threads/block (favoring memory coalescing)
 	dim3 BP((Nx + TP.x - 1)/TP.x, (Ny + TP.y - 1)/TP.y, (Nz + TP.z - 1)/TP.z);
 
-	// Copy initial data to device
-    if (cudaMemcpy(d_p0, p0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-     || cudaMemcpy(d_u0, u0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-     || cudaMemcpy(d_v0, v0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-     || cudaMemcpy(d_w0, w0, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
-    		printf("[!] CUDA error allocating device memory\n");
-    		return -1;
-    }
-    /*
-    if (cudaMemcpy(d_p1, p1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_u1, u1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_v1, v1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess
-    	|| cudaMemcpy(d_w1, w1, N*sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess){
-    		printf("[!] CUDA error allocating device memory\n");
-    	return -1;
-    }
-	*/
+	// Initial data: d_p0/u0/v0/w0 are already zeroed by cudaMemset at allocation (quiescent start). The host
+	// p0..w0 now hold only the 3 animation planes, so they must NOT be copied over the full device fields.
 	
 	// -------------------------------- Memory assessment for animations --------------------------------------
 	
@@ -1210,15 +1194,12 @@ int main(int argc, char *argv[]){
 	
 	int i0 = (int)(conf_arr[18] / h) + 3;
 	size_t stride_X = (size_t)Ny * (size_t)Nz;
-	std::vector<float> p_X(stride_X); // reuse each frame
 	
 	int j0 = (int)(conf_arr[19] / h) + 3;
 	size_t stride_Y = (size_t)Nx * (size_t)Nz;
-	std::vector<float> p_Y(stride_Y); // reuse each frame
 	
 	int k0 = (int)(conf_arr[20] / h) + 3;
 	size_t stride_Z = (size_t)Nx * (size_t)Ny;
-	std::vector<float> p_Z(stride_Z); // reuse each frame
 
 	// Acoustic intensity (Poynting) I = p*u, in-plane components per slice, for quiver overlay.
 	// YZ slice: (Iy,Iz)=(p*v,p*w);  XZ slice: (Ix,Iz)=(p*u,p*w);  XY slice: (Ix,Iy)=(p*u,p*v).
@@ -1340,18 +1321,18 @@ int main(int argc, char *argv[]){
 		std::swap(psi_2_old, psi_2);
 			
 		print_progress_nobar(n, Nt); // gui.py loads progress by querrying the output of this function!
-				
+		
 		// Only the three slice planes, into [YZ | XZ | XY] (each in the dst order of its loop below).
 		// the YZ plane is a 4-byte-wide strided copy (one float per row); if it ever shows in the
 		// frame time, gather it with a small kernel instead.
 		auto copy_planes = [&](float *hst, const float *dev){
 			cudaMemcpy2D(hst, sizeof(float), dev + i0, (size_t)Nx*sizeof(float),
-				             sizeof(float), stride_X, cudaMemcpyDeviceToHost);                     // x = i0
+			             sizeof(float), stride_X, cudaMemcpyDeviceToHost);                        // x = i0
 			cudaMemcpy2D(hst + stride_X, (size_t)Nx*sizeof(float), dev + (size_t)Nx*j0,
-				             (size_t)Nx*Ny*sizeof(float), (size_t)Nx*sizeof(float), Nz,
-				             cudaMemcpyDeviceToHost);                                              // y = j0
+			             (size_t)Nx*Ny*sizeof(float), (size_t)Nx*sizeof(float), Nz,
+			             cudaMemcpyDeviceToHost);                                                 // y = j0
 			cudaMemcpy(hst + stride_X + stride_Y, dev + (size_t)Nx*Ny*k0, stride_Z*sizeof(float),
-				           cudaMemcpyDeviceToHost);                                                // z = k0
+			           cudaMemcpyDeviceToHost);                                                   // z = k0
 		};
 		
 		// write animation slices
@@ -1368,14 +1349,13 @@ int main(int argc, char *argv[]){
   				for (int j = 0; j < Ny; ++j){
     				size_t dst = (size_t)j + (size_t)Ny * (size_t)k;
     				size_t src = dst;                         // YZ plane block (copied above)
-    				p_X[dst] = p0[src];   // pressure background
     				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
     				Iy_X[dst] = v0[src] * inv;
     				Iz_X[dst] = w0[src] * inv;
   				}
 			}
-			fwrite(p_X.data(),  sizeof(float), (size_t)Ny*(size_t)Nz, file_pX);
+			fwrite(p0, sizeof(float), stride_X, file_pX);
 			fwrite(Iy_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_IyX);
 			fwrite(Iz_X.data(), sizeof(float), (size_t)Ny*(size_t)Nz, file_IzX);
 
@@ -1385,14 +1365,13 @@ int main(int argc, char *argv[]){
   				for (int i = 0; i < Nx; ++i){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;
     				size_t src = stride_X + dst;              // XZ plane block
-    				p_Y[dst] = p0[src];
     				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
     				Ix_Y[dst] = u0[src] * inv;
     				Iz_Y[dst] = w0[src] * inv;
   				}
 			}
-			fwrite(p_Y.data(),  sizeof(float), (size_t)Nx*(size_t)Nz, file_pY);
+			fwrite(p0 + stride_X, sizeof(float), stride_Y, file_pY);
 			fwrite(Ix_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_IxY);
 			fwrite(Iz_Y.data(), sizeof(float), (size_t)Nx*(size_t)Nz, file_IzY);
 
@@ -1402,14 +1381,13 @@ int main(int argc, char *argv[]){
   				for (int i = 0; i < Nx; ++i){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)j;
     				size_t src = stride_X + stride_Y + dst;   // XY plane block
-    				p_Z[dst] = p0[src];
     				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
     				Ix_Z[dst] = u0[src] * inv;
     				Iy_Z[dst] = v0[src] * inv;
   				}
 			}
-			fwrite(p_Z.data(),  sizeof(float), (size_t)Nx*(size_t)Ny, file_pZ);
+			fwrite(p0 + stride_X+stride_Y, sizeof(float), stride_Z, file_pZ);
 			fwrite(Ix_Z.data(), sizeof(float), (size_t)Nx*(size_t)Ny, file_IxZ);
 			fwrite(Iy_Z.data(), sizeof(float), (size_t)Nx*(size_t)Ny, file_IyZ);
     			
