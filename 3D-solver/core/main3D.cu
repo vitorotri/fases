@@ -1151,22 +1151,20 @@ int main(int argc, char *argv[]){
 	
 	// ---------------------------- animation frame sampling ----------------------------------
 	
-	// User picks fps (real-time playback); frames capped so total anim memory stays under a
-	// fraction of the machine's ACTUAL RAM (queried, not hardcoded). RAM cap wins over fps.
+	// User picks the number of frames to store for the whole run (config line 22); capped so total anim
+	// memory stays under a fraction of the machine's ACTUAL RAM (queried, not hardcoded). RAM cap wins.
+	// Playback speed is a GUI-only setting (frames per wall-clock second), independent of this.
 	double ram_total = (double)sysconf(_SC_PHYS_PAGES) * (double)sysconf(_SC_PAGE_SIZE); // bytes
 	const double RAM_FRACTION = 0.85;                 // <<< EDIT: max share of RAM for the animation
 	double ram_cap = RAM_FRACTION * ram_total;
 
-	float fps = (conf_arr.size() > 21) ? (float)conf_arr[21] : 24.0f;   // config line 22 (after slices)
-	if (fps < 1.0f) fps = 1.0f;
 
 	// bytes actually saved per frame = the SLICES (not the full 3-D field): pressure + 2
 	// intensity + 2 velocity components, over the three slice planes.
 	size_t per_frame = ((size_t)Ny*Nz + (size_t)Nx*Nz + (size_t)Nx*Ny) * 5 * sizeof(float);
-	double t_real        = (double)Nt * dt;                    // simulated duration [s]
-	// fps sets the frame density (frames per simulated second) with a sane minimum for a
-	// smooth clip; then capped by RAM and by Nt.
-	size_t frames_wanted = (size_t)std::ceil((double)fps * t_real);
+	// frames to store over the whole run (config line 22), at least 60 for a usable clip; then capped by
+	// RAM and by Nt. (Older configs held an fps there, e.g. 24 -> 60 frames.)
+	size_t frames_wanted = (conf_arr.size() > 21 && conf_arr[21] > 0) ? (size_t)conf_arr[21] : 300;
 	if (frames_wanted < 60) frames_wanted = 60;
 
 	if ((double)per_frame > ram_cap) {                         // one frame already too big
@@ -1175,7 +1173,7 @@ int main(int argc, char *argv[]){
 		return -1;
 	}
 	size_t max_frames = (size_t)(ram_cap / (double)per_frame);
-	size_t frames     = std::min(frames_wanted, max_frames);   // RAM ceiling overrides fps
+	size_t frames     = std::min(frames_wanted, max_frames);   // RAM ceiling overrides the request
 	if (frames > (size_t)Nt) frames = (size_t)Nt;
 
 	size_t anim_step = Nt / frames;
@@ -1183,8 +1181,8 @@ int main(int argc, char *argv[]){
 	frames = Nt / anim_step;                                    // actual frames after integer floor
 	size_t anim_s = frames * per_frame;
 
-	printf("\n[OK] fps=%.1f  anim_step=%zu  frames=%zu  anim mem=%.2f GB (cap %.2f / %.2f GB)\n\n",
-	       fps, anim_step, frames, anim_s/1e9, ram_cap/1e9, ram_total/1e9);
+	printf("\n[OK] frames wanted=%zu  anim_step=%zu  frames=%zu  anim mem=%.2f GB (cap %.2f / %.2f GB)\n\n",
+	       frames_wanted, anim_step, frames, anim_s/1e9, ram_cap/1e9, ram_total/1e9);
 	
 	// Can handle much more memory if save animation in chuncks and assembled together:
 	// e.g., the last sound pressure field is the initial field for the next instant in time.

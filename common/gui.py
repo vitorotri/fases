@@ -225,8 +225,8 @@ OCTAVE_BANDS = [63, 125, 250, 500, 1000, 2000, 4000, 8000]
 # ─────────────────────────────────────────────────────────────
 # Paths are RELATIVE TO gui.py, so the repo and an installed copy of the same tree
 # (fases/common/gui.py, fases/3D-solver/build/fases3D, fases/LICENSE.md) need no editing.
-# SOLVER_BINARY is the default of the Run tab's hidden "Binary:" field; a project's manifest
-# or the last browsed binary only replaces it if that file actually exists.
+# SOLVER_BINARY is the solver this copy always runs: neither a project's manifest nor an old remembered
+# path replaces it (they made the installed GUI and a dev checkout run each other's fases3D).
 _GUI_DIR = os.path.dirname(os.path.abspath(__file__))
 _EXE = ".exe" if os.name == "nt" else ""
 
@@ -7926,6 +7926,12 @@ class MainWindow(QMainWindow):
     def _on_prange(self, _=None):
         self._gl.set_pressure_range(self._pmin.value(), self._pmax.value())
 
+    def _on_play_fps(self, v):
+        """Playback speed changed: apply it at once if the animation is playing (no rerun needed)."""
+        t = getattr(self, "_anim_timer", None)
+        if t is not None and t.isActive():
+            t.setInterval(max(1, int(1000 / v)))
+
     def _toggle_animation(self):
         t = getattr(self, "_anim_timer", None)
         if t is not None and t.isActive():          # playing -> pause IN PLACE (no reset)
@@ -9443,12 +9449,10 @@ class MainWindow(QMainWindow):
         w = QWidget(); lay = QVBoxLayout(w)
         lay.setContentsMargins(8,18,8,8); lay.setSpacing(8)   # extra top margin off the tab bar
 
-        # Binary path is kept (hidden field) so the launch command still works;
-        # default to SOLVER_BINARY (edit at the top of the file) or last browsed.
-        _last_bin = QSettings("phases", "gui").value("last_binary", "")
-        if not (_last_bin and os.path.isfile(_last_bin)):
-            _last_bin = SOLVER_BINARY
-        self._bin_le = QLineEdit(_last_bin)
+        # Binary path is kept (hidden field) so the launch command still works. Always THIS copy's own
+        # solver (SOLVER_BINARY): a remembered path (old "last_binary" setting, shared by every copy) made
+        # the installed GUI and a dev checkout run each other's, possibly outdated, fases3D.
+        self._bin_le = QLineEdit(SOLVER_BINARY)
         self._bin_le.setVisible(False)        # path lives in SOLVER_BINARY now
 
         # ── Ray-Tracing: debug ray overlay (count + order + Trace/Clear) ──
@@ -9479,12 +9483,18 @@ class MainWindow(QMainWindow):
         up.addWidget(rt_box)
         up.addSpacing(14)                         # more air between the sub-sections
 
-        # ── Animation: fps + slice-plane positions (or pick in scene with Slice [L]) ──
+        # ── Animation: frames to store + playback speed + slice-plane positions (or Slice [L]) ──
         an_box = QGroupBox("Animation \U0001F39E\uFE0E"); an = QGridLayout(an_box)
         an.setHorizontalSpacing(6); an.setVerticalSpacing(12)   # roomier rows
+        self._frames = QSpinBox(); self._frames.setRange(60, 100000); self._frames.setValue(300)
+        self._frames.setToolTip("Frames the solver stores for the whole simulated span (config line 22).\n"
+                                "Changing it (or a slice plane) needs a full run; capped by RAM.")
         self._fps = QSpinBox(); self._fps.setRange(1, 240); self._fps.setValue(24)
-        frow = QHBoxLayout(); frow.setSpacing(6)      # keep the box snug to its label
-        frow.addWidget(QLabel("FPS")); frow.addWidget(self._fps); frow.addStretch(1)
+        self._fps.setToolTip("Playback speed in frames per second. GUI only, applies immediately.")
+        self._fps.valueChanged.connect(self._on_play_fps)
+        frow = QHBoxLayout(); frow.setSpacing(6)      # keep the boxes snug to their labels
+        frow.addWidget(QLabel("Frames")); frow.addWidget(self._frames); frow.addSpacing(12)
+        frow.addWidget(QLabel("Playback fps")); frow.addWidget(self._fps); frow.addStretch(1)
         an.addLayout(frow, 0, 0, 1, 7)
 
         an.addWidget(QLabel("Slice planes [m]"), 1, 0, 1, 7)
@@ -9948,14 +9958,9 @@ class MainWindow(QMainWindow):
         def resolve(rel):
             return rel if os.path.isabs(rel) else os.path.join(d, rel)
 
-        # binary: only adopt the manifest's path if it actually exists, so a
-        # stale relative entry (e.g. "build/fases3D") never clobbers the field.
-        if hasattr(self, "_bin_le"):
-            mb = man.get("binary", "")
-            if mb and os.path.isfile(mb):
-                self._bin_le.setText(mb)
-            # else: keep whatever is in the field (SOLVER_BINARY default or a
-            # valid last-browsed path) — do not overwrite with a bad path.
+        # binary: NOT taken from the manifest. A project saved by another copy (the installed one, an old
+        # checkout) recorded that copy's fases3D and made this GUI run it; each copy runs its own
+        # SOLVER_BINARY. The manifest's "binary" line is only a record of the solver last used.
 
         # config / sources / receivers (manifest path if given, else canonical)
         cfg = resolve(man.get("config", "config/config.txt"))
@@ -10031,7 +10036,7 @@ class MainWindow(QMainWindow):
         md = self._mark_dirty
         for sp in self._cfg.values():
             sp.valueChanged.connect(md)
-        for w in (self._fps, self._pmin, self._pmax, *self._slice_sb.values()):
+        for w in (self._frames, self._pmin, self._pmax, *self._slice_sb.values()):
             w.valueChanged.connect(md)
         for c in self._pml.values():
             c.toggled.connect(md)
@@ -10557,7 +10562,7 @@ class MainWindow(QMainWindow):
             f.write(ln(f"{float(s[0]):.6g}", "slice x0 [m] (animation)"))
             f.write(ln(f"{float(s[1]):.6g}", "slice y0 [m] (animation)"))
             f.write(ln(f"{float(s[2]):.6g}", "slice z0 [m] (animation)"))
-            f.write(ln(self._fps.value(), "animation fps (frames capped to RAM in main3D)"))
+            f.write(ln(self._frames.value(), "animation frames to store (capped to RAM in main3D)"))
             f.write(ln(f"{self._pmin.value():.6g}", "animation pressure min [Pa] (GUI only)"))
             f.write(ln(f"{self._pmax.value():.6g}", "animation pressure max [Pa] (GUI only)"))
 
@@ -10597,7 +10602,7 @@ class MainWindow(QMainWindow):
             self._gl.set_slices(vals[18], vals[19], vals[20])  # animation slice planes
             self._sync_slice_fields(vals[18], vals[19], vals[20])
         if len(vals) > 21:
-            self._fps.setValue(int(vals[21]))  # animation fps
+            self._frames.setValue(int(vals[21]))  # animation frames to store (old configs: fps -> min 60)
         if len(vals) > 23:
             self._pmin.setValue(float(vals[22]))   # animation pressure range
             self._pmax.setValue(float(vals[23]))
@@ -10803,15 +10808,6 @@ class MainWindow(QMainWindow):
                                self._rec_tbl.get_active())
         self._gl.clear_animation()   # source SPL/pos changed -> rebuild the particle sim on next play
 
-    def _browse_binary(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Locate solver binary")
-        if p:
-            QSettings("phases", "gui").setValue("last_binary", p)  # remember
-            if self._proj_root and p.startswith(self._proj_root):
-                p = os.path.relpath(p, self._proj_root)
-            self._bin_le.setText(p)
-
-    # ── GA-only (reuse wave-based) ──────────────────────────────
     def _wave_sig_path(self):
         return os.path.join(self._proj_root, "output", ".wave_sig") if self._proj_root else None
 
@@ -10840,7 +10836,7 @@ class MainWindow(QMainWindow):
                 return None
 
         cfg = norm(os.path.join(root, "config", "config.txt"),
-                   drop={12, 14, 18, 19, 20, 21})  # ism_order, nrays, slices, fps: not FVM inputs
+                   drop={12, 14, 22, 23})  # ism_order, nrays: GA only; 22-23 colour range: GUI only. Slices + frames ARE FVM outputs
         if cfg is None:
             return None
         comps = {
