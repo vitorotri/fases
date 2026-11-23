@@ -714,12 +714,14 @@ int main(int argc, char *argv[]){
     // ------------------------------- Allocate pressures and velocities --------------------------------------
 
     // Allocate main host memory arrays and initilize to 0.0f
-    // (budget already verified by the upfront check after N was computed)
+    // Host side only holds the three animation planes back to back (YZ at i0 | XZ at j0 | XY at k0), not the
+    // whole grid: the time loop copies just those planes from the device on animation frames.
+    const size_t N_planes = (size_t)Ny*Nz + (size_t)Nx*Nz + (size_t)Nx*Ny;
     try {
-    	p0 = new float[N](); // pressure deviations from p0
-    	u0 = new float[N](); // x component of particle velocity 
-    	v0 = new float[N](); // y component of particle velocity 
-    	w0 = new float[N](); // z component of particle velocity
+    	p0 = new float[N_planes](); // pressure deviations from p0
+    	u0 = new float[N_planes](); // x component of particle velocity
+    	v0 = new float[N_planes](); // y component of particle velocity
+    	w0 = new float[N_planes](); // z component of particle velocity
     } catch (const std::bad_alloc&){
     	fprintf(stderr, "\n[!] Allocation for initial pressures and velocities failed, not enough memory\nTry a larger grid spacing or smaller cutoff frequency\n");
     	return -1;
@@ -1338,16 +1340,24 @@ int main(int argc, char *argv[]){
 		std::swap(psi_2_old, psi_2);
 			
 		print_progress_nobar(n, Nt); // gui.py loads progress by querrying the output of this function!
+				
+		// Only the three slice planes, into [YZ | XZ | XY] (each in the dst order of its loop below).
+		// the YZ plane is a 4-byte-wide strided copy (one float per row); if it ever shows in the
+		// frame time, gather it with a small kernel instead.
+		auto copy_planes = [&](float *hst, const float *dev){
+			cudaMemcpy2D(hst, sizeof(float), dev + i0, (size_t)Nx*sizeof(float),
+				             sizeof(float), stride_X, cudaMemcpyDeviceToHost);                     // x = i0
+			cudaMemcpy2D(hst + stride_X, (size_t)Nx*sizeof(float), dev + (size_t)Nx*j0,
+				             (size_t)Nx*Ny*sizeof(float), (size_t)Nx*sizeof(float), Nz,
+				             cudaMemcpyDeviceToHost);                                              // y = j0
+			cudaMemcpy(hst + stride_X + stride_Y, dev + (size_t)Nx*Ny*k0, stride_Z*sizeof(float),
+				           cudaMemcpyDeviceToHost);                                                // z = k0
+		};
 		
 		// write animation slices
 		if (n % anim_step == 0){
-
 			// Copy result back to host for creating animation: full fields only when a frame is written
-			// (was: every step). The receivers below read their cells straight from the device.
-			cudaMemcpy(p0, d_p0, N*sizeof(float), cudaMemcpyDeviceToHost);
-			cudaMemcpy(u0, d_u0, N*sizeof(float), cudaMemcpyDeviceToHost);
-			cudaMemcpy(v0, d_v0, N*sizeof(float), cudaMemcpyDeviceToHost);
-			cudaMemcpy(w0, d_w0, N*sizeof(float), cudaMemcpyDeviceToHost);
+			copy_planes(p0, d_p0); copy_planes(u0, d_u0); copy_planes(v0, d_v0); copy_planes(w0, d_w0);
 
 			// Unit energy-flow direction: Ihat = sign(p) * vel / |vel|  (eps-guarded).
 			const float veps = 1e-20f;
@@ -1357,7 +1367,7 @@ int main(int argc, char *argv[]){
 			for (int k = 0; k < Nz; ++k){
   				for (int j = 0; j < Ny; ++j){
     				size_t dst = (size_t)j + (size_t)Ny * (size_t)k;
-    				size_t src = (size_t)i0 + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k);
+    				size_t src = dst;                         // YZ plane block (copied above)
     				p_X[dst] = p0[src];   // pressure background
     				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
@@ -1374,7 +1384,7 @@ int main(int argc, char *argv[]){
 			for (int k = 0; k < Nz; ++k){
   				for (int i = 0; i < Nx; ++i){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)k;
-    				size_t src = (size_t)i + (size_t)Nx * ((size_t)j0 + (size_t)Ny * (size_t)k);
+    				size_t src = stride_X + dst;              // XZ plane block
     				p_Y[dst] = p0[src];
     				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
@@ -1391,7 +1401,7 @@ int main(int argc, char *argv[]){
 			for (int j = 0; j < Ny; ++j){
   				for (int i = 0; i < Nx; ++i){
     				size_t dst = (size_t)i + (size_t)Nx * (size_t)j;
-    				size_t src = (size_t)i + (size_t)Nx * ((size_t)j + (size_t)Ny * (size_t)k0);
+    				size_t src = stride_X + stride_Y + dst;   // XY plane block
     				p_Z[dst] = p0[src];
     				float sp = (p0[src] >= 0.f) ? 1.f : -1.f;
     				float inv = sp / (sqrtf(u0[src]*u0[src] + v0[src]*v0[src] + w0[src]*w0[src]) + veps);
