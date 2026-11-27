@@ -586,6 +586,31 @@ def mesh_inside_vote(pts, geom):
     return out
 
 
+def closed_object_tris(verts, tris, piece, pobj, weld_tol=1e-4):
+    """Triangles of the CLOSED object pieces (piece/pobj from mesh_outward_signs + the dollhouse's
+    "doesn't reach the scene's x/y limits" test): a piece counts only if every one of its edges is used
+    by exactly two of its own triangles. Props may sink into these. An open piece -- e.g. a floor
+    fragment cut off where a stage or column meets the floor on a 3-triangle edge -- never counts, so
+    the room boundary can't get holes from a misclassified piece."""
+    T = np.asarray(tris, np.int64)
+    pc = np.asarray(piece, np.int64)
+    sel = np.asarray(pobj, bool)[pc]
+    if not sel.any():
+        return T[:0]
+    _, wid = np.unique(np.round(np.asarray(verts, np.float64) / weld_tol).astype(np.int64),
+                       axis=0, return_inverse=True)
+    W = wid.reshape(-1)[T[sel]]                        # welded vertex ids of the object triangles
+    pp = pc[sel]
+    e = np.concatenate([W[:, [0, 1]], W[:, [1, 2]], W[:, [2, 0]]], 0)
+    e.sort(axis=1)
+    key = np.column_stack([np.tile(pp, 3), e])         # (piece, a, b): an edge within its own piece
+    _, inv, cnt = np.unique(key, axis=0, return_inverse=True, return_counts=True)
+    bad_edge = cnt[inv.reshape(-1)] != 2
+    open_piece = np.unique(np.tile(pp, 3)[bad_edge])
+    keep = ~np.isin(pp, open_piece)
+    return T[sel][keep]
+
+
 def mesh_outward_signs(verts, tris, weld_tol, inside, samples=3):
     """Which side of every triangle is AIR, from the mesh itself (no reliance on OBJ winding), for
     the dollhouse. Pure Python graph walk, runs once per mesh; `inside` is the point-in-air test.
@@ -1197,8 +1222,10 @@ class GLViewer(QOpenGLWidget):
     def _prop_layers(self):
         """Layer names owned by placed props (columns/boxes/…). The surface tools must never group/explode/
         cleanse these — they only apply to the domain enclosure. Props are baked into the OBJ under their
-        layer name, so excluding these names keeps prop geometry intact."""
-        return {p.layer for p in self._props}
+        layer name, so excluding these names keeps prop geometry intact. A prop given a ROOM layer's name
+        (to share its material) doesn't turn that room layer into a prop layer: names that exist in the
+        scene without props (_scene_layers, set on load) stay room layers for every tool and the room test."""
+        return {p.layer for p in self._props} - getattr(self, "_scene_layers", set())
 
     def arm_surface_rect(self):
         """Arm surface selection: LMB drag boxes surfaces (front-most only) into _surf_sel, LMB click
@@ -2745,11 +2772,12 @@ class GLViewer(QOpenGLWidget):
                 top = max(hits)
         return top
 
-    def _drop_prop(self, i, exclude=None):
-        """Settle prop i on the surface directly beneath its footprint (stage/floor/other prop; the
-        domain floor if none). A height the USER set (p.lift, see _remember_prop_height) wins: the base
-        keeps that height above the room floor beneath, wherever the prop is moved. Otherwise PROP_LIFT
-        types (table, diffuser) sit at their default height, everything else rests on the surface."""
+    def _drop_prop(self, i):
+        """Settle prop i on the room/object surface directly beneath its footprint (stage, floor; the
+        domain floor if none). Other props are ignored, so props may overlap and sink into each other.
+        A height the USER set (p.lift, see _remember_prop_height) wins: the base keeps that height above
+        the room floor beneath, wherever the prop is moved. Otherwise PROP_LIFT types (table, diffuser)
+        sit at their default height, everything else rests on the surface."""
         if not (0 <= i < len(self._props)):
             return
         p = self._props[i]
@@ -2757,9 +2785,7 @@ class GLViewer(QOpenGLWidget):
         amn, amx = v.min(0), v.max(0)
         user = getattr(p, "lift", None)
         lift = None if user is not None else (PROP_LIFT.get(p.source) if p.kind == "primitive" else None)
-        if user is not None or lift is not None:               # measured from the ROOM floor, never from
-            exclude = set(range(len(self._props)))             # another prop (no diffuser on a table)
-        top = self._surface_top(amn, amx, exclude if exclude is not None else {i})
+        top = self._surface_top(amn, amx, set(range(len(self._props))))   # never on another prop
         if user is not None:
             top += float(user); z_at = amn[2]
         elif lift is None:
@@ -2772,8 +2798,10 @@ class GLViewer(QOpenGLWidget):
 
     # ── props stay INSIDE the room ─────────────────────────────────────────────
     def _room_geom(self):
-        """Ray-parity geometry of the ROOM only (bounding box and prop layers left out: once props are
-        baked into the scene OBJ, a prop would otherwise sit 'inside a solid'). None = no scene -> no
+        """(air, solids) ray-parity geometries for keeping props inside the room. air = the whole room
+        (bounding box and prop layers left out: once props are baked into the scene OBJ, a prop would
+        otherwise sit 'inside a solid'); solids = the CLOSED objects inside the room (stage blocks,
+        columns, baked props), which props may sink into, or None. None overall = no scene -> no
         constraint. If leaving the prop layers out would leave nothing, all layers are used."""
         pl = self._prop_layers()
         key = (id(self._groups), len(self._verts), frozenset(pl))
@@ -2783,7 +2811,16 @@ class GLViewer(QOpenGLWidget):
         V = np.asarray(self._verts, np.float64)
         room = [g for g in self._groups if not g.get("is_bbox") and len(g["tris"])]
         pick = [g for g in room if g["name"] not in pl] or room
-        geom = mesh_ray_geom(V, np.concatenate([np.asarray(g["tris"]) for g in pick], 0)) if (pick and len(V)) else None
+        geom = None
+        if pick and len(V):
+            air = mesh_ray_geom(V, np.concatenate([np.asarray(g["tris"]) for g in pick], 0))
+            solids = None
+            d = self._dh_mesh_data()                       # dollhouse pieces: pobj = not reaching x/y limits
+            if "pc" in d:
+                all_t = np.concatenate([np.asarray(self._groups[i]["tris"]) for i in d["idx"]], 0)
+                st = closed_object_tris(V, all_t, d["pc"], d["pobj"])
+                solids = mesh_ray_geom(V, st) if len(st) else None
+            geom = (air, solids)
         self._room_geom_cache = (key, geom)
         return geom
 
@@ -2804,7 +2841,14 @@ class GLViewer(QOpenGLWidget):
             zs = (a[2],) if quick else (a[2], b[2])
             pts += [(x, y, z) for x in (a[0], b[0]) for y in (a[1], b[1]) for z in zs]
             pts.append(tuple((mn + mx) / 2.0))
-        return bool(len(pts) == 0 or mesh_inside_vote(np.asarray(pts), G).all())
+        if not pts:
+            return True
+        air, solids = G
+        P = np.asarray(pts)
+        ok = mesh_inside_vote(P, air)                      # in the room's air ...
+        if solids is not None and not ok.all():
+            ok |= mesh_inside_vote(P, solids)              # ... or sunk into a closed object in the room
+        return bool(ok.all())
 
     def _keep_inside(self, xf, settle):
         """After a move/rotate/scale: if the result leaves the room but the start was inside, go back
@@ -2822,7 +2866,7 @@ class GLViewer(QOpenGLWidget):
                 p.rot = [b["rot"][m] + f * (fr[m] - b["rot"][m]) for m in range(3)]
                 p.scale = [b["scale"][m] + f * (fs[m] - b["scale"][m]) for m in range(3)]
                 if settle:
-                    self._drop_prop(i, exclude=set(idxs))
+                    self._drop_prop(i)
             return self._props_inside(idxs)
         if not pose(0.0):
             pose(1.0)                                   # started outside: no constraint (can be fixed)
@@ -2887,9 +2931,8 @@ class GLViewer(QOpenGLWidget):
                 self._remember_prop_height(i)
             self._keep_inside(xf, settle=False)
         else:                                                      # settle each prop onto the surface below
-            ex = set(xf["idxs"])
             for i in xf["idxs"]:
-                self._drop_prop(i, exclude=ex)
+                self._drop_prop(i)
             self._keep_inside(xf, settle=True)
         self._xform = None
         self.propsChanged.emit(); self.update()
@@ -2935,9 +2978,8 @@ class GLViewer(QOpenGLWidget):
                 for i, b in zip(xf["idxs"], xf["bases"]):
                     bp = b["pos"]; self._props[i].pos = [bp[0] + dvec[0], bp[1] + dvec[1], bp[2] + dvec[2]]
                 if xf["axis"] != "Z" and not xf.get("z_moved"):   # ride the surface below LIVE; skip when
-                    ex = set(xf["idxs"])                          # Z-locked so you can set height by hand
-                    for i in xf["idxs"]:
-                        self._drop_prop(i, exclude=ex)
+                    for i in xf["idxs"]:                          # Z-locked so you can set height by hand
+                        self._drop_prop(i)
                 return (not constrain) or self._props_inside(xf["idxs"], quick=True)
             if not _place(delta):                    # would leave the room: slide along one free axis,
                 d0 = np.array(prev[0], float) - np.array(xf["bases"][0]["pos"], float)   # else stay put
@@ -7577,6 +7619,20 @@ class MainWindow(QMainWindow):
                     segs.add((a, b) if a < b else (b, a))
         sk.canvas.set_scene_shadow(tris, sorted(segs))
 
+    def _scene_layer_names(self, path, groups):
+        """Layer names of the scene WITHOUT baked props: the loaded groups, or for a *_props scene those of
+        the file it was baked from (cut at "_props", as _bake_props_into_scene does). Unknown -> empty set
+        (every prop layer then counts as a prop layer, the old behaviour)."""
+        b, e = os.path.splitext(path)
+        d, stem = os.path.split(b)
+        k = stem.rfind("_props")
+        if k < 0:
+            return {g["name"] for g in groups}
+        try:
+            return {g["name"] for g in parse_obj(os.path.join(d, stem[:k]) + e)[1]}
+        except Exception:
+            return set()
+
     def _bake_props_into_scene(self):
         """Sketch RMB 'Update props in scene OBJ' (nothing sketched, e.g. imported BRAS CR4): write
         <base>_props.obj = the loaded scene WITHOUT earlier baked props + the current props (grouped by
@@ -10267,6 +10323,7 @@ class MainWindow(QMainWindow):
         shown = ", ".join(names[:12]) + (f", … (+{len(names)-12} more)" if len(names) > 12 else "")
         print(f"[OBJ] Parsed {len(groups)} groups: [{shown}]")
         self._gl.load_mesh(verts, groups)
+        self._gl._scene_layers = self._scene_layer_names(path, groups)
         self._sketch_shadow()               # sketch window open -> its scene shadow follows the new mesh
         self._fill_ray_surfaces()           # Ray-Tracing 'Surface' list = this scene's layers
         self._populate_layers(groups)
@@ -11823,7 +11880,9 @@ class PropsWindow(QWidget):
         # existing layers into the combo (keep the current text so a half-typed new name survives)
         self._layer.blockSignals(True)
         cur = self._layer.currentText()
-        self._layer.clear(); self._layer.addItems(sorted({p.layer for p in self.gl._props}))
+        names = {p.layer for p in self.gl._props} | {n for n in getattr(self.gl, "_scene_layers", set())
+                                                     if not _is_bbox(n)}   # room layers: merge a prop into one
+        self._layer.clear(); self._layer.addItems(sorted(names))
         self._layer.setCurrentText(cur)
         self._layer.blockSignals(False)
 
